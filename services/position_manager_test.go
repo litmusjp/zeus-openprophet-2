@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
+	"prophet-trader/models"
 	"testing"
 	"time"
 )
@@ -59,6 +60,30 @@ func newTestPositionManager(t *testing.T, rec *exitOrderRecorder) (*PositionMana
 		t.Fatalf("NewLocalStorage() error = %v", err)
 	}
 	return NewPositionManager(rec, nil, storage), storage
+}
+
+func TestSaveManagedPositionUpdatesByPositionID(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "managed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	first := &models.DBManagedPosition{PositionID: "managed-1", Symbol: "AAPL", Status: "PENDING", RemainingQty: 10}
+	if err := storage.SaveManagedPosition(first); err != nil {
+		t.Fatal(err)
+	}
+	second := &models.DBManagedPosition{PositionID: "managed-1", Symbol: "AAPL", Status: "CLOSED", RemainingQty: 0}
+	if err := storage.SaveManagedPosition(second); err != nil {
+		t.Fatal(err)
+	}
+	positions, err := storage.GetAllManagedPositions("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(positions) != 1 || positions[0].Status != "CLOSED" || positions[0].RemainingQty != 0 {
+		t.Fatalf("positions = %#v, want one updated row", positions)
+	}
 }
 
 func TestManagedProtectiveLegsPersistIntentBeforeSubmit(t *testing.T) {
@@ -154,8 +179,8 @@ func TestCloseManagedPositionPersistsExitIntentOnAmbiguousSubmit(t *testing.T) {
 	if err := pm.CloseManagedPosition(context.Background(), pos.ID); err == nil {
 		t.Fatal("expected CloseManagedPosition to report an unconfirmed exit")
 	}
-	if pos.Status != "ACTIVE" {
-		t.Fatalf("position status = %q, want ACTIVE when the exit submit fails", pos.Status)
+	if pos.Status != "CLOSING" {
+		t.Fatalf("position status = %q, want CLOSING when the exit submit fails", pos.Status)
 	}
 	if rec.placed == nil || rec.placed.ClientOrderID == "" {
 		t.Fatalf("exit PlaceOrder should carry a ClientOrderID, got %#v", rec.placed)
@@ -169,6 +194,22 @@ func TestCloseManagedPositionPersistsExitIntentOnAmbiguousSubmit(t *testing.T) {
 	}
 }
 
+func TestCloseManagedPositionDoesNotRecloseCLOSINGPosition(t *testing.T) {
+	rec := &exitOrderRecorder{result: &interfaces.OrderResult{OrderID: "accepted-exit", Status: "accepted"}}
+	pm, storage := newTestPositionManager(t, rec)
+	defer storage.Close()
+	pos := &ManagedPosition{ID: "c3", Symbol: "AAPL", Side: "buy", Status: "ACTIVE", Quantity: 10, RemainingQty: 10}
+	pm.positions[pos.ID] = pos
+	if err := pm.CloseManagedPosition(context.Background(), pos.ID); err == nil {
+		t.Fatal("expected first close to remain unresolved")
+	}
+	if err := pm.CloseManagedPosition(context.Background(), pos.ID); err == nil {
+		t.Fatal("expected repeated close to be rejected while CLOSING")
+	}
+	if pos.Status != "CLOSING" {
+		t.Fatalf("position status = %q, want CLOSING", pos.Status)
+	}
+}
 func TestValidateRequestRejectsInvalidManagedRiskLevels(t *testing.T) {
 	entry, stop, target := 100.0, 90.0, 110.0
 	valid := &PlaceManagedPositionRequest{

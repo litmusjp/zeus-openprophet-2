@@ -10,6 +10,7 @@ import (
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,8 @@ type ManagedPosition struct {
 	Quantity          float64 `json:"quantity"`
 	EntryPrice        float64 `json:"entry_price"`
 	EntryOrderID      string  `json:"entry_order_id"`
+	ExitOrderID       string  `json:"exit_order_id,omitempty"`
+	ExitFilledQty     float64 `json:"exit_filled_qty,omitempty"`
 	EntryOrderType    string  `json:"entry_order_type"` // "market", "limit"
 	AllocationDollars float64 `json:"allocation_dollars"`
 
@@ -113,9 +116,10 @@ type PositionManager struct {
 	dataService    interfaces.DataService
 	storageService *database.LocalStorage
 
-	positions map[string]*ManagedPosition // position_id -> position
-	mu        sync.RWMutex
-	logger    *logrus.Logger
+	positions     map[string]*ManagedPosition // position_id -> position
+	closeInFlight map[string]bool
+	mu            sync.RWMutex
+	logger        *logrus.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -139,6 +143,7 @@ func NewPositionManager(
 		dataService:    dataService,
 		storageService: storageService,
 		positions:      make(map[string]*ManagedPosition),
+		closeInFlight:  make(map[string]bool),
 		logger:         logger,
 		ctx:            ctx,
 		cancel:         cancel,
@@ -326,32 +331,173 @@ func (pm *PositionManager) checkPositions(ctx context.Context) {
 		positions = append(positions, pos)
 	}
 	pm.mu.RUnlock()
-
 	for _, position := range positions {
-		if position.Status == "CLOSED" || position.Status == "STOPPED_OUT" {
+		if !pm.beginPositionOperation(position.ID) {
 			continue
 		}
+		pm.processPosition(ctx, position)
+		pm.endPositionOperation(position.ID)
+	}
+}
 
-		// Check if entry order filled
-		if position.Status == "PENDING" {
-			pm.checkEntryOrder(ctx, position)
-			continue
+func (pm *PositionManager) beginPositionOperation(positionID string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.closeInFlight[positionID] {
+		return false
+	}
+	pm.closeInFlight[positionID] = true
+	return true
+}
+
+func (pm *PositionManager) endPositionOperation(positionID string) {
+	pm.mu.Lock()
+	delete(pm.closeInFlight, positionID)
+	pm.mu.Unlock()
+}
+
+func (pm *PositionManager) processPosition(ctx context.Context, position *ManagedPosition) {
+	if position.Status == "CLOSED" || position.Status == "STOPPED_OUT" {
+		return
+	}
+	if position.Status == "CLOSING" {
+		pm.reconcileClosingPosition(ctx, position)
+		return
+	}
+	if position.Status == "PENDING" {
+		pm.checkEntryOrder(ctx, position)
+		return
+	}
+	if err := pm.updatePositionPrice(ctx, position); err != nil {
+		pm.logger.WithError(err).WithField("symbol", position.Symbol).Error("Failed to update position price")
+		return
+	}
+	if position.Status == "ACTIVE" {
+		pm.manageRiskOrders(ctx, position)
+	}
+	if position.TrailingStop {
+		pm.updateTrailingStop(ctx, position)
+	}
+}
+
+// reconcileClosingPosition resolves a close after an accepted or ambiguous submission.
+func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, position *ManagedPosition) {
+	if position.ExitOrderID == "" {
+		if position.EntryOrderID == "" {
+			return
 		}
-
-		// Update current price and P&L
-		if err := pm.updatePositionPrice(ctx, position); err != nil {
-			pm.logger.WithError(err).WithField("symbol", position.Symbol).Error("Failed to update position price")
-			continue
+		entry, err := pm.tradingService.GetOrder(ctx, position.EntryOrderID)
+		if err != nil || entry == nil {
+			return
 		}
-
-		// Check if we need to place/update risk orders
-		if position.Status == "ACTIVE" {
-			pm.manageRiskOrders(ctx, position)
+		status := strings.ToLower(entry.Status)
+		if status == "filled" || status == "partially_filled" {
+			position.Status = "ACTIVE"
+			position.RemainingQty = entry.FilledQty
+			if position.RemainingQty <= 0 {
+				position.RemainingQty = position.Quantity
+			}
+			position.StopLossOrderID, position.TakeProfitOrderID = "", ""
+			position.PartialExitOrders = nil
+			if err := pm.savePositionToDB(position); err == nil {
+				pm.placeRiskOrders(ctx, position)
+				_ = pm.savePositionToDB(position)
+			}
+		} else if status == "canceled" || status == "cancelled" || status == "rejected" || status == "expired" || status == "done_for_day" {
+			if entry.FilledQty > 0 {
+				position.Status = "ACTIVE"
+				position.RemainingQty = entry.FilledQty
+				position.StopLossOrderID, position.TakeProfitOrderID = "", ""
+				position.PartialExitOrders = nil
+				if err := pm.savePositionToDB(position); err == nil {
+					pm.placeRiskOrders(ctx, position)
+					_ = pm.savePositionToDB(position)
+				}
+			} else {
+				position.Status, position.RemainingQty = "CLOSED", 0
+				position.StopLossOrderID, position.TakeProfitOrderID = "", ""
+				position.PartialExitOrders = nil
+				now := time.Now()
+				position.ClosedAt = &now
+				_ = pm.savePositionToDB(position)
+			}
 		}
-
-		// Check trailing stop
-		if position.TrailingStop {
-			pm.updateTrailingStop(ctx, position)
+		return
+	}
+	var order *interfaces.Order
+	var err error
+	if strings.HasPrefix(position.ExitOrderID, "op-") {
+		order, err = pm.tradingService.GetOrderByClientOrderID(ctx, position.ExitOrderID)
+	} else {
+		order, err = pm.tradingService.GetOrder(ctx, position.ExitOrderID)
+	}
+	if err != nil || order == nil {
+		return
+	}
+	switch strings.ToLower(order.Status) {
+	case "filled":
+		position.ExitFilledQty = math.Max(position.ExitFilledQty, order.FilledQty)
+		position.RemainingQty = 0
+		position.Status = "CLOSED"
+		position.StopLossOrderID = ""
+		position.TakeProfitOrderID = ""
+		position.PartialExitOrders = nil
+		now := time.Now()
+		position.ClosedAt = &now
+		if err := pm.savePositionToDB(position); err != nil {
+			pm.logger.WithError(err).Error("Failed to persist reconciled close")
+		}
+	case "partially_filled":
+		newFilled := math.Max(0, order.FilledQty-position.ExitFilledQty)
+		position.ExitFilledQty += newFilled
+		position.RemainingQty = math.Max(0, position.RemainingQty-newFilled)
+		if position.RemainingQty == 0 {
+			position.Status = "CLOSED"
+			position.StopLossOrderID = ""
+			position.TakeProfitOrderID = ""
+			position.PartialExitOrders = nil
+			now := time.Now()
+			position.ClosedAt = &now
+			if err := pm.savePositionToDB(position); err != nil {
+				pm.logger.WithError(err).Error("Failed to persist completed partial close")
+			}
+		} else if err := pm.savePositionToDB(position); err != nil {
+			pm.logger.WithError(err).Error("Failed to persist partial close")
+		}
+		return
+	case "canceled", "cancelled", "rejected", "expired", "done_for_day":
+		newFilled := math.Max(0, order.FilledQty-position.ExitFilledQty)
+		position.ExitFilledQty += newFilled
+		position.RemainingQty = math.Max(0, position.RemainingQty-newFilled)
+		if position.RemainingQty == 0 {
+			position.Status = "CLOSED"
+			position.StopLossOrderID = ""
+			position.TakeProfitOrderID = ""
+			position.PartialExitOrders = nil
+			position.ExitOrderID = ""
+			now := time.Now()
+			position.ClosedAt = &now
+		} else {
+			position.Status = "ACTIVE"
+			if position.RemainingQty < position.Quantity {
+				position.Status = "PARTIAL"
+			}
+			position.ExitOrderID = ""
+			position.StopLossOrderID = ""
+			position.TakeProfitOrderID = ""
+			position.PartialExitOrders = nil
+			if err := pm.savePositionToDB(position); err == nil {
+				pm.placeRiskOrders(ctx, position)
+				if err := pm.savePositionToDB(position); err != nil {
+					pm.logger.WithError(err).Error("Failed to persist recreated protection")
+				}
+			} else {
+				pm.logger.WithError(err).Error("Failed to persist reopened position")
+			}
+			return
+		}
+		if err := pm.savePositionToDB(position); err != nil {
+			pm.logger.WithError(err).Error("Failed to persist reconciled close")
 		}
 	}
 }
@@ -359,27 +505,34 @@ func (pm *PositionManager) checkPositions(ctx context.Context) {
 // checkEntryOrder checks if entry order has filled
 func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *ManagedPosition) {
 	order, err := pm.tradingService.GetOrder(ctx, position.EntryOrderID)
-	if err != nil {
-		pm.logger.WithError(err).Error("Failed to get entry order")
+	if err != nil || order == nil {
 		return
 	}
-
-	if order.Status == "filled" {
-		position.Status = "ACTIVE"
-		position.EntryPrice = *order.FilledAvgPrice
-		position.UpdatedAt = time.Now()
-
-		pm.logger.WithFields(logrus.Fields{
-			"position_id": position.ID,
-			"symbol":      position.Symbol,
-			"fill_price":  position.EntryPrice,
-		}).Info("Entry order filled - position now active")
-
-		// Place risk management orders
-		pm.placeRiskOrders(ctx, position)
-
-		// Save to database
-		pm.savePositionToDB(position)
+	status := strings.ToLower(order.Status)
+	if status == "filled" || status == "partially_filled" || status == "canceled" || status == "cancelled" || status == "rejected" || status == "expired" || status == "done_for_day" {
+		filledQty := math.Max(0, math.Min(position.Quantity, order.FilledQty))
+		if status == "filled" && filledQty == 0 {
+			filledQty = position.Quantity
+		}
+		if filledQty > 0 {
+			position.Status = "ACTIVE"
+			position.RemainingQty = filledQty
+			if order.FilledAvgPrice != nil {
+				position.EntryPrice = *order.FilledAvgPrice
+			}
+			position.UpdatedAt = time.Now()
+			pm.placeRiskOrders(ctx, position)
+			if err := pm.savePositionToDB(position); err != nil {
+				pm.logger.WithError(err).Error("Failed to persist reconciled entry")
+			}
+		} else if status != "partially_filled" {
+			position.Status, position.RemainingQty = "CLOSED", 0
+			now := time.Now()
+			position.ClosedAt = &now
+			if err := pm.savePositionToDB(position); err != nil {
+				pm.logger.WithError(err).Error("Failed to persist canceled entry")
+			}
+		}
 	}
 }
 
@@ -518,7 +671,7 @@ func (pm *PositionManager) placePartialExitOrder(ctx context.Context, position *
 		exitSide = "buy"
 	}
 
-	partialQty := position.Quantity * (position.PartialExit.Percent / 100.0)
+	partialQty := math.Min(position.RemainingQty, position.Quantity*(position.PartialExit.Percent/100.0))
 
 	clientOrderID, err := newClientOrderID()
 	if err != nil {
@@ -586,8 +739,12 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 	// Check stop loss order status
 	if position.StopLossOrderID != "" {
 		order, err := pm.tradingService.GetOrder(ctx, position.StopLossOrderID)
-		if err == nil && order.Status == "filled" {
+		if err == nil && order != nil && order.Status == "filled" {
 			pm.cancelSiblingExitOrders(ctx, position, position.StopLossOrderID)
+			position.RemainingQty = 0
+			position.StopLossOrderID = ""
+			position.TakeProfitOrderID = ""
+			position.PartialExitOrders = nil
 			position.Status = "STOPPED_OUT"
 			now := time.Now()
 			position.ClosedAt = &now
@@ -600,8 +757,12 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 	// Check take profit order status
 	if position.TakeProfitOrderID != "" {
 		order, err := pm.tradingService.GetOrder(ctx, position.TakeProfitOrderID)
-		if err == nil && order.Status == "filled" {
+		if err == nil && order != nil && order.Status == "filled" {
 			pm.cancelSiblingExitOrders(ctx, position, position.TakeProfitOrderID)
+			position.RemainingQty = 0
+			position.StopLossOrderID = ""
+			position.TakeProfitOrderID = ""
+			position.PartialExitOrders = nil
 			position.Status = "CLOSED"
 			now := time.Now()
 			position.ClosedAt = &now
@@ -613,21 +774,40 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 
 	// Check partial exit orders
 	filledPartialQty := 0.0
+	filledPartialID := ""
 	for _, orderID := range position.PartialExitOrders {
 		order, err := pm.tradingService.GetOrder(ctx, orderID)
 		if err == nil && order.Status == "filled" {
 			filledPartialQty += math.Max(0, order.FilledQty)
+			filledPartialID = orderID
 		}
 	}
 	if filledPartialQty > 0 {
-		position.Status = "PARTIAL"
+		pm.cancelSiblingExitOrders(ctx, position, filledPartialID)
 		position.RemainingQty = math.Max(0, position.Quantity-filledPartialQty)
+		if position.RemainingQty == 0 {
+			position.Status = "CLOSED"
+			position.StopLossOrderID, position.TakeProfitOrderID = "", ""
+			position.PartialExitOrders = nil
+			now := time.Now()
+			position.ClosedAt = &now
+		} else {
+			position.Status = "PARTIAL"
+		}
 		pm.logger.WithFields(logrus.Fields{
 			"position_id":   position.ID,
 			"filled_qty":    filledPartialQty,
 			"remaining_qty": position.RemainingQty,
 		}).Info("Partial exit fills reconciled")
 		pm.savePositionToDB(position)
+		if position.RemainingQty > 0 {
+			position.StopLossOrderID, position.TakeProfitOrderID = "", ""
+			position.PartialExitOrders = nil
+			pm.placeRiskOrders(ctx, position)
+			if err := pm.savePositionToDB(position); err != nil {
+				pm.logger.WithError(err).Error("Failed to persist recreated partial protection")
+			}
+		}
 	}
 }
 
@@ -738,12 +918,33 @@ func (pm *PositionManager) ListManagedPositions(status string) []*ManagedPositio
 
 // CloseManagedPosition manually closes a managed position
 func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID string) error {
-	pm.mu.RLock()
+	pm.mu.Lock()
 	position, exists := pm.positions[positionID]
-	pm.mu.RUnlock()
-
 	if !exists {
+		pm.mu.Unlock()
 		return fmt.Errorf("position not found: %s", positionID)
+	}
+	if position.Status == "CLOSING" {
+		pm.mu.Unlock()
+		return fmt.Errorf("position close is already unresolved: %s", positionID)
+	}
+	if position.Status != "ACTIVE" && position.Status != "PARTIAL" && position.Status != "PENDING" {
+		pm.mu.Unlock()
+		return fmt.Errorf("position %s cannot be closed from status %q", positionID, position.Status)
+	}
+	if pm.closeInFlight[positionID] {
+		pm.mu.Unlock()
+		return fmt.Errorf("close already in progress for position: %s", positionID)
+	}
+	pm.closeInFlight[positionID] = true
+	pm.mu.Unlock()
+	defer func() { pm.mu.Lock(); delete(pm.closeInFlight, positionID); pm.mu.Unlock() }()
+
+	wasOpen := position.Status == "ACTIVE" || position.Status == "PARTIAL"
+	wasPending := position.Status == "PENDING"
+	position.Status = "CLOSING"
+	if err := pm.savePositionToDB(position); err != nil {
+		return fmt.Errorf("failed to persist closing state: %w", err)
 	}
 
 	// Cancel all open orders (ignore errors - orders may already be cancelled or market closed)
@@ -780,7 +981,7 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 	}
 
 	// Place market order to close remaining position (ONLY if position is ACTIVE/PARTIAL - i.e., entry was filled)
-	if position.Status == "ACTIVE" || position.Status == "PARTIAL" {
+	if wasOpen {
 		if position.RemainingQty > 0 {
 			exitSide := "sell"
 			if position.Side == "sell" {
@@ -803,7 +1004,10 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 				Status:        "pending",
 				SubmittedAt:   time.Now(),
 			}
-
+			position.ExitOrderID = clientOrderID
+			if err := pm.savePositionToDB(position); err != nil {
+				return fmt.Errorf("failed to persist exit identity: %w", err)
+			}
 			if err := pm.storageService.SaveOrder(order); err != nil {
 				pm.logger.WithError(err).Warn("Failed to persist market exit order intent before submit")
 			}
@@ -815,32 +1019,71 @@ func (pm *PositionManager) CloseManagedPosition(ctx context.Context, positionID 
 					pm.logger.WithError(saveErr).Warn("Failed to record market exit submission failure")
 				}
 				pm.logger.WithError(err).Error("Failed to place exit order (market may be closed)")
-				position.Status = "ACTIVE"
-				if position.RemainingQty < position.Quantity {
-					position.Status = "PARTIAL"
-				}
+				position.Status = "CLOSING"
 				pm.savePositionToDB(position)
 				return fmt.Errorf("failed to place market exit order: %w", err)
 			} else {
 				order.ID = result.OrderID
+				position.ExitOrderID = result.OrderID
 				order.Status = result.Status
+				if strings.ToLower(result.Status) == "filled" {
+					position.ExitFilledQty = position.RemainingQty
+					position.RemainingQty = 0
+					position.StopLossOrderID = ""
+					position.TakeProfitOrderID = ""
+					position.PartialExitOrders = nil
+				}
 				if err := pm.storageService.SaveOrder(order); err != nil {
 					pm.logger.WithError(err).Warn("Failed to save market exit order")
 				}
 				pm.logger.WithField("quantity", position.RemainingQty).Info("Placed market exit order")
+				if strings.ToLower(result.Status) != "filled" {
+					if saveErr := pm.savePositionToDB(position); saveErr != nil {
+						return saveErr
+					}
+					return fmt.Errorf("exit order accepted but not filled; position remains CLOSING")
+				}
 			}
 		}
-	} else if position.Status == "PENDING" {
-		// For pending positions, just log that we cancelled the entry order
+	} else if wasPending {
+		if position.EntryOrderID != "" {
+			entry, err := pm.tradingService.GetOrder(ctx, position.EntryOrderID)
+			if err != nil || entry == nil {
+				return fmt.Errorf("entry order status is unresolved; position remains CLOSING")
+			}
+			switch strings.ToLower(entry.Status) {
+			case "filled":
+				position.Status = "ACTIVE"
+				if entry.FilledQty > 0 {
+					position.RemainingQty = entry.FilledQty
+				}
+				position.ExitOrderID = ""
+				pm.placeRiskOrders(ctx, position)
+				if err := pm.savePositionToDB(position); err != nil {
+					return err
+				}
+				return fmt.Errorf("entry filled while close was pending; position remains ACTIVE")
+			case "canceled", "cancelled", "rejected", "expired", "done_for_day":
+				// Safe to close: the entry did not create exposure.
+			default:
+				return fmt.Errorf("entry order status %q is unresolved; position remains CLOSING", entry.Status)
+			}
+		}
 		pm.logger.WithField("position_id", position.ID).Info("Closed pending position (entry order was never filled)")
 	}
 
 	position.Status = "CLOSED"
+	position.RemainingQty = 0
+	position.StopLossOrderID, position.TakeProfitOrderID = "", ""
+	position.PartialExitOrders = nil
+	position.ExitOrderID = ""
 	now := time.Now()
 	position.ClosedAt = &now
 
 	// Save to database
-	pm.savePositionToDB(position)
+	if err := pm.savePositionToDB(position); err != nil {
+		return fmt.Errorf("failed to persist closed position: %w", err)
+	}
 
 	pm.logger.WithField("position_id", positionID).Info("Position manually closed")
 
@@ -1014,6 +1257,8 @@ func (pm *PositionManager) managedPositionToDB(pos *ManagedPosition) *models.DBM
 		Quantity:          pos.Quantity,
 		EntryPrice:        pos.EntryPrice,
 		EntryOrderID:      pos.EntryOrderID,
+		ExitOrderID:       pos.ExitOrderID,
+		ExitFilledQty:     pos.ExitFilledQty,
 		EntryOrderType:    pos.EntryOrderType,
 		AllocationDollars: pos.AllocationDollars,
 		StopLossPrice:     pos.StopLossPrice,
@@ -1067,6 +1312,8 @@ func (pm *PositionManager) dbToManagedPosition(dbPos *models.DBManagedPosition) 
 		Quantity:          dbPos.Quantity,
 		EntryPrice:        dbPos.EntryPrice,
 		EntryOrderID:      dbPos.EntryOrderID,
+		ExitOrderID:       dbPos.ExitOrderID,
+		ExitFilledQty:     dbPos.ExitFilledQty,
 		EntryOrderType:    dbPos.EntryOrderType,
 		AllocationDollars: dbPos.AllocationDollars,
 		StopLossPrice:     dbPos.StopLossPrice,

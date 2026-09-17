@@ -112,6 +112,8 @@ type DBManagedPosition struct {
 	Quantity          float64
 	EntryPrice        float64
 	EntryOrderID      string
+	ExitOrderID       string
+	ExitFilledQty     float64
 	EntryOrderType    string
 	AllocationDollars float64
 

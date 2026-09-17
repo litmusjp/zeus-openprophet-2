@@ -4,6 +4,23 @@
 
 export const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position'];
 
+export function isOptionSymbol(symbol = '') {
+  return /^[A-Z0-9.]{1,6}\d{6}[CP]\d{8}$/.test(String(symbol).toUpperCase());
+}
+
+export function estimateOrderValue(toolName, args = {}) {
+  if (toolName === 'close_managed_position') return 0;
+  const allocation = Number(args.allocation_dollars || 0);
+  if (toolName === 'place_managed_position' && allocation > 0 && !isOptionSymbol(args.symbol)) return allocation;
+  const price = Number(args.limit_price ?? args.entry_price ?? 0);
+  const quantity = Number(args.quantity ?? args.qty ?? 0);
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quantity) || quantity <= 0) {
+    throw new Error('A positive finite price and quantity are required to enforce the max order value.');
+  }
+  const multiplier = (toolName === 'place_options_order' || isOptionSymbol(args.symbol)) ? 100 : 1;
+  return price * quantity * multiplier;
+}
+
 // Throws an Error describing the violation if the call is not permitted; returns undefined if allowed.
 // `now` is injectable so the 0DTE (same-day expiry) rule is deterministic in tests.
 export function checkPermissions(toolName, args = {}, perms = {}, now = new Date()) {
@@ -47,9 +64,7 @@ export function checkPermissions(toolName, args = {}, perms = {}, now = new Date
   }
   // Max order value
   if (perms.maxOrderValue > 0) {
-    const orderValue = (args.limit_price || args.entry_price || 0) * (args.quantity || args.qty || 0);
-    const allocValue = args.allocation_dollars || 0;
-    const checkValue = allocValue || orderValue;
+    const checkValue = estimateOrderValue(toolName, args);
     if (checkValue > perms.maxOrderValue) {
       throw new Error(`Order value $${checkValue.toFixed(2)} exceeds max allowed $${perms.maxOrderValue}. Reduce size or change permissions.`);
     }

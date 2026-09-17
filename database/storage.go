@@ -392,7 +392,18 @@ func (s *LocalStorage) SaveSignal(symbol, signalType, strategyName, reason strin
 
 // SaveManagedPosition saves a managed position to the database
 func (s *LocalStorage) SaveManagedPosition(position *models.DBManagedPosition) error {
-	result := s.db.Save(position)
+	if position == nil || position.PositionID == "" {
+		return fmt.Errorf("managed position and position_id are required")
+	}
+	result := s.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "position_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"symbol", "side", "strategy", "quantity", "entry_price", "entry_order_id", "exit_order_id", "exit_filled_qty", "entry_order_type", "allocation_dollars",
+			"stop_loss_price", "stop_loss_percent", "stop_loss_order_id", "trailing_stop", "trailing_percent", "take_profit_price", "take_profit_percent", "take_profit_order_id",
+			"partial_exit_enabled", "partial_exit_percent", "partial_exit_target_percent", "partial_exit_target_price", "partial_exit_orders",
+			"status", "current_price", "unrealized_pl", "unrealized_plpc", "remaining_qty", "notes", "tags", "closed_at", "updated_at",
+		}),
+	}).Create(position)
 	if result.Error != nil {
 		return fmt.Errorf("failed to save managed position: %w", result.Error)
 	}

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import axios from 'axios';
+import { isTrustedLocalRequest } from './auth.js';
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { buildTradeLedger } from './trade-ledger.js';
@@ -91,15 +92,7 @@ const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS || (process.env.NODE_ENV ===
 const BASIC_AUTH_CONFIGURED = Boolean(BASIC_AUTH_USER && BASIC_AUTH_PASS);
 
 app.use((req, res, next) => {
-  // Allow internal requests from localhost/container services without auth
-  const remoteIp = req.ip || req.connection.remoteAddress || '';
-  if (
-    remoteIp === '127.0.0.1' ||
-    remoteIp === '::1' ||
-    remoteIp === '::ffff:127.0.0.1' ||
-    req.hostname === 'localhost' ||
-    req.hostname === '127.0.0.1'
-  ) {
+  if (isTrustedLocalRequest(req)) {
     return next();
   }
 
@@ -1616,15 +1609,10 @@ app.post('/api/plugins/slack/test', async (req, res) => {
 async function reconcileSandboxOrders(sandbox) {
   const localOrders = getPersistedSandboxOrders(sandbox);
   try {
-    const activeAccount = getActiveAccount();
-    const isPrimary = activeAccount?.id === sandbox.accountId;
-    if (isPrimary) {
-      if (!goReady) await startGoBackend(activeAccount);
-    } else {
-      const runtime = orchestrator.getSandboxRuntime(sandbox.id);
-      if (!runtime?.goReady) await orchestrator.startGoBackend(sandbox.id);
-    }
-    const client = getGoClientForSandbox(sandbox.id);
+    // This endpoint is data-only: never start an execution-capable backend while reading trades.
+    const client = sandbox.id === getActiveSandbox()?.id
+      ? goAxios
+      : orchestrator.getSandboxRuntime(sandbox.id)?.goAxios || null;
     if (!client) return localOrders;
     const { data } = await client.get('/api/v1/orders', { params: { status: 'all' } });
     const brokerOrders = Array.isArray(data) ? data : [];

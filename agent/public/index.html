@@ -961,7 +961,11 @@
               <div class="form-group"><label>After Hours</label><input type="number" id="hb-after_hours" min="60" max="14400" onchange="saveHeartbeat()"></div>
               <div class="form-group"><label>Closed</label><input type="number" id="hb-closed" min="60" max="14400" onchange="saveHeartbeat()"></div>
             </div>
-            <div class="form-hint">Agent can override these dynamically via set_heartbeat tool. Values in seconds.</div>
+            <label style="display:flex;align-items:flex-start;gap:8px;margin-top:14px;text-transform:none;font-weight:400;font-size:13px;line-height:1.4">
+              <input type="checkbox" id="hb-force-agent" onchange="saveHeartbeat()">
+              <span><strong>Force these heartbeat intervals</strong><br><span style="color:var(--ink-muted)">Hard guardrail: agents cannot change intervals or apply heartbeat profiles while checked.</span></span>
+            </label>
+            <div class="form-hint">When unchecked, agents may adjust cadence through their heartbeat tools after the warm-up policy. Values are in seconds.</div>
           </div>
         </div>
 
@@ -1697,8 +1701,16 @@ async function overrideHeartbeat() {
   const sid = getEffectiveSandboxId();
   const body = { seconds: v };
   if (sid) body.sandboxId = sid;
-  await fetch('/api/agent/heartbeat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  document.getElementById('hb-override').value = '';
+  try {
+    const response = await fetch('/api/agent/heartbeat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || 'Heartbeat override rejected');
+    }
+    document.getElementById('hb-override').value = '';
+  } catch (e) {
+    log('Heartbeat override rejected: ' + e.message, 'error');
+  }
 }
 
 async function loadHistoryPanel() {
@@ -2528,11 +2540,15 @@ async function overrideHb(sandboxId) {
   if (!v || v < 15 || v > 14400) return;
   input.value = '';
   try {
-    await fetch('/api/agent/heartbeat', {
+    const response = await fetch('/api/agent/heartbeat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ seconds: v, sandboxId }),
     });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || 'Heartbeat override rejected');
+    }
     logToSandbox(sandboxId, `<div class="log-entry success"><span class="time">${fmtTime()}</span>Heartbeat override: ${v}s</div>`);
     _setData(sandboxId + '-hb-interval', fmtInt(v));
   } catch (e) {
@@ -3664,6 +3680,8 @@ function renderHeartbeat() {
     const el = document.getElementById('hb-' + p);
     if (el && hb[p] !== undefined) el.value = hb[p];
   });
+  const forceEl = document.getElementById('hb-force-agent');
+  if (forceEl) forceEl.checked = hb.forceHeartbeatIntervals === true;
 }
 
 let _hbTimer = null;
@@ -3675,6 +3693,7 @@ function saveHeartbeat() {
       const v = parseInt(document.getElementById('hb-' + p)?.value);
       if (v && v >= 30) body[p] = v;
     });
+    body.forceHeartbeatIntervals = document.getElementById('hb-force-agent')?.checked === true;
     const sid = getEffectiveSandboxId();
     if (sid) body.sandboxId = sid;
     await fetch('/api/heartbeat', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });

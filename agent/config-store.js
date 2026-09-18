@@ -21,6 +21,8 @@ const DEFAULT_HEARTBEAT = {
   market_close: 900,
   after_hours: 7200,
   closed: 14400,
+  // When enabled, agent heartbeat tools cannot replace these operator intervals.
+  forceHeartbeatIntervals: false,
 };
 
 export const HEARTBEAT_PROFILES = {
@@ -1232,6 +1234,9 @@ export function getPhaseTimeRanges() {
 export async function applyHeartbeatProfile(sandboxId, profileKey) {
   const profile = HEARTBEAT_PROFILES[profileKey];
   if (!profile) throw new Error(`Unknown heartbeat profile: ${profileKey}`);
+  if (getSandbox(sandboxId)?.heartbeat?.forceHeartbeatIntervals === true) {
+    throw new Error('Heartbeat intervals are locked by the operator; profile changes are disabled');
+  }
   await updateHeartbeatForSandbox(sandboxId, profile.phases);
 }
 

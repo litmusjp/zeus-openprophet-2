@@ -1213,6 +1213,13 @@ app.post('/api/agent/heartbeat', (req, res) => {
   }
   const targetHarness = getHarnessForSandbox(sandboxId);
   if (!targetHarness) return res.status(404).json({ error: 'Sandbox harness not found' });
+  const heartbeatIntervalsForced = getSandbox(targetHarness.sandboxId)?.heartbeat?.forceHeartbeatIntervals === true;
+  if (heartbeatIntervalsForced) {
+    return res.status(409).json({
+      error: 'Heartbeat intervals are locked by the operator; heartbeat overrides are disabled',
+      heartbeatIntervalsForced: true,
+    });
+  }
   if (!targetHarness.canAgentOverrideHeartbeat(force)) {
     return res.status(409).json({
       error: `Settings interval has priority until ${HEARTBEAT_OVERRIDE_WARMUP_SESSIONS} completed market sessions`,
@@ -1227,10 +1234,12 @@ app.post('/api/agent/heartbeat', (req, res) => {
     return res.status(400).json({ error: 'A meaningful reason is required for an early heartbeat override' });
   }
   targetHarness.state.heartbeatOverride = {
-    seconds, reason: reason || 'Agent override', oneTime: false, forced: Boolean(force),
+    seconds, reason: reason || (agentRequest ? 'Agent override' : 'Operator override'), oneTime: false,
+    forced: Boolean(force), agentRequest: Boolean(agentRequest),
   };
   targetHarness.state.emit('heartbeat_change', {
-    seconds, reason: reason || 'Agent override from UI', forced: Boolean(force),
+    seconds, reason: reason || (agentRequest ? 'Agent override' : 'Operator override from UI'),
+    forced: Boolean(force), agentRequest: Boolean(agentRequest),
     sandboxId: sandboxId || targetHarness.sandboxId,
   });
   res.json({ ok: true, seconds, forced: Boolean(force), completedMarketSessions: targetHarness.getCompletedMarketSessions() });
@@ -1272,7 +1281,10 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
   try {
     const sandboxId = req.query.sandboxId || getActiveSandbox()?.id;
     const agentConfig = sandboxId ? getResolvedAgentForSandbox(sandboxId) : getActiveAgent();
-    const prompt = await buildSystemPrompt(agentConfig, { getStrategyById });
+    const prompt = await buildSystemPrompt(agentConfig, {
+      getStrategyById,
+      heartbeatIntervalsForced: Boolean(getSandbox(sandboxId)?.heartbeat?.forceHeartbeatIntervals),
+    });
     res.json({ prompt, agentName: agentConfig.name, sandboxId });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1517,11 +1529,13 @@ app.get('/api/heartbeat', (req, res) => {
 app.put('/api/heartbeat', async (req, res) => {
   try {
     const { sandboxId, ...heartbeatBody } = req.body || {};
-    if (sandboxId) {
-      await updateHeartbeatForSandbox(sandboxId, heartbeatBody);
+    const targetSandboxId = sandboxId || getActiveSandbox()?.id;
+    if (targetSandboxId) {
+      await updateHeartbeatForSandbox(targetSandboxId, heartbeatBody);
     } else {
       await updateHeartbeat(heartbeatBody);
     }
+    if (targetSandboxId) await refreshHarnessConfigForSandbox(targetSandboxId, { resetSession: false });
     broadcast('config', safeConfig());
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
@@ -1536,7 +1550,14 @@ app.post('/api/heartbeat/apply-profile', async (req, res) => {
     const { sandboxId, profile } = req.body || {};
     const targetSandbox = sandboxId || getActiveSandbox()?.id;
     if (!targetSandbox) throw new Error('No active sandbox');
+    if (getSandbox(targetSandbox)?.heartbeat?.forceHeartbeatIntervals === true) {
+      return res.status(409).json({
+        error: 'Heartbeat intervals are locked by the operator; profile changes are disabled',
+        heartbeatIntervalsForced: true,
+      });
+    }
     await applyHeartbeatProfile(targetSandbox, profile);
+    await refreshHarnessConfigForSandbox(targetSandbox, { resetSession: false });
     broadcast('config', safeConfig());
     res.json({ ok: true, profile, sandboxId: targetSandbox });
   } catch (err) { res.status(400).json({ error: err.message }); }

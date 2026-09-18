@@ -1012,7 +1012,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'set_heartbeat',
-        description: 'Override the agent heartbeat interval after the initial Settings-controlled warm-up. Settings remain priority for the first two completed market sessions. Use force=true only for an urgent, strongly justified market condition.',
+        description: 'Override the agent heartbeat interval after the initial Settings-controlled warm-up, unless the operator has enabled the forced-interval guardrail. Settings remain priority for the first two completed market sessions. Use force=true only for an urgent, strongly justified market condition.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2192,6 +2192,7 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         await agentAxios.post(`${AGENT_URL}/api/heartbeat/apply-profile`, {
           profile,
           sandboxId: OPENPROPHET_SANDBOX_ID,
+          agentRequest: true,
         });
         return {
           content: [{ type: 'text', text: `Applied heartbeat profile "${profile}". Changes take effect on next heartbeat.` }],

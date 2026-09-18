@@ -69,7 +69,7 @@ export function tradeEventFromToolUse(fullToolName, toolInput = {}) {
 
 // ── System Prompt Builder ──────────────────────────────────────────
 export async function buildSystemPrompt(agentConfig, options = {}) {
-  const { getStrategyById = () => null } = options;
+  const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
   let strategyRules = '';
   if (agentConfig.customStrategyRules) {
     strategyRules = agentConfig.customStrategyRules;
@@ -141,7 +141,9 @@ Each time you wake, work this loop in order and stop once you've acted or confir
 - Midday (10:30–3): manage positions, tighten stops, avoid low-conviction churn.
 - Market close (3–4): decide what to hold overnight vs. flatten, and act before the bell.
 - After hours (4–8) / Closed: review, log, and plan. No impulsive after-hours trades.
-Tune cadence with apply_heartbeat_profile or set_heartbeat (seconds). Settings are the required baseline. Do not change them just for preference: after two completed market sessions, only call set_heartbeat if the configured interval is materially impairing your work, and include a specific explanation of the problem and evidence. Use force=true only for an urgent, strongly justified market condition.
+${heartbeatIntervalsForced
+    ? '- HEARTBEAT GUARDRAIL: The operator has forced the configured heartbeat intervals. Do not call apply_heartbeat_profile or set_heartbeat; the server will reject attempts to change cadence.'
+    : 'Tune cadence with apply_heartbeat_profile or set_heartbeat (seconds). Settings are the required baseline. Do not change them just for preference: after two completed market sessions, only call set_heartbeat if the configured interval is materially impairing your work, and include a specific explanation of the problem and evidence. Use force=true only for an urgent, strongly justified market condition.'}
 
 ## Risk Discipline (non-negotiable)
 - Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.
@@ -381,6 +383,14 @@ export class AgentHarness {
     this._sandboxConfig = this._resolveSandbox();
     if (!this._sandboxConfig) throw new Error(`Sandbox not found: ${this.sandboxId || 'unknown'}`);
 
+    // A newly enabled operator lock invalidates any already-active agent override.
+    // Clearing it here makes the guard effective without waiting for another beat.
+    const heartbeatWasOverridden = Boolean(this.state.heartbeatOverride);
+    const heartbeatIntervalsForced = this.isHeartbeatIntervalsForced();
+    if (heartbeatIntervalsForced && heartbeatWasOverridden) {
+      this.state.heartbeatOverride = null;
+    }
+
     this._agentConfig = this._resolveAgent();
     if (!this._agentConfig) throw new Error(`Agent not found for sandbox ${this._sandboxConfig.id}`);
 
@@ -392,7 +402,12 @@ export class AgentHarness {
     this.state.activeModel = model;
     this.systemPrompt = await buildSystemPrompt(this._agentConfig, {
       getStrategyById: this.getStrategyById,
+      heartbeatIntervalsForced,
     });
+
+    if (heartbeatIntervalsForced && heartbeatWasOverridden && this.state.running && !this._beating) {
+      this._scheduleNext();
+    }
 
     if (resetSession) {
       this._sessionId = null;
@@ -617,7 +632,12 @@ ${userBlock}`;
   }
 
   canAgentOverrideHeartbeat(force = false) {
+    if (this.isHeartbeatIntervalsForced()) return false;
     return Boolean(force) || this.getCompletedMarketSessions() >= HEARTBEAT_OVERRIDE_WARMUP_SESSIONS;
+  }
+
+  isHeartbeatIntervalsForced() {
+    return this._sandboxConfig?.heartbeat?.forceHeartbeatIntervals === true;
   }
 
   _getHeartbeatSeconds() {

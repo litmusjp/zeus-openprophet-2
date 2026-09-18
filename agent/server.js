@@ -33,6 +33,7 @@ import {
   getHeartbeatProfiles, getPhaseTimeRanges, applyHeartbeatProfile, updatePhaseTimeRange,
   getAvailableModels,
 } from './config-store.js';
+import { formatSlackNotification } from './slack-format.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -452,12 +453,18 @@ for (const evt of EVENTS) {
 }
 
 // ── Slack Notification Dispatcher ──────────────────────────────────
+function getSlackAccountLabel(sandboxId) {
+  const sandbox = sandboxId ? getSandbox(sandboxId) : getActiveSandbox();
+  const account = sandbox?.accountId ? getAccountById(sandbox.accountId) : getActiveAccount();
+  return account?.name || sandbox?.name || 'OpenProphet';
+}
+
 async function notifySlack(text, sandboxId) {
   try {
     const slack = sandboxId ? getPluginForSandbox(sandboxId, 'slack') : getPlugin('slack');
     if (!slack?.enabled || !slack?.webhookUrl) return;
     await axios.post(slack.webhookUrl, {
-      text,
+      text: formatSlackNotification(text, getSlackAccountLabel(sandboxId)),
       channel: slack.channel || undefined,
     }, { timeout: 5000 });
   } catch (err) {
@@ -1598,7 +1605,7 @@ app.post('/api/plugins/slack/test', async (req, res) => {
     if (!slack?.webhookUrl) return res.status(400).json({ error: 'No Slack webhook URL configured' });
     const { default: axios } = await import('axios');
     await axios.post(slack.webhookUrl, {
-      text: ':robot_face: *Prophet Agent* - Test notification\nSlack integration is working!',
+      text: formatSlackNotification(':robot_face: *Prophet Agent* - Test notification\nSlack integration is working!', getSlackAccountLabel(sandboxId)),
       channel: slack.channel || undefined,
     }, { timeout: 5000 });
     res.json({ ok: true });

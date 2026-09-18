@@ -2,6 +2,8 @@ export function shouldShowGoLogLine(line) {
   const clean = String(line).replace(/\x1b\[[0-9;]*m/g, '');
   if (/\[GIN-debug\]/.test(clean)) return false;
   if (/level=info\s+msg="(?:Fetching|Fetched) historical bars"/.test(clean)) return false;
+  if (/level=info\s+msg="(?:Starting Prophet Trader Bot\.\.\.|Initializing services\.\.\.|Testing Alpaca connection\.\.\.|Successfully connected to Alpaca|Loaded managed positions from database|Activity logging session started|Position monitoring started|Starting HTTP server\.\.\.)"/.test(clean)) return false;
+  if (/"level":"info","msg":"Trading session started"/.test(clean)) return false;
   if (/level=info\s+msg="(?:Reconcile: order not confirmed at broker, leaving as-is|Reconcile: startup order reconciliation complete|Startup order reconciliation complete)"/.test(clean)) return false;
   const accessLog = clean.match(
     /\[GIN\]\s+\d{4}\/\d{2}\/\d{2}\s+-\s+.*?\|\s*(\d{3})\s*\|.*?\|\s*[A-Z]+\s+"/,

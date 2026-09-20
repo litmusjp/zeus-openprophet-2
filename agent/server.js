@@ -39,8 +39,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 // Resolve the only server-owned mode before reading any credential, broker
 // endpoint, broker port, auth, or runtime setting.
-const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';
-const EXECUTION_START_ENABLED = EXECUTION_MODE === 'enabled';
+const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
+const EXECUTION_START_ENABLED = EXECUTION_MODE === 'paper' || EXECUTION_MODE === 'enabled';
 
 // Secure-by-default: if no TRADING_BOT_TOKEN is configured, mint an ephemeral one now and
 // inject it into the environment BEFORE anything reads it, so the Go backend it spawns, this
@@ -358,7 +358,7 @@ async function stopGoBackend() {
 }
 
 // ── Load Config ────────────────────────────────────────────────────
-if (process.env.OPENPROPHET_EXECUTION_MODE === 'enabled') {
+if (EXECUTION_START_ENABLED) {
   await import('dotenv/config');
 }
 await loadConfig();

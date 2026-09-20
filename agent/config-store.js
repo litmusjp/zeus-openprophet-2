@@ -824,7 +824,22 @@ function getActiveSandboxFromConfig(config) {
 
 let _config = null;
 let _writeLock = Promise.resolve();
-const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';
+const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
+const EXECUTION_START_ENABLED = EXECUTION_MODE === 'paper' || EXECUTION_MODE === 'enabled';
+const PAPER_TRADING_URL = 'https://paper-api.alpaca.markets';
+
+function paperImportEndpoint() {
+  const configuredPaper = process.env.ALPACA_PAPER;
+  if (configuredPaper === 'false') {
+    throw new Error('ALPACA_PAPER must be true in paper execution mode before broker account import');
+  }
+  if (configuredPaper !== undefined && configuredPaper !== '' && configuredPaper !== 'true') {
+    throw new Error('ALPACA_PAPER must be true in paper execution mode before broker account import');
+  }
+  // Endpoint settings never select the account environment in paper mode. The
+  // broker identity check must always use the canonical paper host.
+  return PAPER_TRADING_URL;
+}
 
 export async function loadConfig() {
   try {
@@ -836,15 +851,16 @@ export async function loadConfig() {
   }
 
   // Inert/read-only startup must not import credentials or contact a broker.
-  if (_config.accounts.length === 0 && EXECUTION_MODE === 'enabled') {
+  if (_config.accounts.length === 0 && EXECUTION_START_ENABLED) {
     const pk = process.env.ALPACA_PUBLIC_KEY || process.env.ALPACA_API_KEY;
     const sk = process.env.ALPACA_SECRET_KEY;
     if (pk && sk) {
-      if (process.env.ALPACA_PAPER !== 'true' && process.env.ALPACA_PAPER !== 'false') {
-        throw new Error('ALPACA_PAPER must be explicitly true or false before broker account import');
-      }
-      const baseUrl = process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '';
-      const isPaper = baseUrl.includes('paper') || process.env.ALPACA_PAPER === 'true';
+      const isPaper = EXECUTION_MODE === 'paper'
+        ? true
+        : process.env.ALPACA_PAPER === 'true' || (process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '').includes('paper');
+      const baseUrl = isPaper && EXECUTION_MODE === 'paper'
+        ? paperImportEndpoint()
+        : alpacaTradingUrl(isPaper, process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '');
       const id = crypto.randomUUID().slice(0, 8);
       const account = {
         id,
@@ -869,7 +885,7 @@ export async function loadConfig() {
   }
 
   syncLegacyAliases(_config);
-  if (EXECUTION_MODE === 'enabled') await saveConfig();
+  if (EXECUTION_START_ENABLED) await saveConfig();
   return _config;
 }
 

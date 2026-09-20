@@ -26,7 +26,8 @@ import (
 )
 
 func executionModeEnabled(mode string) bool {
-	return strings.EqualFold(strings.TrimSpace(mode), "enabled")
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	return mode == "paper" || mode == "enabled"
 }
 
 func shouldStartHTTPServer(executionEnabled bool) bool {
@@ -67,7 +68,7 @@ func main() {
 	// Initialize services
 	logger.Info("Initializing services...")
 
-	// Create trading service only when explicitly enabled.
+	// Create trading service only for paper or explicitly enabled execution.
 	var tradingService *services.AlpacaTradingService
 	if executionEnabled {
 		var err error

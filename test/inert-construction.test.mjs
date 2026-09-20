@@ -25,7 +25,7 @@ test('inert mode gates eager and on-demand sandbox runtime creation', async () =
 
 test('inert mode resolves before broker settings and constructs no broker HTTP client', async () => {
   const source = await readFile(path.join(repoRoot, 'agent', 'server.js'), 'utf8');
-  const mode = source.indexOf("const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';");
+  const mode = source.indexOf("const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';");
   const credentials = source.indexOf('TRADING_BOT_TOKEN');
   const brokerClient = source.indexOf('axios.create({');
   assert.ok(mode >= 0 && mode < credentials, 'execution mode must precede credential handling');
@@ -68,7 +68,7 @@ test('inert server construction exits without binding a dashboard port', { skip:
 
 test('inert MCP construction has no provider, directory, or broker-client side effects', async () => {
   const source = await readFile(path.join(repoRoot, 'mcp-server.js'), 'utf8');
-  const mode = source.indexOf("const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';");
+  const mode = source.indexOf("const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';");
   assert.ok(mode >= 0, 'MCP must resolve explicit execution mode');
   assert.equal(source.includes("import { GoogleGenerativeAI } from '@google/generative-ai';"), false);
   assert.ok(source.indexOf('await import(\'@google/generative-ai\')') > mode, 'provider import must be optional and mode-gated');
@@ -99,4 +99,18 @@ test('inert MCP construction has no provider, directory, or broker-client side e
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test('paper is the default execution mode and starts the existing execution path', async () => {
+  const files = ['agent/server.js', 'agent/config-store.js', 'agent/orchestrator.js', 'mcp-server.js'];
+  for (const file of files) {
+    const source = await readFile(path.join(repoRoot, file), 'utf8');
+    assert.match(source, /OPENPROPHET_EXECUTION_MODE \|\| 'paper'/, `${file} must default to paper`);
+  }
+  const server = await readFile(path.join(repoRoot, 'agent', 'server.js'), 'utf8');
+  const mcp = await readFile(path.join(repoRoot, 'mcp-server.js'), 'utf8');
+  assert.match(server, /EXECUTION_MODE === 'paper' \|\| EXECUTION_MODE === 'enabled'/);
+  assert.match(mcp, /EXECUTION_MODE === 'paper' \|\| EXECUTION_MODE === 'enabled'/);
+  const goConfig = await readFile(path.join(repoRoot, 'config', 'config.go'), 'utf8');
+  assert.match(goConfig, /getEnvOrDefault\("OPENPROPHET_EXECUTION_MODE", "paper"\)/);
 });

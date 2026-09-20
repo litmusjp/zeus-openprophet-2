@@ -29,32 +29,44 @@ type Config struct {
 
 var AppConfig *Config
 
+const alpacaPaperBaseURL = "https://paper-api.alpaca.markets"
+
 func Load() error {
-	executionMode := strings.ToLower(strings.TrimSpace(getEnvOrDefault("OPENPROPHET_EXECUTION_MODE", "inert")))
-	if executionMode != "enabled" && executionMode != "inert" {
-		return fmt.Errorf("OPENPROPHET_EXECUTION_MODE must be inert or enabled")
+	executionMode := strings.ToLower(strings.TrimSpace(getEnvOrDefault("OPENPROPHET_EXECUTION_MODE", "paper")))
+	if executionMode != "enabled" && executionMode != "paper" && executionMode != "inert" {
+		return fmt.Errorf("OPENPROPHET_EXECUTION_MODE must be inert, paper, or enabled")
 	}
 	// Inert startup must not import broker credentials from a dotenv file.
-	if executionMode == "enabled" {
+	if executionMode != "inert" {
 		_ = godotenv.Load()
 	} else {
 		AppConfig = &Config{ExecutionMode: "inert"}
 		return nil
 	}
 	apiKey, secretKey := "", ""
-	if executionMode == "enabled" {
-		apiKey = os.Getenv("ALPACA_API_KEY")
-		secretKey = os.Getenv("ALPACA_SECRET_KEY")
-	}
+	apiKey = os.Getenv("ALPACA_API_KEY")
+	secretKey = os.Getenv("ALPACA_SECRET_KEY")
 	paperValue, paperSet := os.LookupEnv("ALPACA_PAPER")
 	if executionMode == "enabled" && (!paperSet || (paperValue != "true" && paperValue != "false")) {
 		return fmt.Errorf("ALPACA_PAPER must be explicitly true or false when execution is enabled")
+	}
+	if executionMode == "paper" {
+		if !paperSet || paperValue == "" {
+			paperValue = "true"
+		}
+		if paperValue != "true" {
+			return fmt.Errorf("ALPACA_PAPER must be true in paper execution mode")
+		}
+	}
+	baseURL := getEnvOrDefault("ALPACA_BASE_URL", alpacaPaperBaseURL)
+	if executionMode == "paper" && strings.TrimRight(baseURL, "/") != alpacaPaperBaseURL {
+		return fmt.Errorf("ALPACA_BASE_URL must be the official Alpaca paper endpoint in paper execution mode")
 	}
 
 	AppConfig = &Config{
 		AlpacaAPIKey:      apiKey,
 		AlpacaSecretKey:   secretKey,
-		AlpacaBaseURL:     getEnvOrDefault("ALPACA_BASE_URL", "https://paper-api.alpaca.markets"),
+		AlpacaBaseURL:     baseURL,
 		AlpacaPaper:       paperValue == "true",
 		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
 		DatabasePath:      getEnvOrDefault("DATABASE_PATH", "./data/prophet_trader.db"),

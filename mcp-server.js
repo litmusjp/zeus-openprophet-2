@@ -14,8 +14,8 @@ import { checkPermissions } from './permissions.js';
 import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
 
 // Configuration
-const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';
-const EXECUTION_START_ENABLED = EXECUTION_MODE === 'enabled';
+const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
+const EXECUTION_START_ENABLED = EXECUTION_MODE === 'paper' || EXECUTION_MODE === 'enabled';
 const TRADING_BOT_URL = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_URL || 'http://127.0.0.1:4534') : '';
 const TRADING_BOT_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_TOKEN || '') : '';
 const TRADING_BOT_OPERATOR_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_OPERATOR_TOKEN || '') : '';

@@ -10,6 +10,8 @@ func TestExecutionModeEnabledFailsClosed(t *testing.T) {
 		{"", false},
 		{"inert", false},
 		{"true", false},
+		{"paper", true},
+		{"PAPER ", true},
 		{"ENABLED ", true},
 		{"enabled", true},
 	}

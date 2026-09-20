@@ -212,7 +212,8 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   async startGoBackend(sandboxId, _isRetry = false) {
-    if (process.env.OPENPROPHET_EXECUTION_MODE !== 'enabled') {
+    const executionMode = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
+    if (executionMode !== 'paper' && executionMode !== 'enabled') {
       throw new Error('execution mode is inert; backend startup is disabled');
     }
     const runtime = this.ensureRuntime(sandboxId);

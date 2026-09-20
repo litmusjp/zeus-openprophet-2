@@ -2,6 +2,48 @@ package config
 
 import "testing"
 
+func TestDefaultLoadUsesPaperModeAndCredentials(t *testing.T) {
+	t.Setenv("OPENPROPHET_EXECUTION_MODE", "")
+	t.Setenv("ALPACA_API_KEY", "paper-api-key")
+	t.Setenv("ALPACA_SECRET_KEY", "paper-secret-key")
+	t.Setenv("ALPACA_PAPER", "")
+
+	if err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if AppConfig.ExecutionMode != "paper" {
+		t.Fatalf("default execution mode = %q, want paper", AppConfig.ExecutionMode)
+	}
+	if AppConfig.AlpacaAPIKey != "paper-api-key" || AppConfig.AlpacaSecretKey != "paper-secret-key" {
+		t.Fatalf("paper credentials were not loaded: %+v", AppConfig)
+	}
+	if !AppConfig.AlpacaPaper || AppConfig.AlpacaBaseURL != "https://paper-api.alpaca.markets" {
+		t.Fatalf("paper defaults were not applied: %+v", AppConfig)
+	}
+}
+
+func TestPaperLoadRejectsLiveOrCustomBrokerSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		paper   string
+		baseURL string
+	}{
+		{name: "live flag", paper: "false", baseURL: "https://paper-api.alpaca.markets"},
+		{name: "live endpoint", paper: "true", baseURL: "https://api.alpaca.markets"},
+		{name: "custom endpoint", paper: "true", baseURL: "https://broker.example.test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OPENPROPHET_EXECUTION_MODE", "paper")
+			t.Setenv("ALPACA_PAPER", tt.paper)
+			t.Setenv("ALPACA_BASE_URL", tt.baseURL)
+			if err := Load(); err == nil {
+				t.Fatalf("Load() accepted paper safety violation: paper=%q baseURL=%q", tt.paper, tt.baseURL)
+			}
+		})
+	}
+}
+
 func TestInertLoadDoesNotImportBrokerCredentials(t *testing.T) {
 	t.Setenv("OPENPROPHET_EXECUTION_MODE", "inert")
 	t.Setenv("ALPACA_API_KEY", "must-not-be-imported")

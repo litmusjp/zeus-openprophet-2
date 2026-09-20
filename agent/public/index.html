@@ -1898,7 +1898,7 @@ async function refreshPortfolio() {
       const bv = '$' + Number(acc.BuyingPower||acc.buying_power||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const equity = Number(acc.Equity ?? acc.equity);
       const lastEquity = Number(acc.LastEquity ?? acc.last_equity);
-      const dailyValid = acc.DailyPnLValid !== false && Number.isFinite(equity) && equity > 0 && Number.isFinite(lastEquity) && lastEquity > 0;
+      const dailyValid = (acc.DailyPnLValid === true || acc.daily_pnl_valid === true) && Number.isFinite(equity) && equity > 0 && Number.isFinite(lastEquity) && lastEquity > 0;
       const pnl = dailyValid ? equity - lastEquity : null;
       const pnlStr = pnl === null ? '--' : (pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2});
       const cls = pnl === null ? '' : (pnl>=0? 'positive' : 'negative');

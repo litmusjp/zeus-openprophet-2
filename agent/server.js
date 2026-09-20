@@ -14,6 +14,7 @@ import axios from 'axios';
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { buildTradeLedger } from './trade-ledger.js';
+import { readLegacyHistoryForSandboxAt } from './legacy-history.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
@@ -1806,10 +1807,21 @@ app.get('/api/trades', async (req, res) => {
       .filter(sandbox => !requestedAccount || sandbox.accountId === requestedAccount);
     const orders = [];
     const trades = [];
+    const legacyHistory = [];
     let complete = true;
     const brokerStates = new Set();
     for (const sandbox of sandboxes) {
       const account = getAccountById(sandbox.accountId);
+      const legacyMetadata = {
+        accountId: sandbox.accountId,
+        accountName: account?.name || 'Unknown account',
+        agentId: getResolvedAgentForSandbox(sandbox.id)?.id || sandbox.agentId || null,
+        agentName: getResolvedAgentForSandbox(sandbox.id)?.name || 'Unassigned',
+        sandboxId: sandbox.id,
+      };
+      const mappedLegacyOrders = readLegacyHistoryForSandboxAt(PROJECT_ROOT, sandbox)
+        .map(order => ({ ...legacyMetadata, ...order }));
+      legacyHistory.push(...mappedLegacyOrders);
       if (!account || !account.brokerAccountId || typeof account.paper !== 'boolean') {
         complete = false;
         brokerStates.add('identity_unavailable');
@@ -1831,8 +1843,10 @@ app.get('/api/trades', async (req, res) => {
       const sandboxOrders = reconciliation.orders;
       orders.push(...sandboxOrders.map(order => ({ ...order, ...metadata })));
       trades.push(...buildTradeLedger(sandboxOrders, metadata));
+      // Legacy history is display-only. It is deliberately excluded from orders,
+      // reconciliation, risk state, and buildTradeLedger().
     }
-    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], orders, trades });
+    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], orders, trades, legacyOrders: legacyHistory });
   } catch (err) {
     res.status(500).json({ error: `Could not load verified trades: ${err.message}` });
   }

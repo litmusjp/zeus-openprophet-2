@@ -976,7 +976,8 @@
           <div class="config-card">
             <div class="section-title" style="font-size:12px;margin-bottom:12px">Trading Controls</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
-              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-live" onchange="savePermissions()"> Allow Live Trading</label>
+              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-paper" onchange="savePermissions()"> Allow Paper Trading</label>
+              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-live" onchange="savePermissions()"> Legacy Live Capability</label>
               <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-options" onchange="savePermissions()"> Allow Options</label>
               <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-stocks" onchange="savePermissions()"> Allow Stocks</label>
               <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-0dte" onchange="savePermissions()"> Allow 0DTE</label>
@@ -3268,7 +3269,8 @@ async function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
   const riskStepHtml = sandboxId ? (
     '<div class="scope-banner">Risk controls belong to <strong>' + esc(accountLabel) + '</strong>\'s account, not to this one agent &mdash; whichever agent runs there is bound by these limits. Adjust them here for convenience, or later from Settings.</div>'
     + '<div class="toggle-grid">'
-    + '<label class="toggle-row"><input type="checkbox" id="b-perm-live" onchange="_builderMarkPermsDirty()"' + (p.allowLiveTrading !== false ? ' checked' : '') + '> Allow live trading</label>'
+    + '<label class="toggle-row"><input type="checkbox" id="b-perm-paper" onchange="_builderMarkPermsDirty()"' + (p.allowPaperTrading !== false ? ' checked' : '') + '> Allow paper trading</label>'
+    + '<label class="toggle-row"><input type="checkbox" id="b-perm-live" onchange="_builderMarkPermsDirty()"' + (p.allowLiveTrading !== false ? ' checked' : '') + '> Legacy live capability</label>'
     + '<label class="toggle-row"><input type="checkbox" id="b-perm-options" onchange="_builderMarkPermsDirty()"' + (p.allowOptions !== false ? ' checked' : '') + '> Allow options</label>'
     + '<label class="toggle-row"><input type="checkbox" id="b-perm-stocks" onchange="_builderMarkPermsDirty()"' + (p.allowStocks !== false ? ' checked' : '') + '> Allow stocks</label>'
     + '<label class="toggle-row"><input type="checkbox" id="b-perm-0dte" onchange="_builderMarkPermsDirty()"' + (p.allow0DTE ? ' checked' : '') + '> Allow 0DTE</label>'
@@ -3525,6 +3527,7 @@ async function _builderSubmit() {
     if (_builder.sandboxId && _builder.permsDirty) {
       const blocked = (document.getElementById('b-perm-blocked')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
       const permBody = {
+        allowPaperTrading: document.getElementById('b-perm-paper').checked,
         allowLiveTrading: document.getElementById('b-perm-live').checked,
         allowOptions: document.getElementById('b-perm-options').checked,
         allowStocks: document.getElementById('b-perm-stocks').checked,
@@ -3731,6 +3734,7 @@ function saveHeartbeat() {
 // ── Permissions Config ─────────────────────
 function renderPermissions() {
   const p = sandboxScoped.permissions || config.permissions || {};
+  document.getElementById('perm-paper').checked = p.allowPaperTrading !== false;
   document.getElementById('perm-live').checked = p.allowLiveTrading !== false;
   document.getElementById('perm-options').checked = p.allowOptions !== false;
   document.getElementById('perm-stocks').checked = p.allowStocks !== false;
@@ -3751,6 +3755,7 @@ function savePermissions() {
   _permTimer = setTimeout(async () => {
     const blocked = document.getElementById('perm-blocked').value.split(',').map(s => s.trim()).filter(Boolean);
     const body = {
+      allowPaperTrading: document.getElementById('perm-paper').checked,
       allowLiveTrading: document.getElementById('perm-live').checked,
       allowOptions: document.getElementById('perm-options').checked,
       allowStocks: document.getElementById('perm-stocks').checked,

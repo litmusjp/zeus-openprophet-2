@@ -13,7 +13,9 @@ func validRiskAccount() *interfaces.Account {
 
 func TestTradingPolicyAllowsProtectionWithoutPrice(t *testing.T) {
 	policy := TradingPolicy{
+		IsPaper:             true,
 		AllowLiveTrading:    true,
+		AllowPaperTrading:   true,
 		AllowStocks:         true,
 		RequireConfirmation: false,
 	}
@@ -26,7 +28,7 @@ func TestTradingPolicyAllowsProtectionWithoutPrice(t *testing.T) {
 }
 
 func TestTradingPolicyRejectsUnbackedClose(t *testing.T) {
-	policy := TradingPolicy{AllowLiveTrading: true, AllowStocks: true}
+	policy := TradingPolicy{IsPaper: true, AllowLiveTrading: true, AllowPaperTrading: true, AllowStocks: true}
 	order := &interfaces.Order{Symbol: "AAPL", Qty: 1, Side: "sell", Purpose: "close"}
 	if _, err := policy.ValidateOrder(order, BrokerRiskSnapshot{}); err == nil || !strings.Contains(err.Error(), "matching broker exposure") {
 		t.Fatalf("unbacked close error = %v, want exposure proof rejection", err)
@@ -36,7 +38,7 @@ func TestTradingPolicyRejectsUnbackedClose(t *testing.T) {
 func TestTradingPolicyRejectsOpeningOrderWhenPolicyDisabled(t *testing.T) {
 	policy := TradingPolicy{
 		IsPaper:          false,
-		AllowLiveTrading: false,
+		AllowLiveTrading: true,
 		AllowStocks:      true,
 		MaxPositionPct:   15,
 		MaxDeployedPct:   80,
@@ -49,21 +51,43 @@ func TestTradingPolicyRejectsOpeningOrderWhenPolicyDisabled(t *testing.T) {
 	_, err := policy.ValidateOrder(order, BrokerRiskSnapshot{
 		Account: validRiskAccount(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "allowLiveTrading") {
-		t.Fatalf("ValidateOrder() error = %v, want allowLiveTrading policy rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "live trading is prohibited") {
+		t.Fatalf("ValidateOrder() error = %v, want live-account policy rejection", err)
+	}
+}
+
+func TestTradingPolicyAllowsPaperOpeningWhenLiveCapabilityIsFalse(t *testing.T) {
+	policy := TradingPolicy{
+		IsPaper: true, AllowLiveTrading: false, AllowPaperTrading: true,
+		AllowStocks: true, RequireConfirmation: false,
+		MaxOrderValue: 1000, MaxPositionPct: 100, MaxDeployedPct: 100,
+		MaxOpenPositions: 10, MaxDailyLoss: 100,
+	}
+	order := &interfaces.Order{Symbol: "AAPL", Qty: 1, Side: "buy", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(100), Purpose: "entry"}
+	if _, err := policy.ValidateOrder(order, BrokerRiskSnapshot{Account: validRiskAccount()}); err != nil {
+		t.Fatalf("paper opening order should be allowed: %v", err)
+	}
+}
+
+func TestTradingPolicyRejectsLiveOpeningEvenWhenLiveCapabilityIsTrue(t *testing.T) {
+	policy := TradingPolicy{IsPaper: false, AllowLiveTrading: true, AllowPaperTrading: true, AllowStocks: true, RequireConfirmation: false}
+	order := &interfaces.Order{Symbol: "AAPL", Qty: 1, Side: "buy", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(100), Purpose: "entry"}
+	if _, err := policy.ValidateOrder(order, BrokerRiskSnapshot{Account: validRiskAccount()}); err == nil || !strings.Contains(err.Error(), "live trading is prohibited") {
+		t.Fatalf("live opening order error = %v, want unconditional live rejection", err)
 	}
 }
 
 func TestTradingPolicyRejectsOptionNotionalAndAllowsOnlyValidOpeningRoute(t *testing.T) {
 	policy := TradingPolicy{
-		IsPaper:          true,
-		AllowLiveTrading: true,
-		AllowOptions:     true,
-		AllowStocks:      true,
-		MaxOrderValue:    500,
-		MaxPositionPct:   100,
-		MaxDeployedPct:   100,
-		MaxOpenPositions: 10, MaxDailyLoss: 100,
+		IsPaper:           true,
+		AllowLiveTrading:  true,
+		AllowPaperTrading: true,
+		AllowOptions:      true,
+		AllowStocks:       true,
+		MaxOrderValue:     500,
+		MaxPositionPct:    100,
+		MaxDeployedPct:    100,
+		MaxOpenPositions:  10, MaxDailyLoss: 100,
 	}
 	order := &interfaces.OptionsOrder{
 		ClientOrderID: "op-policy",
@@ -80,13 +104,14 @@ func TestTradingPolicyRejectsOptionNotionalAndAllowsOnlyValidOpeningRoute(t *tes
 
 func TestTradingPolicyRequiresPriceWhenOpeningCapCannotBeEvaluated(t *testing.T) {
 	policy := TradingPolicy{
-		IsPaper:          true,
-		AllowLiveTrading: true,
-		AllowStocks:      true,
-		MaxOrderValue:    1000,
-		MaxPositionPct:   15,
-		MaxDeployedPct:   80,
-		MaxOpenPositions: 10, MaxDailyLoss: 100,
+		IsPaper:           true,
+		AllowLiveTrading:  true,
+		AllowPaperTrading: true,
+		AllowStocks:       true,
+		MaxOrderValue:     1000,
+		MaxPositionPct:    15,
+		MaxDeployedPct:    80,
+		MaxOpenPositions:  10, MaxDailyLoss: 100,
 	}
 	order := &interfaces.Order{
 		Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Purpose: "entry",
@@ -101,13 +126,14 @@ func TestTradingPolicyRequiresPriceWhenOpeningCapCannotBeEvaluated(t *testing.T)
 
 func TestTradingPolicyAllowsProtectionWithoutOpeningPositionCaps(t *testing.T) {
 	policy := TradingPolicy{
-		IsPaper:          true,
-		AllowLiveTrading: true,
-		AllowStocks:      true,
-		MaxOrderValue:    100,
-		MaxPositionPct:   1,
-		MaxDeployedPct:   1,
-		MaxOpenPositions: 1,
+		IsPaper:           true,
+		AllowLiveTrading:  true,
+		AllowPaperTrading: true,
+		AllowStocks:       true,
+		MaxOrderValue:     100,
+		MaxPositionPct:    1,
+		MaxDeployedPct:    1,
+		MaxOpenPositions:  1,
 	}
 	order := &interfaces.Order{
 		Symbol: "AAPL", Qty: 10, Side: "sell", Type: "stop", TimeInForce: "gtc",
@@ -122,7 +148,7 @@ func TestTradingPolicyAllowsProtectionWithoutOpeningPositionCaps(t *testing.T) {
 }
 
 func TestTradingPolicyDailyLossUsesBrokerEquityAndFailsClosed(t *testing.T) {
-	policy := TradingPolicy{IsPaper: true, AllowStocks: true, RequireConfirmation: false, MaxOrderValue: 1000, MaxPositionPct: 100, MaxDeployedPct: 100, MaxOpenPositions: 10, MaxDailyLoss: 5}
+	policy := TradingPolicy{IsPaper: true, AllowPaperTrading: true, AllowStocks: true, RequireConfirmation: false, MaxOrderValue: 1000, MaxPositionPct: 100, MaxDeployedPct: 100, MaxOpenPositions: 10, MaxDailyLoss: 5}
 	order := &interfaces.Order{Symbol: "AAPL", Qty: 1, Side: "buy", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(10), Purpose: "entry"}
 	account := &interfaces.Account{PortfolioValue: 9_000, Equity: 9_000, LastEquity: 10_000, DailyPnL: -1_000, DailyPnLPercent: -10, DailyPnLValid: true}
 	if _, err := policy.ValidateOrder(order, BrokerRiskSnapshot{Account: account}); err == nil || !strings.Contains(err.Error(), "daily loss cap exceeded") {

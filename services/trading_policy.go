@@ -16,6 +16,7 @@ import (
 type TradingPolicy struct {
 	IsPaper              bool
 	AllowLiveTrading     bool
+	AllowPaperTrading    bool
 	AllowOptions         bool
 	AllowStocks          bool
 	Allow0DTE            bool
@@ -105,6 +106,7 @@ func strictIntEnv(name string, fallback int) (int, bool) {
 
 func TradingPolicyFromEnv(isPaper bool) *TradingPolicy {
 	allowLive, liveOK := strictBoolEnv("OPENPROPHET_ALLOW_LIVE_TRADING", false)
+	allowPaper, paperOK := strictBoolEnv("OPENPROPHET_ALLOW_PAPER_TRADING", true)
 	allowOptions, optionsOK := strictBoolEnv("OPENPROPHET_ALLOW_OPTIONS", false)
 	allowStocks, stocksOK := strictBoolEnv("OPENPROPHET_ALLOW_STOCKS", false)
 	allow0DTE, dteOK := strictBoolEnv("OPENPROPHET_ALLOW_0DTE", false)
@@ -117,6 +119,7 @@ func TradingPolicyFromEnv(isPaper bool) *TradingPolicy {
 	return &TradingPolicy{
 		IsPaper:              isPaper,
 		AllowLiveTrading:     allowLive,
+		AllowPaperTrading:    allowPaper,
 		AllowOptions:         allowOptions,
 		AllowStocks:          allowStocks,
 		Allow0DTE:            allow0DTE,
@@ -126,7 +129,7 @@ func TradingPolicyFromEnv(isPaper bool) *TradingPolicy {
 		MaxDeployedPct:       maxDeployedPct,
 		MaxOpenPositions:     maxOpenPositions,
 		MaxDailyLoss:         maxDailyLoss,
-		InvalidConfiguration: !(liveOK && optionsOK && stocksOK && dteOK && confirmationOK && orderValueOK && positionPctOK && deployedPctOK && openPositionsOK && dailyLossOK),
+		InvalidConfiguration: !(liveOK && paperOK && optionsOK && stocksOK && dteOK && confirmationOK && orderValueOK && positionPctOK && deployedPctOK && openPositionsOK && dailyLossOK),
 	}
 }
 
@@ -134,8 +137,11 @@ func (p TradingPolicy) validateCommon(orderSide, assetClass string, opening bool
 	if p.InvalidConfiguration {
 		return fmt.Errorf("trading policy configuration is invalid; execution is blocked")
 	}
-	if !p.IsPaper && !p.AllowLiveTrading {
-		return fmt.Errorf("allowLiveTrading policy is disabled for live trading")
+	if !p.IsPaper {
+		return fmt.Errorf("live trading is prohibited; only paper accounts may submit orders")
+	}
+	if !p.AllowPaperTrading {
+		return fmt.Errorf("allowPaperTrading policy is disabled for paper trading")
 	}
 	if assetClass == "us_option" && !p.AllowOptions {
 		return fmt.Errorf("options trading is disabled by broker policy")

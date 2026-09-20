@@ -1076,7 +1076,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: 'object',
           properties: {
-            allowLiveTrading: { type: 'boolean', description: 'Allow placing live orders' },
+            allowLiveTrading: { type: 'boolean', description: 'Legacy live-order capability; live execution remains prohibited' },
+            allowPaperTrading: { type: 'boolean', description: 'Allow placing paper orders subject to all other safeguards' },
             allowOptions: { type: 'boolean', description: 'Allow options trading' },
             allowStocks: { type: 'boolean', description: 'Allow stock trading' },
             allow0DTE: { type: 'boolean', description: 'Allow 0DTE options' },
@@ -1215,7 +1216,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // ── Permission Enforcement ──────────────────────────────────────────
 const AGENT_URL = EXECUTION_START_ENABLED ? (process.env.AGENT_URL || 'http://localhost:3737') : '';
-const AGENT_AUTH_TOKEN = EXECUTION_START_ENABLED ? (process.env.AGENT_AUTH_TOKEN || '') : '';
+// Match the agent API's server-owned fallback while retaining fail-closed
+// behavior when neither credential is configured.
+const AGENT_AUTH_TOKEN = EXECUTION_START_ENABLED ? (process.env.AGENT_AUTH_TOKEN || process.env.TRADING_BOT_TOKEN || '') : '';
 const OPERATOR_TOKEN = EXECUTION_START_ENABLED ? (process.env.OPERATOR_TOKEN || process.env.TRADING_BOT_OPERATOR_TOKEN || '') : '';
 const AGENT_QUERY = { sandboxId: OPENPROPHET_SANDBOX_ID };
 const agentAxios = EXECUTION_START_ENABLED ? axios.create({

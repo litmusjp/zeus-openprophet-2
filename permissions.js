@@ -24,7 +24,7 @@ export function estimateOrderValue(toolName, args = {}) {
 // Throws an Error describing the violation if the call is not permitted; returns undefined if allowed.
 // `now` is injectable so the 0DTE (same-day expiry) rule is deterministic in tests.
 export function checkPermissions(toolName, args = {}, perms = {}, now = new Date()) {
-  const allowLiveTrading = perms.allowLiveTrading === true;
+  const allowPaperTrading = perms.allowPaperTrading !== false;
   const allowOptions = perms.allowOptions === true;
   const allowStocks = perms.allowStocks === true;
   const allow0DTE = perms.allow0DTE === true;
@@ -44,9 +44,10 @@ export function checkPermissions(toolName, args = {}, perms = {}, now = new Date
     throw new Error('Opening orders require a positive maxOrderValue risk cap.');
   }
 
-  // Live trading disabled
-  if (!allowLiveTrading && toolName !== 'close_managed_position' && toolName !== 'cancel_order') {
-    throw new Error('Live trading is DISABLED (read-only mode). Cannot place orders. Change permissions to enable.');
+  // Paper trading is a distinct, safe capability. Live accounts are rejected at
+  // the server-owned Go boundary regardless of permission flags.
+  if (!allowPaperTrading && toolName !== 'close_managed_position' && toolName !== 'cancel_order') {
+    throw new Error('Paper trading is DISABLED by permissions. Cannot place paper orders.');
   }
   // Generic equity/managed-position routes must never accept OCC option symbols.
   // Options require the explicit route so position intent and option limits apply.

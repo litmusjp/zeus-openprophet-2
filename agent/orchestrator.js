@@ -23,6 +23,7 @@ import {
   ensureBrokerAccountBinding,
 } from './config-store.js';
 import { shouldShowGoLogLine, createGoLogLineBuffer } from './go-log-filter.js';
+import { resolveApiAuthToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -148,6 +149,7 @@ export class AgentOrchestrator extends EventEmitter {
     const tradingBotUrl = `http://127.0.0.1:${port}`;
     const goHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 10, keepAliveMsecs: 30000 });
     const tradingBotToken = process.env.TRADING_BOT_TOKEN || '';
+    const agentAuthToken = resolveApiAuthToken({ executionEnabled: true, agentToken: process.env.AGENT_AUTH_TOKEN || '', serverToken: tradingBotToken });
     const processNonce = randomUUID();
     const identityHeaders = {
       Authorization: `Bearer ${tradingBotToken}`,
@@ -176,6 +178,7 @@ export class AgentOrchestrator extends EventEmitter {
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,
         TRADING_BOT_TOKEN: tradingBotToken,
+        AGENT_AUTH_TOKEN: agentAuthToken,
         SERVER_HOST: '127.0.0.1',
         AGENT_URL: this.agentUrl,
         OPENPROPHET_SANDBOX_ID: sandboxId,

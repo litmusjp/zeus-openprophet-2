@@ -433,6 +433,7 @@ function createHarnessForActiveSandbox() {
     opencodeEnv: {
       TRADING_BOT_URL,
       TRADING_BOT_TOKEN,
+      AGENT_AUTH_TOKEN: AUTH_TOKEN,
       SERVER_HOST: '127.0.0.1',
       AGENT_URL: `http://localhost:${PORT}`,
       OPENPROPHET_SANDBOX_ID: sandbox?.id || '',

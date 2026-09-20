@@ -31,6 +31,8 @@ test('paper default loads persisted Litmus paper accounts without env paper flag
     const config = await store.loadConfig();
     assert.deepEqual(config.accounts.map(account => account.name), ['Litmus1', 'Litmus2']);
     assert.deepEqual(config.accounts.map(account => account.brokerAccountId), ['paper-1', 'paper-2']);
+    assert.equal(config.sandboxes.sbx_litmus1.permissions.allowPaperTrading, true);
+    assert.equal(config.sandboxes.sbx_litmus1.permissions.allowLiveTrading, false);
   } finally {
     for (const [key, value] of Object.entries({
       OPENPROPHET_CONFIG_PATH: previous.config,

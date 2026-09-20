@@ -69,6 +69,7 @@ export const PHASE_TIME_RANGES = {
 
 const DEFAULT_PERMISSIONS = {
   allowLiveTrading: false,
+  allowPaperTrading: true,
   maxPositionPct: 15,
   maxDeployedPct: 80,
   maxDailyLoss: 5,
@@ -785,7 +786,6 @@ function migrateLegacyConfig(config) {
         name: config.sandboxes[sandboxId].name || account.name,
       }, config);
     }
-    if (account.paper) config.sandboxes[sandboxId].permissions.allowLiveTrading = false;
   }
 
   if (!config.activeAccountId) {
@@ -1319,7 +1319,7 @@ export async function updatePhaseTimeRange(phase, range) {
 
 function validatePermissionsPatch(perms) {
   if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('Permissions must be an object');
-  const booleanKeys = ['allowLiveTrading', 'allowOptions', 'allowStocks', 'allow0DTE', 'requireConfirmation'];
+  const booleanKeys = ['allowLiveTrading', 'allowPaperTrading', 'allowOptions', 'allowStocks', 'allow0DTE', 'requireConfirmation'];
   const numberKeys = ['maxPositionPct', 'maxDeployedPct', 'maxDailyLoss', 'maxOpenPositions', 'maxOrderValue', 'maxToolRoundsPerBeat'];
   for (const key of booleanKeys) {
     if (perms[key] !== undefined && typeof perms[key] !== 'boolean') throw new Error(`${key} must be a boolean`);

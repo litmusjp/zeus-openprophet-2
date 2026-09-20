@@ -51,6 +51,7 @@ export function tradingPolicyEnvironment(permissions = {}) {
   const numberValue = (key, fallback) => Number.isFinite(Number(permissions[key])) ? Number(permissions[key]) : fallback;
   return {
     OPENPROPHET_ALLOW_LIVE_TRADING: String(booleanValue('allowLiveTrading', false)),
+    OPENPROPHET_ALLOW_PAPER_TRADING: String(booleanValue('allowPaperTrading', true)),
     OPENPROPHET_ALLOW_OPTIONS: String(booleanValue('allowOptions', false)),
     OPENPROPHET_ALLOW_STOCKS: String(booleanValue('allowStocks', false)),
     OPENPROPHET_ALLOW_0DTE: String(booleanValue('allow0DTE', false)),

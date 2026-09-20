@@ -742,7 +742,13 @@ ${userBlock}`;
     // Build permissions context for the prompt
     const perms = this._resolvePermissions();
     const permLines = [];
-    if (!perms.allowLiveTrading) permLines.push('READ-ONLY MODE: Do NOT place any orders. Analysis and monitoring only.');
+    const account = this._resolveAccount();
+    if (account?.paper === true) {
+      if (perms.allowPaperTrading === false) permLines.push('PAPER TRADING IS DISABLED: Do NOT place paper orders. Analysis and monitoring only.');
+      else permLines.push('PAPER TRADING ENABLED: Orders remain subject to all configured asset, confirmation, broker, and risk safeguards.');
+    } else if (account?.paper === false) {
+      permLines.push('LIVE TRADING IS PROHIBITED: Do NOT place live orders.');
+    }
     if (!perms.allowOptions) permLines.push('Options trading is DISABLED.');
     if (!perms.allowStocks) permLines.push('Stock trading is DISABLED.');
     if (!perms.allow0DTE) permLines.push('0DTE options are NOT allowed.');

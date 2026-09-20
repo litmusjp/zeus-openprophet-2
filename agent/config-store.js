@@ -1029,9 +1029,15 @@ async function fetchBrokerAccountId(account) {
 export async function ensureBrokerAccountBinding(accountId) {
   const account = getAccountById(accountId);
   if (!account) throw new Error('Account not found');
-  if (String(account.brokerAccountId || '').trim()) return account;
-  account.brokerAccountId = await fetchBrokerAccountId(account);
-  await saveConfig();
+  const persistedBrokerAccountId = String(account.brokerAccountId || '').trim();
+  const verifiedBrokerAccountId = await fetchBrokerAccountId(account);
+  if (persistedBrokerAccountId && persistedBrokerAccountId !== verifiedBrokerAccountId) {
+    throw new Error(`broker account binding mismatch: persisted ID ${persistedBrokerAccountId} differs from provider ID ${verifiedBrokerAccountId}`);
+  }
+  if (!persistedBrokerAccountId) {
+    account.brokerAccountId = verifiedBrokerAccountId;
+    await saveConfig();
+  }
   return account;
 }
 

@@ -18,6 +18,7 @@ import {
   getStrategyById,
   getHeartbeatForSandboxPhase,
   getPermissionsForSandbox,
+  ensureBrokerAccountBinding,
 } from './config-store.js';
 import { shouldShowGoLogLine, createGoLogLineBuffer } from './go-log-filter.js';
 
@@ -225,14 +226,14 @@ export class AgentOrchestrator extends EventEmitter {
     runtime.goAxios.defaults.headers.common['X-OpenProphet-Process-Nonce'] = runtime.processNonce;
     const account = getAccountById(runtime.sandbox.accountId);
     if (!account) throw new Error(`Account not found for sandbox ${sandboxId}`);
-    if (!account.brokerAccountId) throw new Error(`Broker account binding is missing for sandbox ${sandboxId}`);
-
     await this.stopGoBackend(sandboxId);
+    const boundAccount = await ensureBrokerAccountBinding(account.id);
+
     await this._ensureBinary();
     await fs.mkdir(path.dirname(this.getSandboxDbPath(sandboxId)), { recursive: true });
 
     const env = buildGoBackendEnv(process.env, {
-      account,
+      account: boundAccount,
       sandboxId,
       processNonce: runtime.processNonce,
       port: runtime.port,
@@ -295,14 +296,14 @@ export class AgentOrchestrator extends EventEmitter {
           await this.stopGoBackend(sandboxId);
           return this.startGoBackend(sandboxId, _isRetry);
         }
-        if (!health.ready || health.sandbox_id !== sandboxId || health.account_id !== account.id || health.broker_account_id !== account.brokerAccountId || health.paper !== account.paper || health.reconciliation_complete !== true || health.process_nonce !== runtime.processNonce) {
+        if (!health.ready || health.sandbox_id !== sandboxId || health.account_id !== boundAccount.id || health.broker_account_id !== boundAccount.brokerAccountId || health.paper !== boundAccount.paper || health.reconciliation_complete !== true || health.process_nonce !== runtime.processNonce) {
           throw new Error('trading backend identity/readiness mismatch');
         }
         runtime.goReady = true;
         this.emit('agent_log', {
           sandboxId,
           level: 'success',
-          message: `Trading backend ready on port ${runtime.port} for ${account.name}`,
+          message: `Trading backend ready on port ${runtime.port} for ${boundAccount.name}`,
         });
         return runtime;
       } catch {

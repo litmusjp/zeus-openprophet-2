@@ -38,6 +38,7 @@ import {
 import { formatSlackNotification } from './slack-format.js';
 import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, markBasicAuthContext, resolveApiAuthToken } from './auth.js';
+import { excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -1732,6 +1733,9 @@ app.post('/api/plugins/slack/test', async (req, res) => {
 
 // ── Verified trade ledger ─────────────────────────────────────────
 async function reconcileSandboxOrders(sandbox, account) {
+  if (account?.paper !== true) {
+    return { orders: [], complete: false, broker_state: 'paper_only_rejected', error: 'verified trade reporting only supports paper accounts' };
+  }
   let localIdentityMismatch = false;
   const localOrders = getPersistedSandboxOrders(sandbox).filter(order => {
     if (order.SandboxID !== sandbox.id || order.BrokerAccountID !== account.brokerAccountId || order.PaperLive !== (account.paper ? 'paper' : 'live')) return false;
@@ -1743,24 +1747,45 @@ async function reconcileSandboxOrders(sandbox, account) {
   });
   try {
     // This endpoint is data-only: never start an execution-capable backend while reading trades.
-    const client = sandbox.id === getActiveSandbox()?.id
-      ? goAxios
-      : orchestrator.getSandboxRuntime(sandbox.id)?.goAxios || null;
-    if (!client) return { orders: localOrders, complete: false, broker_state: 'unavailable' };
-    const { data } = await client.get('/api/v1/orders', { params: { status: 'all' } });
-    const brokerOrders = Array.isArray(data)
+    const runtime = sandbox.id === getActiveSandbox()?.id
+      ? { goAxios, processNonce: TRADING_BOT_PROCESS_NONCE, active: true }
+      : orchestrator.getSandboxRuntime(sandbox.id);
+    let data;
+    let brokerResult;
+    let client = runtime?.goAxios || null;
+    if (client) {
+      try {
+        const health = (await client.get('/health', { timeout: 2000 })).data || {};
+        const healthy = health.ready === true && health.sandbox_id === sandbox.id
+          && health.account_id === account.id && health.broker_account_id === account.brokerAccountId
+          && health.paper === account.paper && health.reconciliation_complete === true
+          && health.process_nonce === runtime.processNonce;
+        if (healthy) {
+          const runtimeData = (await client.get('/api/v1/orders', { params: { status: 'all' } })).data;
+          if (runtimeData?.complete === true && runtimeData?.broker_state === 'available') data = runtimeData;
+          else client = null;
+        } else client = null;
+      } catch (err) {
+        console.warn(`[trades] Runtime order history unavailable for ${sandbox.id}; trying direct paper history: ${err.message}`);
+        client = null;
+      }
+    }
+    if (!client) {
+      brokerResult = await readPaperAccountOrderHistory(account);
+      data = brokerResult.complete === true && brokerResult.broker_state === 'available' ? brokerResult.orders : brokerResult;
+    }
+    const rawBrokerOrders = Array.isArray(data)
       ? data
       : (data && Array.isArray(data.orders) ? data.orders : null);
-    if (!brokerOrders) {
-      return { orders: localOrders, complete: false, broker_state: 'invalid_response' };
+    if (!rawBrokerOrders) {
+      return { orders: [], complete: false, broker_state: 'invalid_response' };
     }
+    const collisionCheck = excludeBrokerIdentityCollisions(rawBrokerOrders.map(normalizeBrokerOrder).filter(Boolean));
+    const brokerOrders = collisionCheck.orders;
     const merged = new Map();
     let unmatchedFilled = false;
-    let unmatchedBrokerFilled = false;
     for (const order of brokerOrders) {
-      if (order.broker_account_id && order.broker_account_id !== account.brokerAccountId) continue;
-      if (order.paper_live && order.paper_live !== (account.paper ? 'paper' : 'live')) continue;
-      const key = order.id || order.ID || order.client_order_id || order.ClientOrderID;
+      const key = order.ID || order.ClientOrderID;
       if (!key) continue;
       const normalized = {
         ...order,
@@ -1769,31 +1794,29 @@ async function reconcileSandboxOrders(sandbox, account) {
         TenantID: account.id,
         SandboxID: sandbox.id,
         broker_identity_verified: true,
+        provider_account_id: account.brokerAccountId,
+        provider_paper: true,
       };
-      if (Number(order.filled_qty ?? order.FilledQty ?? 0) > 0) {
-        const localMatch = localOrders.some(local => local.ID === key || local.ClientOrderID === key);
-        if (!localMatch) {
-          unmatchedBrokerFilled = true;
-          continue;
-        }
-      }
       merged.set(key, normalized);
     }
     for (const order of localOrders) {
-      const key = order.ID || order.ClientOrderID;
-      const brokerOrder = key && merged.get(key);
+      const localKeys = [order.ID, order.ClientOrderID].filter(Boolean).map(String);
+      if (localKeys.some(key => collisionCheck.ambiguousKeys.has(key))) continue;
+      const brokerOrder = matchBrokerOrder(order, brokerOrders);
       if (brokerOrder) {
-        merged.set(key, { ...order, ...brokerOrder });
+        merged.set(brokerOrder.ID || brokerOrder.ClientOrderID, { ...order, ...brokerOrder });
       } else if (Number(order.FilledQty || 0) > 0) {
         unmatchedFilled = true;
-      } else if (key) {
-        merged.set(key, { ...order, evidence: 'local_unconfirmed' });
+      } else if (order.ID || order.ClientOrderID) {
+        merged.set(order.ID || order.ClientOrderID, { ...order, evidence: 'local_unconfirmed' });
       }
     }
-    return { orders: [...merged.values()].sort((a, b) => String(a.SubmittedAt || a.submitted_at || '').localeCompare(String(b.SubmittedAt || b.submitted_at || ''))), complete: !localIdentityMismatch && !unmatchedFilled && !unmatchedBrokerFilled, broker_state: 'available' };
+    const brokerComplete = brokerResult ? brokerResult.complete : true;
+    const complete = !localIdentityMismatch && !unmatchedFilled && !collisionCheck.collisions && brokerComplete;
+    return { orders: [...merged.values()].sort((a, b) => String(a.SubmittedAt || a.submitted_at || '').localeCompare(String(b.SubmittedAt || b.submitted_at || ''))), complete, broker_state: brokerResult?.broker_state || 'available', error: collisionCheck.collisions ? 'broker order identity collision' : brokerResult?.error };
   } catch (err) {
     console.warn(`[trades] Alpaca reconciliation failed for ${sandbox.id}: ${err.message}`);
-    return { orders: localOrders, complete: false, broker_state: 'unavailable', error: err.message };
+    return { orders: [], complete: false, broker_state: 'unavailable', error: err.message };
   }
 }
 
@@ -1808,6 +1831,7 @@ app.get('/api/trades', async (req, res) => {
     const orders = [];
     const trades = [];
     const legacyHistory = [];
+    const accountStates = new Map();
     let complete = true;
     const brokerStates = new Set();
     for (const sandbox of sandboxes) {
@@ -1825,6 +1849,7 @@ app.get('/api/trades', async (req, res) => {
       if (!account || !account.brokerAccountId || typeof account.paper !== 'boolean') {
         complete = false;
         brokerStates.add('identity_unavailable');
+        accountStates.set(sandbox.accountId, { accountId: sandbox.accountId, accountName: account?.name || 'Unknown account', sandboxId: sandbox.id, complete: false, state: 'identity_unavailable' });
         continue;
       }
       const metadata = {
@@ -1840,13 +1865,26 @@ app.get('/api/trades', async (req, res) => {
       const reconciliation = await reconcileSandboxOrders(sandbox, account);
       complete = complete && reconciliation.complete;
       brokerStates.add(reconciliation.broker_state);
+      const previousState = accountStates.get(account.id);
+      accountStates.set(account.id, {
+        accountId: account.id, accountName: account.name, brokerAccountId: account.brokerAccountId,
+        paper: account.paper, agentId: metadata.agentId, agentName: metadata.agentName, sandboxId: sandbox.id,
+        complete: (previousState?.complete ?? true) && reconciliation.complete,
+        state: reconciliation.complete ? reconciliation.broker_state : (reconciliation.broker_state || 'incomplete'),
+        error: reconciliation.error || previousState?.error || null,
+      });
       const sandboxOrders = reconciliation.orders;
       orders.push(...sandboxOrders.map(order => ({ ...order, ...metadata })));
       trades.push(...buildTradeLedger(sandboxOrders, metadata));
       // Legacy history is display-only. It is deliberately excluded from orders,
       // reconciliation, risk state, and buildTradeLedger().
     }
-    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], orders, trades, legacyOrders: legacyHistory });
+    const configuredAccounts = [...new Map(Object.values(config.sandboxes || {}).map(sandbox => {
+      const account = getAccountById(sandbox.accountId);
+      return [sandbox.accountId, { accountId: sandbox.accountId, accountName: account?.name || 'Unknown account', brokerAccountId: account?.brokerAccountId || null, paper: account?.paper === true, sandboxId: sandbox.id }];
+    })).values()];
+    const accounts = configuredAccounts.map(account => ({ ...account, ...(accountStates.get(account.accountId) || { complete: false, state: 'unavailable' }) }));
+    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, orders, trades, legacyOrders: legacyHistory });
   } catch (err) {
     res.status(500).json({ error: `Could not load verified trades: ${err.message}` });
   }

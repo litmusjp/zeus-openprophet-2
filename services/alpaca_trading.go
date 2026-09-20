@@ -546,46 +546,36 @@ func (s *AlpacaTradingService) GetOrderByClientOrderID(ctx context.Context, clie
 }
 
 // ListOrders retrieves orders with optional status filter
+const alpacaOrdersPageLimit = 500
+
+// The installed SDK exposes only timestamp-based pagination. Alpaca's order
+// history API uses an order-ID cursor, so a full SDK page is ambiguous: do not
+// advance by timestamp and silently omit orders sharing a timestamp.
+func orderHistoryRequiresOrderIDCursor(page []alpaca.Order) bool {
+	return len(page) >= alpacaOrdersPageLimit
+}
+
 func (s *AlpacaTradingService) ListOrders(ctx context.Context, status string) ([]*interfaces.Order, error) {
 	if _, err := s.GetAccount(ctx); err != nil {
 		return nil, fmt.Errorf("broker account binding could not be verified before order history read: %w", err)
 	}
 	orders := make([]*interfaces.Order, 0, 500)
-	after := time.Time{}
-	seen := make(map[string]struct{})
-	for page := 0; page < 100; page++ {
-		req := alpaca.GetOrdersRequest{Limit: 500, Status: "all", Direction: "asc", After: after}
-		if status != "" {
-			req.Status = status
-		}
-		alpacaOrders, err := s.client.GetOrders(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list orders page %d: %w", page+1, err)
-		}
-		if len(alpacaOrders) == 0 {
-			return orders, nil
-		}
-		var latest time.Time
-		for i := range alpacaOrders {
-			ao := alpacaOrders[i]
-			if _, ok := seen[ao.ID]; ok {
-				continue
-			}
-			seen[ao.ID] = struct{}{}
-			orders = append(orders, s.convertAlpacaOrder(&ao))
-			if ao.SubmittedAt.After(latest) {
-				latest = ao.SubmittedAt
-			}
-		}
-		if len(alpacaOrders) < 500 {
-			return orders, nil
-		}
-		if latest.IsZero() || !latest.After(after) {
-			return nil, fmt.Errorf("broker order history pagination did not advance after page %d", page+1)
-		}
-		after = latest.Add(time.Nanosecond)
+	req := alpaca.GetOrdersRequest{Limit: alpacaOrdersPageLimit, Status: "all", Direction: "asc"}
+	if status != "" {
+		req.Status = status
 	}
-	return nil, fmt.Errorf("broker order history exceeded pagination safety limit")
+	alpacaOrders, err := s.client.GetOrders(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list orders page 1: %w", err)
+	}
+	for i := range alpacaOrders {
+		order := alpacaOrders[i]
+		orders = append(orders, s.convertAlpacaOrder(&order))
+	}
+	if orderHistoryRequiresOrderIDCursor(alpacaOrders) {
+		return nil, fmt.Errorf("broker order history is incomplete: installed Alpaca SDK lacks documented after_order_id pagination")
+	}
+	return orders, nil
 }
 
 // GetPositions retrieves all current positions

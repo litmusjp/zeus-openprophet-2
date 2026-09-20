@@ -8,7 +8,7 @@ test('active Go startup derives tenant from the bound account and rejects inheri
   assert.match(source, /buildGoBackendEnv\(process\.env/);
   assert.doesNotMatch(source, /OPENPROPHET_TENANT_ID:\s*process\.env\.OPENPROPHET_TENANT_ID\s*\|\|\s*account\.id/);
   assert.match(source, /if \(order\.TenantID !== account\.id\) \{\s*localIdentityMismatch/);
-  assert.match(source, /complete: !localIdentityMismatch && !unmatchedFilled/);
+  assert.match(source, /complete, broker_state: brokerResult\?\.broker_state/);
 });
 
 test('active Go startup preserves the existing binary during forced rebuilds', () => {

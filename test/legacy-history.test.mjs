@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { labelLegacyRows, legacyHistoryCandidatePaths, readLegacyHistoryForSandboxAt } from '../agent/legacy-history.js';
+import { labelLegacyRows, legacyHistoryCandidatePaths, legacyQuarantineProvenanceMatches, readLegacyHistoryForSandboxAt } from '../agent/legacy-history.js';
 
 test('legacy history is a read-only, unverified display projection bound to account mapping', async () => {
   const rows = labelLegacyRows([{ ID: 'old-order-1', Status: 'canceled', FilledQty: 0 }]);
@@ -39,6 +39,21 @@ test('legacy projection selects quarantine only and never falls back to account 
   assert.deepEqual(await readLegacyHistoryForSandboxAt(tempRoot, { id: 'sandbox-1', accountId: 'account-1' }), []);
 });
 
+test('legacy quarantine provenance prevents sandbox/account reassignment', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'openprophet-legacy-provenance-'));
+  const quarantine = path.join(root, 'data', 'quarantine', 'legacy', 'sandbox-1');
+  await fs.mkdir(quarantine, { recursive: true });
+  const databasePath = path.join(quarantine, 'prophet_trader.db');
+  await fs.writeFile(databasePath, 'placeholder');
+  await fs.writeFile(path.join(quarantine, 'QUARANTINED.json'), JSON.stringify({
+    nonActionable: true,
+    provenance: { requestedSandboxId: 'sandbox-1', legacyAccountId: 'account-1' },
+  }));
+  assert.equal(legacyQuarantineProvenanceMatches(databasePath, { id: 'sandbox-1', accountId: 'account-2' }), false);
+  assert.equal(legacyQuarantineProvenanceMatches(databasePath, { id: 'sandbox-1', accountId: 'account-1' }), true);
+  assert.equal((await readLegacyHistoryForSandboxAt(root, { id: 'sandbox-1', accountId: 'account-2' })).length, 0);
+});
+
 test('legacy projection rejects directories and symlinks that resolve outside the permitted roots', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'openprophet-legacy-'));
   const quarantine = path.join(root, 'data', 'quarantine', 'legacy', 'sandbox-1');
@@ -60,7 +75,7 @@ test('legacy projection rejects directories and symlinks that resolve outside th
   assert.deepEqual(await readLegacyHistoryForSandboxAt(root, { id: 'sandbox-1', accountId: 'account-1' }), []);
 });
 
-test('API keeps legacy history separate and fail-closed from verified rendering when reconciliation is incomplete', async () => {
+test('API keeps legacy history separate while rendering complete accounts independently', async () => {
   const server = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
   const page = await fs.readFile(new URL('../agent/public/index.html', import.meta.url), 'utf8');
   assert.match(server, /legacyOrders: legacyHistory/);
@@ -68,8 +83,9 @@ test('API keeps legacy history separate and fail-closed from verified rendering 
   assert.match(server, /legacyHistory\.push/);
   assert.match(page, /legacyOrders=data\.legacyOrders\|\|\[\]/);
   assert.match(page, /verifiedReconciliationComplete = data\.complete !== false/);
-  assert.match(page, /verifiedTrades=verifiedReconciliationComplete \? \(data\.trades\|\|\[\]\) : \[\]/);
-  assert.match(page, /verifiedOrders=verifiedReconciliationComplete \? \(data\.orders\|\|\[\]\) : \[\]/);
-  assert.match(page, /if \(!verifiedReconciliationComplete\)/);
+  assert.match(page, /verifiedAccountStates = new Map/);
+  assert.match(page, /verifiedTrades=\(data\.trades\|\|\[\]\)\.filter\(isCompleteAccount\)/);
+  assert.match(page, /verifiedOrders=\(data\.orders\|\|\[\]\)\.filter\(isCompleteAccount\)/);
+  assert.match(page, /accountRows\.map/);
   assert.match(page, /legacy \/ unverified \| realized P\/L unavailable/);
 });

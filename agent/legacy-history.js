@@ -1,7 +1,7 @@
 // Read-only compatibility projection for pre-durable-identity order history.
 // This module is intentionally separate from execution/reconciliation storage.
 import path from 'path';
-import { realpathSync, statSync } from 'fs';
+import { readFileSync, realpathSync, statSync } from 'fs';
 import Database from 'better-sqlite3';
 
 function safeSegment(value) {
@@ -68,6 +68,17 @@ function safeDatabasePath(databasePath, allowedRoot) {
   }
 }
 
+export function legacyQuarantineProvenanceMatches(databasePath, sandbox) {
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(path.dirname(databasePath), 'QUARANTINED.json'), 'utf8'));
+    const provenance = manifest?.provenance;
+    return manifest?.nonActionable === true && provenance?.requestedSandboxId === sandbox?.id
+      && provenance?.legacyAccountId === sandbox?.accountId;
+  } catch {
+    return false;
+  }
+}
+
 export function labelLegacyRows(rows, source = 'quarantined-legacy-db') {
   return rows.map(order => ({
     ...order,
@@ -95,6 +106,7 @@ export function readLegacyHistoryForSandboxAt(projectRoot, sandbox) {
   const allowedRoot = path.join(projectRoot, 'data', 'quarantine', 'legacy');
   const candidate = roots
     .map(([dbPath, source]) => [safeDatabasePath(dbPath, allowedRoot), dbPath, source])
+    .filter(([safePath, dbPath]) => safePath && legacyQuarantineProvenanceMatches(dbPath, sandbox))
     .find(([safePath]) => safePath);
   return candidate ? readFile(candidate[0], candidate[2]) : [];
 }

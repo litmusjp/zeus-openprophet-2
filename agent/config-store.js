@@ -664,7 +664,7 @@ function createDefaultConfig() {
       model: configuredDefaultModel(),
       customPrompt: '',
     },
-    models: getAvailableModels(),
+    models: EXECUTION_MODE === 'enabled' ? getAvailableModels() : [],
   };
 }
 
@@ -824,6 +824,7 @@ function getActiveSandboxFromConfig(config) {
 
 let _config = null;
 let _writeLock = Promise.resolve();
+const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';
 
 export async function loadConfig() {
   try {
@@ -834,15 +835,24 @@ export async function loadConfig() {
     _config = createDefaultConfig();
   }
 
-  if (_config.accounts.length === 0) {
+  // Inert/read-only startup must not import credentials or contact a broker.
+  if (_config.accounts.length === 0 && EXECUTION_MODE === 'enabled') {
     const pk = process.env.ALPACA_PUBLIC_KEY || process.env.ALPACA_API_KEY;
     const sk = process.env.ALPACA_SECRET_KEY;
     if (pk && sk) {
+      if (process.env.ALPACA_PAPER !== 'true' && process.env.ALPACA_PAPER !== 'false') {
+        throw new Error('ALPACA_PAPER must be explicitly true or false before broker account import');
+      }
       const baseUrl = process.env.ALPACA_BASE_URL || process.env.ALPACA_ENDPOINT || '';
       const isPaper = baseUrl.includes('paper') || process.env.ALPACA_PAPER === 'true';
       const id = crypto.randomUUID().slice(0, 8);
       const account = {
         id,
+        brokerAccountId: await fetchBrokerAccountId({
+          publicKey: pk,
+          secretKey: sk,
+          baseUrl: alpacaTradingUrl(isPaper, baseUrl),
+        }),
         name: isPaper ? 'Paper (from .env)' : 'Live (from .env)',
         publicKey: pk,
         secretKey: sk,
@@ -859,17 +869,18 @@ export async function loadConfig() {
   }
 
   syncLegacyAliases(_config);
-  await saveConfig();
+  if (EXECUTION_MODE === 'enabled') await saveConfig();
   return _config;
 }
 
 export async function saveConfig() {
-  _writeLock = _writeLock.then(async () => {
+  const write = _writeLock.catch(() => {}).then(async () => {
     syncLegacyAliases(_config);
     await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
     await fs.writeFile(CONFIG_PATH, JSON.stringify(_config, null, 2));
-  }).catch(err => console.error('Config save error:', err.message));
-  return _writeLock;
+  });
+  _writeLock = write;
+  return write;
 }
 
 export function getConfig() {
@@ -916,14 +927,18 @@ function updateSandbox(accountId, updater) {
 // ── Accounts ───────────────────────────────────────────────────────
 
 export async function addAccount({ name, publicKey, secretKey, baseUrl, paper }) {
+  if (typeof paper !== 'boolean') throw new Error('paper must be explicitly true or false');
   const id = crypto.randomUUID().slice(0, 8);
+  const normalizedBaseUrl = alpacaTradingUrl(paper, baseUrl);
+  const brokerAccountId = await fetchBrokerAccountId({ publicKey, secretKey, baseUrl: normalizedBaseUrl });
   const account = {
     id,
+    brokerAccountId,
     name: name || `Account ${_config.accounts.length + 1}`,
     publicKey,
     secretKey,
     baseUrl: alpacaTradingUrl(paper, baseUrl),
-    paper: paper !== false,
+    paper,
     createdAt: new Date().toISOString(),
   };
   _config.accounts.push(account);
@@ -971,7 +986,39 @@ export function getAccountById(id) {
   return _config.accounts.find(a => a.id === id) || null;
 }
 
-// ── Agents ─────────────────────────────────────────────────────────
+function brokerAccountEndpoint(baseUrl) {
+  const parsed = new URL(String(baseUrl || ''));
+  if (parsed.protocol !== 'https:') throw new Error('broker endpoint must use HTTPS');
+  const prefix = parsed.pathname.replace(/\/+$/, '').endsWith('/v2')
+    ? parsed.pathname.replace(/\/+$/, '')
+    : `${parsed.pathname.replace(/\/+$/, '')}/v2`;
+  return `${parsed.origin}${prefix}/account`;
+}
+
+async function fetchBrokerAccountId(account) {
+  const response = await fetch(brokerAccountEndpoint(account.baseUrl), {
+    headers: {
+      'APCA-API-KEY-ID': account.publicKey,
+      'APCA-API-SECRET-KEY': account.secretKey,
+      Accept: 'application/json',
+    },
+  });
+  if (!response.ok) throw new Error(`broker account verification returned HTTP ${response.status}`);
+  const payload = await response.json();
+  const brokerAccountId = String(payload?.id || '').trim();
+  if (!brokerAccountId) throw new Error('broker account verification returned no account ID');
+  return brokerAccountId;
+}
+
+export async function ensureBrokerAccountBinding(accountId) {
+  const account = getAccountById(accountId);
+  if (!account) throw new Error('Account not found');
+  if (String(account.brokerAccountId || '').trim()) return account;
+  account.brokerAccountId = await fetchBrokerAccountId(account);
+  await saveConfig();
+  return account;
+}
+
 
 export async function addAgent(agent) {
   const id = crypto.randomUUID().slice(0, 8);
@@ -1248,7 +1295,30 @@ export async function updatePhaseTimeRange(phase, range) {
 
 // ── Permissions ───────────────────────────────────────────────────
 
+function validatePermissionsPatch(perms) {
+  if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('Permissions must be an object');
+  const booleanKeys = ['allowLiveTrading', 'allowOptions', 'allowStocks', 'allow0DTE', 'requireConfirmation'];
+  const numberKeys = ['maxPositionPct', 'maxDeployedPct', 'maxDailyLoss', 'maxOpenPositions', 'maxOrderValue', 'maxToolRoundsPerBeat'];
+  for (const key of booleanKeys) {
+    if (perms[key] !== undefined && typeof perms[key] !== 'boolean') throw new Error(`${key} must be a boolean`);
+  }
+  for (const key of numberKeys) {
+    if (perms[key] !== undefined && (typeof perms[key] !== 'number' || !Number.isFinite(perms[key]))) throw new Error(`${key} must be a finite number`);
+  }
+  if (perms.maxPositionPct !== undefined && (perms.maxPositionPct < 0 || perms.maxPositionPct > 100)) throw new Error('maxPositionPct must be between 0 and 100');
+  if (perms.maxDeployedPct !== undefined && (perms.maxDeployedPct < 0 || perms.maxDeployedPct > 100)) throw new Error('maxDeployedPct must be between 0 and 100');
+  if (perms.maxDailyLoss !== undefined && perms.maxDailyLoss < 0) throw new Error('maxDailyLoss must be non-negative');
+  if (perms.maxOpenPositions !== undefined && (!Number.isInteger(perms.maxOpenPositions) || perms.maxOpenPositions < 0)) throw new Error('maxOpenPositions must be a non-negative integer');
+  if (perms.maxOrderValue !== undefined && perms.maxOrderValue < 0) throw new Error('maxOrderValue must be non-negative');
+  if (perms.maxToolRoundsPerBeat !== undefined && (!Number.isInteger(perms.maxToolRoundsPerBeat) || perms.maxToolRoundsPerBeat < 1)) throw new Error('maxToolRoundsPerBeat must be a positive integer');
+  for (const key of ['allowedTools', 'blockedTools']) {
+    if (perms[key] !== undefined && (!Array.isArray(perms[key]) || perms[key].some(value => typeof value !== 'string'))) throw new Error(`${key} must be an array of strings`);
+  }
+  return perms;
+}
+
 export async function updatePermissions(perms) {
+  validatePermissionsPatch(perms);
   updateSandbox(_config.activeAccountId, sandbox => ({
     ...sandbox,
     permissions: { ...sandbox.permissions, ...perms },
@@ -1257,6 +1327,7 @@ export async function updatePermissions(perms) {
 }
 
 export async function updatePermissionsForSandbox(sandboxId, perms) {
+  validatePermissionsPatch(perms);
   const sandbox = getSandbox(sandboxId);
   if (!sandbox) throw new Error('Sandbox not found');
   _config.sandboxes[sandboxId] = mergeSandbox({

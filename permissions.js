@@ -2,10 +2,10 @@
 // enforcePermissions() in mcp-server.js fetches `perms` from the agent server, then delegates
 // the actual policy decision here so it can be unit-tested without a running server.
 
-export const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position'];
+export const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position', 'cancel_order'];
 
 export function isOptionSymbol(symbol = '') {
-  return /^[A-Z0-9.]{1,6}\d{6}[CP]\d{8}$/.test(String(symbol).toUpperCase());
+  return /^[A-Z0-9. ]{1,6}\d{6}[CP]\d{8}$/.test(String(symbol).trim().toUpperCase());
 }
 
 export function estimateOrderValue(toolName, args = {}) {
@@ -24,6 +24,13 @@ export function estimateOrderValue(toolName, args = {}) {
 // Throws an Error describing the violation if the call is not permitted; returns undefined if allowed.
 // `now` is injectable so the 0DTE (same-day expiry) rule is deterministic in tests.
 export function checkPermissions(toolName, args = {}, perms = {}, now = new Date()) {
+  const allowLiveTrading = perms.allowLiveTrading === true;
+  const allowOptions = perms.allowOptions === true;
+  const allowStocks = perms.allowStocks === true;
+  const allow0DTE = perms.allow0DTE === true;
+  const requireConfirmation = perms.requireConfirmation !== false;
+  const maxOrderValue = Number.isFinite(Number(perms.maxOrderValue)) ? Number(perms.maxOrderValue) : 0;
+
   // Blocked tools
   if (perms.blockedTools?.length && perms.blockedTools.includes(toolName)) {
     throw new Error(`Tool "${toolName}" is blocked by permissions. Blocked tools: ${perms.blockedTools.join(', ')}`);
@@ -32,20 +39,41 @@ export function checkPermissions(toolName, args = {}, perms = {}, now = new Date
   // Everything below is order-specific
   if (!ORDER_TOOLS.includes(toolName)) return;
 
+  // Opening risk must have an explicit positive order-value cap; zero is not "uncapped".
+  if (toolName !== 'close_managed_position' && toolName !== 'cancel_order' && maxOrderValue <= 0) {
+    throw new Error('Opening orders require a positive maxOrderValue risk cap.');
+  }
+
   // Live trading disabled
-  if (!perms.allowLiveTrading) {
+  if (!allowLiveTrading && toolName !== 'close_managed_position' && toolName !== 'cancel_order') {
     throw new Error('Live trading is DISABLED (read-only mode). Cannot place orders. Change permissions to enable.');
   }
+  // Generic equity/managed-position routes must never accept OCC option symbols.
+  // Options require the explicit route so position intent and option limits apply.
+  if (isOptionSymbol(args.symbol) && toolName !== 'place_options_order') {
+    throw new Error('OCC option symbols must use place_options_order with an explicit position_intent.');
+  }
+  // Explicit options orders must carry intent; buy/sell alone is ambiguous.
+  if (toolName === 'place_options_order') {
+    const validIntents = new Set(['buy_to_open', 'buy_to_close', 'sell_to_open', 'sell_to_close']);
+    if (!validIntents.has(args.position_intent)) {
+      throw new Error('place_options_order requires an explicit position_intent.');
+    }
+    if ((args.position_intent.startsWith('buy_') && args.side !== 'buy') ||
+        (args.position_intent.startsWith('sell_') && args.side !== 'sell')) {
+      throw new Error('position_intent must match the order side.');
+    }
+  }
   // Options check
-  if (!perms.allowOptions && (toolName === 'place_options_order' || (args.symbol && args.symbol.length > 10))) {
+  if (!allowOptions && (toolName === 'place_options_order' || (args.symbol && args.symbol.length > 10))) {
     throw new Error('Options trading is DISABLED by permissions.');
   }
   // Stock check
-  if (!perms.allowStocks && (toolName === 'place_buy_order' || toolName === 'place_sell_order')) {
+  if (!allowStocks && (toolName === 'place_buy_order' || toolName === 'place_sell_order')) {
     throw new Error('Stock trading is DISABLED by permissions.');
   }
   // 0DTE check for options — OCC format: SYMBOL + YYMMDD + C/P + strike
-  if (!perms.allow0DTE && toolName === 'place_options_order' && args.symbol) {
+  if (!allow0DTE && toolName === 'place_options_order' && args.symbol) {
     const match = args.symbol.match(/(\d{6})[CP]/);
     if (match) {
       const expStr = match[1]; // YYMMDD
@@ -59,14 +87,14 @@ export function checkPermissions(toolName, args = {}, perms = {}, now = new Date
     }
   }
   // Require confirmation
-  if (perms.requireConfirmation) {
+  if (requireConfirmation) {
     throw new Error('Order requires operator confirmation (requireConfirmation is enabled). Tell the operator what you want to do and wait for them to disable this setting or approve via the dashboard.');
   }
   // Max order value
-  if (perms.maxOrderValue > 0) {
+  if (maxOrderValue > 0) {
     const checkValue = estimateOrderValue(toolName, args);
-    if (checkValue > perms.maxOrderValue) {
-      throw new Error(`Order value $${checkValue.toFixed(2)} exceeds max allowed $${perms.maxOrderValue}. Reduce size or change permissions.`);
+    if (checkValue > maxOrderValue) {
+      throw new Error(`Order value $${checkValue.toFixed(2)} exceeds max allowed $${maxOrderValue}. Reduce size or change permissions.`);
     }
   }
 }

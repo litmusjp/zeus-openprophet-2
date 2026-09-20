@@ -1,38 +1,60 @@
 #!/usr/bin/env node
 
-import 'dotenv/config';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
 import { storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } from './vectorDB.js';
-import { ORDER_TOOLS, checkPermissions } from './permissions.js';
+import { checkPermissions } from './permissions.js';
+import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
 
 // Configuration
-const TRADING_BOT_URL = process.env.TRADING_BOT_URL || 'http://127.0.0.1:4534';
-const TRADING_BOT_TOKEN = process.env.TRADING_BOT_TOKEN || '';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const OPENPROPHET_ACCOUNT_ID = process.env.OPENPROPHET_ACCOUNT_ID || 'default';
-const OPENPROPHET_ROLE = process.env.OPENPROPHET_ROLE || 'agent';
+const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';
+const EXECUTION_START_ENABLED = EXECUTION_MODE === 'enabled';
+const TRADING_BOT_URL = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_URL || 'http://127.0.0.1:4534') : '';
+const TRADING_BOT_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_TOKEN || '') : '';
+const TRADING_BOT_OPERATOR_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_OPERATOR_TOKEN || '') : '';
+const OPENPROPHET_ACCOUNT_ID = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_ACCOUNT_ID || 'default') : 'inert';
+const OPENPROPHET_ROLE = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_ROLE || 'agent') : 'agent';
 const SESSION_CONTEXT_ACCOUNT_ID = OPENPROPHET_ROLE === 'manager' ? '__manager__' : OPENPROPHET_ACCOUNT_ID;
-const OPENPROPHET_SANDBOX_ID = process.env.OPENPROPHET_SANDBOX_ID || `sbx_${OPENPROPHET_ACCOUNT_ID}`;
-const SANDBOX_DATA_DIR = path.join(process.cwd(), 'data', 'sandboxes', OPENPROPHET_ACCOUNT_ID);
+const OPENPROPHET_SANDBOX_ID = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_SANDBOX_ID || `sbx_${OPENPROPHET_ACCOUNT_ID}`) : 'inert';
+const OPENPROPHET_PROCESS_NONCE = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_PROCESS_NONCE || process.env.TRADING_BOT_PROCESS_NONCE || '') : '';
+const SANDBOX_DATA_DIR = path.join(process.cwd(), 'data', 'sandboxes', OPENPROPHET_SANDBOX_ID);
 const SUMMARIES_DIR = path.join(SANDBOX_DATA_DIR, 'news_summaries');
 const DECISIONS_DIR = path.join(SANDBOX_DATA_DIR, 'decisive_actions');
 
-// Initialize Gemini
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+function unavailableProvider() {
+  throw new Error('AI provider is unavailable in inert mode');
+}
+
+function unavailableBrokerClient() {
+  return new Proxy({}, { get: () => unavailableProvider });
+}
+
+// Resolve mode before any provider credential, provider construction, or data-directory side effect.
+let model = null;
+if (EXECUTION_START_ENABLED) {
+  const { GoogleGenerativeAI } = await import('@google/generative-ai');
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+}
 
 // Ensure directories exist
-await fs.mkdir(SUMMARIES_DIR, { recursive: true });
-await fs.mkdir(DECISIONS_DIR, { recursive: true });
+if (EXECUTION_START_ENABLED) {
+  await fs.mkdir(SUMMARIES_DIR, { recursive: true });
+  await fs.mkdir(DECISIONS_DIR, { recursive: true });
+}
+
+// Inert startup is terminal: no MCP server loop or stdio transport is needed.
+if (!EXECUTION_START_ENABLED) {
+  console.error('OpenProphet MCP unavailable: execution mode is inert');
+  process.exit(0);
+}
 
 // Helper to call trading bot API - resolves correct port per sandbox
 async function getTradingBotUrl() {
@@ -61,10 +83,19 @@ async function callTradingBot(endpoint, method = 'GET', data = null) {
     const config = {
       method,
       url: `${_tradingBotUrl}/api/v1${endpoint}`,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-OpenProphet-Sandbox-ID': OPENPROPHET_SANDBOX_ID,
+        'X-OpenProphet-Account-ID': OPENPROPHET_ACCOUNT_ID,
+        'X-OpenProphet-Process-Nonce': OPENPROPHET_PROCESS_NONCE,
+      },
     };
     if (TRADING_BOT_TOKEN) {
       config.headers.Authorization = `Bearer ${TRADING_BOT_TOKEN}`;
+    }
+    if (method === 'DELETE' && (endpoint.startsWith('/orders/') || endpoint.startsWith('/positions/managed/'))) {
+      if (!TRADING_BOT_OPERATOR_TOKEN) throw new Error('operator authorization is unavailable');
+      config.headers['X-OpenProphet-Operator-Token'] = TRADING_BOT_OPERATOR_TOKEN;
     }
     if (data) {
       config.data = data;
@@ -162,10 +193,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_buy_order',
-        description: 'Place a buy order for a stock or option',
+        description: 'Place a buy order for a stock. OCC option symbols are rejected; use place_options_order for options.',
         inputSchema: {
           type: 'object',
           properties: {
+            client_order_id: {
+              type: 'string',
+              description: 'Stable client order ID. Reuse the same ID only after reconciling an uncertain submission.',
+            },
             symbol: {
               type: 'string',
               description: 'Stock symbol (e.g., AAPL, TSLA)',
@@ -196,15 +231,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Relevant market context for this setup',
             },
           },
-          required: ['symbol', 'quantity', 'order_type'],
+          required: ['client_order_id', 'symbol', 'quantity', 'order_type'],
         },
       },
       {
         name: 'place_sell_order',
-        description: 'Place a sell order for a stock or option',
+        description: 'Place a sell order for a stock. OCC option symbols are rejected; use place_options_order for options.',
         inputSchema: {
           type: 'object',
           properties: {
+            client_order_id: {
+              type: 'string',
+              description: 'Stable client order ID. Reuse the same ID only after reconciling an uncertain submission.',
+            },
             symbol: {
               type: 'string',
               description: 'Stock symbol (e.g., AAPL, TSLA)',
@@ -235,7 +274,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Relevant market context for this setup',
             },
           },
-          required: ['symbol', 'quantity', 'order_type'],
+          required: ['client_order_id', 'symbol', 'quantity', 'order_type'],
         },
       },
       {
@@ -244,6 +283,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: 'object',
           properties: {
+            client_order_id: {
+              type: 'string',
+              description: 'Required stable identity for this managed entry; reuse it when reconciling an uncertain submission.',
+            },
             symbol: {
               type: 'string',
               description: 'Stock symbol (e.g., BE, NXT, GOOGL)',
@@ -333,7 +376,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Relevant market context for this setup',
             },
           },
-          required: ['symbol', 'side', 'allocation_dollars'],
+          required: ['client_order_id', 'symbol', 'side', 'allocation_dollars'],
         },
       },
       {
@@ -747,10 +790,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place an options order (calls or puts)',
+        description: 'Place a regular-session options order. The broker clock is checked immediately before submission; closed-session requests are saved as planned_for_next_session and are not broker orders.',
         inputSchema: {
           type: 'object',
           properties: {
+            client_order_id: {
+              type: 'string',
+              description: 'Stable client order ID returned for a planned/failed intent. Include it only when retrying that exact persisted intent.',
+            },
             symbol: {
               type: 'string',
               description: 'Options symbol in OCC format (e.g., TSLA251219C00400000 for TSLA Dec 19 2025 $400 Call)',
@@ -770,7 +817,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             position_intent: {
               type: 'string',
-              description: 'Position intent (optional, defaults based on side)',
+              description: 'Position intent (required; never infer from side)',
               enum: ['buy_to_open', 'buy_to_close', 'sell_to_open', 'sell_to_close'],
             },
             order_type: {
@@ -795,7 +842,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Relevant market context for this setup',
             },
           },
-          required: ['symbol', 'quantity', 'side', 'order_type'],
+          required: ['client_order_id', 'symbol', 'underlying', 'quantity', 'side', 'position_intent', 'order_type'],
         },
       },
       {
@@ -1167,22 +1214,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 // ── Permission Enforcement ──────────────────────────────────────────
-const AGENT_URL = process.env.AGENT_URL || 'http://localhost:3737';
-const AGENT_AUTH_TOKEN = process.env.AGENT_AUTH_TOKEN || '';
+const AGENT_URL = EXECUTION_START_ENABLED ? (process.env.AGENT_URL || 'http://localhost:3737') : '';
+const AGENT_AUTH_TOKEN = EXECUTION_START_ENABLED ? (process.env.AGENT_AUTH_TOKEN || '') : '';
+const OPERATOR_TOKEN = EXECUTION_START_ENABLED ? (process.env.OPERATOR_TOKEN || process.env.TRADING_BOT_OPERATOR_TOKEN || '') : '';
 const AGENT_QUERY = { sandboxId: OPENPROPHET_SANDBOX_ID };
-const agentAxios = axios.create({
-  headers: AGENT_AUTH_TOKEN ? { Authorization: `Bearer ${AGENT_AUTH_TOKEN}` } : {},
-});
+const agentAxios = EXECUTION_START_ENABLED ? axios.create({
+  headers: AGENT_AUTH_TOKEN ? {
+    Authorization: `Bearer ${AGENT_AUTH_TOKEN}`,
+    ...(OPERATOR_TOKEN ? { 'X-OpenProphet-Operator-Token': OPERATOR_TOKEN } : {}),
+  } : {},
+}) : unavailableBrokerClient();
 async function enforcePermissions(toolName, args) {
-  let perms;
-  try {
-    const resp = await agentAxios.get(`${AGENT_URL}/api/permissions`, { timeout: 3000, params: AGENT_QUERY });
-    perms = resp.data;
-  } catch {
-    // If agent server unreachable, allow (fail open for non-order tools, fail closed for orders)
-    if (ORDER_TOOLS.includes(toolName)) throw new Error('Cannot verify permissions — agent server unreachable. Order blocked for safety.');
-    return;
-  }
+  const perms = await verifyPermissions({
+    toolName,
+    args,
+    enabled: EXECUTION_START_ENABLED,
+    authToken: AGENT_AUTH_TOKEN,
+    getPermissions: async () => {
+      const resp = await agentAxios.get(`${AGENT_URL}/api/permissions`, { timeout: 3000, params: AGENT_QUERY });
+      return resp.data;
+    },
+  });
 
   // Delegate the actual policy decision to the pure, unit-tested checker.
   checkPermissions(toolName, args, perms);
@@ -1222,12 +1274,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_orders': {
-        const data = await callTradingBot('/orders');
+        const data = await callTradingBot('/orders?status=all');
+        const rawOrders = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : []);
+        const orders = rawOrders.map((order) => ({
+          ...order,
+          client_order_id: order.client_order_id || order.ClientOrderID,
+          order_id: order.order_id || order.ID,
+          status: order.status || order.Status,
+          asset_class: order.asset_class || order.AssetClass,
+          underlying: order.underlying || order.Underlying,
+          position_intent: order.position_intent || order.PositionIntent,
+          next_eligible_at: order.next_eligible_at || order.NextEligibleAt,
+        }));
+        const response = Array.isArray(data) ? orders : { ...data, orders };
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(data, null, 2),
+              text: JSON.stringify(response, null, 2),
             },
           ],
         };
@@ -1239,6 +1303,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           symbol: args.symbol,
           qty: args.quantity,
           type: args.order_type,
+          ...(args.client_order_id && { client_order_id: args.client_order_id }),
           ...(args.limit_price && { limit_price: args.limit_price })
         };
         const data = await callTradingBot('/orders/buy', 'POST', requestData);
@@ -1252,6 +1317,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           symbol: args.symbol,
           qty: args.quantity,
           type: args.order_type,
+          ...(args.client_order_id && { client_order_id: args.client_order_id }),
           ...(args.limit_price && { limit_price: args.limit_price })
         };
         const data = await callTradingBot('/orders/sell', 'POST', requestData);
@@ -1761,13 +1827,14 @@ ${allNews.map((article, i) =>
 
       case 'place_options_order': {
         const requestData = {
+          ...(args.client_order_id && { client_order_id: args.client_order_id }),
           symbol: args.symbol,
           underlying: args.underlying,
           qty: args.quantity,
           side: args.side,
           type: args.order_type,
-          ...(args.position_intent && { position_intent: args.position_intent }),
-          ...(args.limit_price && { limit_price: args.limit_price })
+          position_intent: args.position_intent,
+          ...(args.limit_price !== undefined && { limit_price: args.limit_price })
         };
         const data = await callTradingBot('/options/order', 'POST', requestData);
         if (isOpeningIntent(args.position_intent)) void autoStoreSetup(args, args.side || 'buy');
@@ -1842,6 +1909,13 @@ ${allNews.map((article, i) =>
       case 'get_datetime': {
         const timezone = args.timezone || 'America/New_York';
         const now = new Date();
+        let brokerClock = null;
+        let brokerClockError = null;
+        try {
+          brokerClock = await callTradingBot('/clock');
+        } catch (error) {
+          brokerClockError = error.message;
+        }
 
         try {
           // Time formatting
@@ -1877,22 +1951,10 @@ ${allNews.map((article, i) =>
             weekday: 'long',
           });
 
-          // Check if within market hours (9:30 AM - 4:00 PM ET)
-          const etTime = now.toLocaleTimeString('en-US', {
-            timeZone: 'America/New_York',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          });
-          const [hours, minutes] = etTime.split(':').map(Number);
-          const marketMinutes = hours * 60 + minutes;
-          const marketOpen = marketMinutes >= 570 && marketMinutes < 960; // 9:30 AM to 4:00 PM
-          const preMarket = marketMinutes >= 240 && marketMinutes < 570; // 4:00 AM to 9:30 AM
-          const afterHours = marketMinutes >= 960 && marketMinutes < 1200; // 4:00 PM to 8:00 PM
-
-          // Check if it's a weekday
-          const actualDay = now.getDay();
-          const marketDay = actualDay >= 1 && actualDay <= 5;
+          // Session status below comes from the broker clock. The local date is retained
+          // only for human-readable context and must not authorize execution.
+          const marketDayOfWeek = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+          const marketDay = marketDayOfWeek !== 'Saturday' && marketDayOfWeek !== 'Sunday';
 
           // US market holidays (NYSE observed) — 2025-2027
           const marketHolidays = [
@@ -1911,13 +1973,11 @@ ${allNews.map((article, i) =>
           ];
           const isHoliday = marketHolidays.includes(isoDate);
 
-          // Determine market status
-          let marketStatus = 'CLOSED';
-          if (marketDay && !isHoliday) {
-            if (marketOpen) marketStatus = 'OPEN';
-            else if (preMarket) marketStatus = 'PRE_MARKET';
-            else if (afterHours) marketStatus = 'AFTER_HOURS';
-          }
+          // Market status is broker-authoritative. The local weekday/holiday values below
+          // are retained only as context and never authorize an order.
+          const brokerIsOpen = brokerClock?.is_open ?? brokerClock?.IsOpen;
+          let marketStatus = 'BROKER_CLOCK_UNAVAILABLE';
+          if (brokerClock) marketStatus = brokerIsOpen ? 'OPEN' : 'CLOSED';
 
           return {
             content: [
@@ -1933,9 +1993,12 @@ ${allNews.map((article, i) =>
                   iso: now.toISOString(),
                   unix: Math.floor(now.getTime() / 1000),
                   is_weekday: marketDay,
-                  is_market_holiday: isHoliday,
+                  local_is_market_holiday_estimate: isHoliday,
                   market_status: marketStatus,
-                  markets_open_today: marketDay && !isHoliday,
+                  markets_open_today: brokerClock ? Boolean(brokerIsOpen) : null,
+                  market_status_source: brokerClock ? 'alpaca_clock' : 'unavailable',
+                  broker_clock: brokerClock,
+                  broker_clock_error: brokerClockError,
                 }, null, 2),
               },
             ],
@@ -2168,6 +2231,12 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
       }
 
       case 'update_permissions': {
+        if (OPENPROPHET_ROLE !== 'operator') {
+          throw new Error('permission updates require the operator role');
+        }
+        if (!AGENT_AUTH_TOKEN) {
+          throw new Error('operator authorization is unavailable');
+        }
         await agentAxios.put(`${AGENT_URL}/api/permissions`, {
           ...args,
           sandboxId: OPENPROPHET_SANDBOX_ID,

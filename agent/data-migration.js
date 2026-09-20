@@ -39,42 +39,91 @@ async function copyFileIfNeeded(sourcePath, targetPath) {
   return true;
 }
 
-export async function migrateLegacyDataForAccount(accountId) {
-  if (!accountId) return { migrated: false, copied: [] };
+async function readVerifiedProvenance(legacyRoot, expected) {
+  const manifestPath = path.join(legacyRoot, 'legacy-provenance.json');
+  try {
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+    return manifest?.serverOwned === true &&
+      manifest.accountId === expected.accountId &&
+      manifest.tenantId === expected.tenantId &&
+      manifest.sandboxId === expected.sandboxId &&
+      manifest.brokerAccountId === expected.brokerAccountId;
+  } catch {
+    return false;
+  }
+}
 
-  const sandboxRoot = path.join(PROJECT_ROOT, 'data', 'sandboxes', accountId);
-  const markerPath = path.join(sandboxRoot, '.migrated-from-root.json');
+export async function migrateLegacyDataForSandbox(sandboxId, legacyAccountId = '') {
+  return migrateLegacyDataForSandboxAt(PROJECT_ROOT, sandboxId, legacyAccountId);
+}
+
+export async function migrateLegacyDataForSandboxAt(projectRoot, sandboxId, legacyAccountId = '') {
+  if (!sandboxId) return { migrated: false, copied: [] };
+
+  const sandboxRoot = path.join(projectRoot, 'data', 'sandboxes', sandboxId);
+  const markerPath = path.join(sandboxRoot, '.migrated-from-legacy-v2.json');
   if (await exists(markerPath)) {
     return { migrated: false, copied: [] };
   }
 
+  const canonicalSandboxId = legacyAccountId ? `sbx_${legacyAccountId}` : '';
+  const legacySandboxRoot = legacyAccountId
+    ? path.join(projectRoot, 'data', 'sandboxes', legacyAccountId)
+    : '';
+  const verified = Boolean(legacySandboxRoot && await readVerifiedProvenance(legacySandboxRoot, {
+    accountId: legacyAccountId,
+    tenantId: process.env.OPENPROPHET_TENANT_ID || '',
+    sandboxId,
+    brokerAccountId: process.env.ALPACA_ACCOUNT_ID || '',
+  }));
+  const canMigrateLegacyAccount = verified && Boolean(legacyAccountId && (sandboxId === canonicalSandboxId || sandboxId === legacyAccountId));
   const copied = [];
+  const quarantined = [];
+  const quarantineRoot = path.join(projectRoot, 'data', 'quarantine', 'legacy', sandboxId);
+  const destinationRoot = canMigrateLegacyAccount ? sandboxRoot : quarantineRoot;
   const dirMappings = [
-    ['activity_logs', path.join(sandboxRoot, 'activity_logs')],
-    ['decisive_actions', path.join(sandboxRoot, 'decisive_actions')],
-    ['news_summaries', path.join(sandboxRoot, 'news_summaries')],
+    ['activity_logs'],
+    ['decisive_actions'],
+    ['news_summaries'],
   ];
 
-  for (const [sourceName, targetDir] of dirMappings) {
-    const sourceDir = path.join(PROJECT_ROOT, sourceName);
-    if (await copyDirIfNeeded(sourceDir, targetDir)) {
-      copied.push(sourceName);
+  for (const [sourceName] of dirMappings) {
+    const legacyDir = legacySandboxRoot ? path.join(legacySandboxRoot, sourceName) : '';
+    if (legacyDir && await copyDirIfNeeded(legacyDir, path.join(destinationRoot, sourceName))) {
+      (canMigrateLegacyAccount ? copied : quarantined).push(sourceName);
     }
   }
 
-  const dbSource = path.join(PROJECT_ROOT, 'data', 'prophet_trader.db');
-  const dbTarget = path.join(sandboxRoot, 'prophet_trader.db');
-  if (await copyFileIfNeeded(dbSource, dbTarget)) copied.push('prophet_trader.db');
-  if (await copyFileIfNeeded(`${dbSource}-wal`, `${dbTarget}-wal`)) copied.push('prophet_trader.db-wal');
-  if (await copyFileIfNeeded(`${dbSource}-shm`, `${dbTarget}-shm`)) copied.push('prophet_trader.db-shm');
+  const legacyDb = legacySandboxRoot ? path.join(legacySandboxRoot, 'prophet_trader.db') : '';
+  const dbSource = legacyDb && await exists(legacyDb) ? legacyDb : '';
+  const dbTarget = path.join(destinationRoot, 'prophet_trader.db');
+  if (await copyFileIfNeeded(dbSource, dbTarget)) (canMigrateLegacyAccount ? copied : quarantined).push('prophet_trader.db');
+  if (await copyFileIfNeeded(`${dbSource}-wal`, `${dbTarget}-wal`)) (canMigrateLegacyAccount ? copied : quarantined).push('prophet_trader.db-wal');
+  if (await copyFileIfNeeded(`${dbSource}-shm`, `${dbTarget}-shm`)) (canMigrateLegacyAccount ? copied : quarantined).push('prophet_trader.db-shm');
 
   await fs.mkdir(sandboxRoot, { recursive: true });
   await fs.writeFile(markerPath, JSON.stringify({
     migratedAt: new Date().toISOString(),
+    legacyAccountId: legacyAccountId || null,
+    verified,
     copied,
+    quarantined,
+    quarantinePath: quarantined.length ? quarantineRoot : null,
   }, null, 2));
 
-  return { migrated: copied.length > 0, copied };
+  if (quarantined.length) {
+    await fs.mkdir(quarantineRoot, { recursive: true });
+    await fs.writeFile(path.join(quarantineRoot, 'QUARANTINED.json'), JSON.stringify({
+      nonActionable: true,
+      provenance: { legacyAccountId: legacyAccountId || null, requestedSandboxId: sandboxId },
+      quarantined,
+    }, null, 2));
+  }
+  return { migrated: copied.length > 0, copied, quarantined, quarantinePath: quarantined.length ? quarantineRoot : null };
+}
+
+export async function migrateLegacyDataForAccount(accountId) {
+  return migrateLegacyDataForSandbox(accountId, accountId);
 }
 
 export default {

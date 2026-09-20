@@ -1970,9 +1970,17 @@ function clearTradeFeed() {
   return feed;
 }
 
+function isBrokerConfirmedFill(order) {
+  const status = String(order.Status || order.status || '').toLowerCase();
+  const qty = Number(order.FilledQty ?? order.filledQty);
+  const price = Number(order.FilledAvgPrice ?? order.filledAvgPrice);
+  const brokerID = order.ID || order.id || order.BrokerOrderID || order.brokerOrderId;
+  return Boolean(brokerID) && ['filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done_for_day', 'replaced'].includes(status) && Number.isFinite(qty) && qty > 0 && Number.isFinite(price) && price > 0;
+}
+
 function renderVerifiedTradeFeed() {
   const feed = clearTradeFeed();
-  const filled = verifiedOrders.filter(o => !['submit_failed','canceled','cancelled','rejected','expired'].includes(String(o.Status || o.status || '').toLowerCase()));
+  const filled = verifiedOrders.filter(isBrokerConfirmedFill);
   if (!filled.length) {
     feed.innerHTML = '<div class="no-data">No broker-confirmed fills yet.</div>';
     return;
@@ -2071,7 +2079,15 @@ async function loadVerifiedTrades() {
   try {
     const res = await fetch('/api/trades');
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json(); verifiedTrades=data.trades||[]; verifiedOrders=data.orders||[];
+    const data = await res.json();
+    if (data.complete === false || data.broker_state?.complete === false) {
+      const summary=document.getElementById('trade-chart-summary'); if(summary) summary.textContent='Verified trade ledger unavailable until broker reconciliation completes.';
+      const status=document.getElementById('trade-ledger-status'); if(status) status.textContent='Reconciliation incomplete';
+      const feed=clearTradeFeed(); if(feed) feed.innerHTML='<div class="no-data">Broker reconciliation incomplete; local fills are not shown as verified.</div>';
+      verifiedTrades=[]; verifiedOrders=[]; renderTradeChart();
+      return;
+    }
+    verifiedTrades=data.trades||[]; verifiedOrders=data.orders||[];
     const summary=document.getElementById('trade-chart-summary');
     const pnl=verifiedTrades.reduce((sum,t)=>sum+Number(t.pnl||0),0);
     if(summary) summary.textContent=`${verifiedTrades.length} realized trade${verifiedTrades.length===1?'':'s'} | Net P/L ${fmtPnl(pnl)} | Open/unmatched fills are shown as P/L pending.`;

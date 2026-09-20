@@ -22,8 +22,10 @@ export const ALPACA_DATA_URL = 'https://data.alpaca.markets';
 
 // Trading endpoint for an account. Never infers or auto-switches to live — paper is the default
 // and live is used only when the account is explicitly non-paper.
-export function alpacaTradingUrl(paper, override) {
-  return override || (paper ? ALPACA_PAPER_TRADING_URL : ALPACA_LIVE_TRADING_URL);
+export function alpacaTradingUrl(paper, _override) {
+  // The account environment owns the endpoint. Custom overrides are not accepted
+  // because they can route a paper account to a live or untrusted broker host.
+  return paper ? ALPACA_PAPER_TRADING_URL : ALPACA_LIVE_TRADING_URL;
 }
 
 // ── Hosts & ports ──────────────────────────────────────────────────
@@ -41,6 +43,24 @@ export function portForAgent(agentId, basePort = DEFAULT_TRADING_BOT_PORT) {
   }
   const offset = (hash % AGENT_PORT_ALLOC.slots) + 1; // ports base..base+slots-1
   return basePort + offset;
+}
+
+export function tradingPolicyEnvironment(permissions = {}) {
+  permissions = permissions || {};
+  const booleanValue = (key, fallback) => typeof permissions[key] === 'boolean' ? permissions[key] : fallback;
+  const numberValue = (key, fallback) => Number.isFinite(Number(permissions[key])) ? Number(permissions[key]) : fallback;
+  return {
+    OPENPROPHET_ALLOW_LIVE_TRADING: String(booleanValue('allowLiveTrading', false)),
+    OPENPROPHET_ALLOW_OPTIONS: String(booleanValue('allowOptions', false)),
+    OPENPROPHET_ALLOW_STOCKS: String(booleanValue('allowStocks', false)),
+    OPENPROPHET_ALLOW_0DTE: String(booleanValue('allow0DTE', false)),
+    OPENPROPHET_REQUIRE_CONFIRMATION: String(booleanValue('requireConfirmation', true)),
+    OPENPROPHET_MAX_ORDER_VALUE: String(numberValue('maxOrderValue', 0)),
+    OPENPROPHET_MAX_POSITION_PCT: String(numberValue('maxPositionPct', 0)),
+    OPENPROPHET_MAX_DEPLOYED_PCT: String(numberValue('maxDeployedPct', 0)),
+    OPENPROPHET_MAX_OPEN_POSITIONS: String(numberValue('maxOpenPositions', 0)),
+    OPENPROPHET_MAX_DAILY_LOSS: String(numberValue('maxDailyLoss', 0)),
+  };
 }
 
 // ── Harness operational policy ─────────────────────────────────────

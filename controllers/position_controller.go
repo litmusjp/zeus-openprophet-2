@@ -93,7 +93,12 @@ func (pmc *PositionManagementController) HandleCloseManagedPosition(c *gin.Conte
 		return
 	}
 
-	if err := pmc.positionManager.CloseManagedPosition(c.Request.Context(), positionID); err != nil {
+	capability, capErr := pmc.positionManager.OperatorPositionCloseCapability(c.GetHeader("X-OpenProphet-Operator-Token"))
+	if capErr != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": capErr.Error()})
+		return
+	}
+	if err := pmc.positionManager.CloseManagedPositionWithCapability(c.Request.Context(), positionID, capability); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to close position",
 			"details": err.Error(),

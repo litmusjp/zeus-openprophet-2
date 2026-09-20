@@ -73,7 +73,7 @@ func TestGetOrdersNeedingReconciliation(t *testing.T) {
 	defer storage.Close()
 	orders := []*interfaces.Order{
 		{ClientOrderID: "op-pending", Symbol: "AAPL", Status: "pending"},
-		{ClientOrderID: "op-submit-failed", Symbol: "MSFT", Status: "submit_failed"},
+		{ClientOrderID: "op-submit-failed", Symbol: "MSFT", Status: "submit_failed", SubmissionAttempted: true},
 		{ClientOrderID: "op-filled", Symbol: "GOOG", Status: "filled"},
 		{Symbol: "TSLA", Status: "pending"},
 	}
@@ -86,8 +86,8 @@ func TestGetOrdersNeedingReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrdersNeedingReconciliation() error = %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("GetOrdersNeedingReconciliation() returned %d orders, want 2", len(got))
+	if len(got) != 3 {
+		t.Fatalf("GetOrdersNeedingReconciliation() returned %d orders, want 3", len(got))
 	}
 	clientOrderIDs := map[string]bool{}
 	for _, order := range got {
@@ -98,7 +98,401 @@ func TestGetOrdersNeedingReconciliation(t *testing.T) {
 	}
 }
 
+func TestSaveOrderRejectsStaleRevisionAndBrokerIdentity(t *testing.T) {
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &interfaces.Order{ClientOrderID: "op-cas", ID: "broker-a", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Purpose: "entry", Status: "pending"}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	stale := *order
+	order.Status = "accepted"
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	stale.Status = "canceled"
+	if err := storage.SaveOrder(&stale); err == nil {
+		t.Fatal("stale order update should be rejected")
+	}
+	mismatched := *order
+	mismatched.ID = "broker-b"
+	if err := storage.SaveOrder(&mismatched); err == nil {
+		t.Fatal("broker order identity replacement should be rejected")
+	}
+}
+
+func TestSaveOrderPreservesSubmissionAttemptedMonotonically(t *testing.T) {
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	order := &interfaces.Order{ClientOrderID: "op-monotonic", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Purpose: "entry", Status: "submission_uncertain", SubmissionAttempted: true}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	order.SubmissionAttempted = false
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := storage.GetOrderByClientOrderID(order.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.SubmissionAttempted {
+		t.Fatal("submission_attempted was cleared by a later update")
+	}
+}
+
+func TestMarkManagedSubmissionAttemptedIsAtomicAcrossProjections(t *testing.T) {
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-marker.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &interfaces.Order{ClientOrderID: "managed-marker", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "gtc", Status: "pending", Purpose: "entry", SubmittedAt: time.Now()}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	projection := &models.DBManagedOrder{DurableIdentity: storage.DurableIdentity(), PositionID: "position-1", Role: "entry", Purpose: "entry", ClientOrderID: order.ClientOrderID, Symbol: order.Symbol, Side: order.Side, OrderType: order.Type, TimeInForce: order.TimeInForce, RequestedQty: order.Qty, Lifecycle: "submitting"}
+	if err := storage.SaveManagedOrder(projection); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.MarkManagedSubmissionAttempted(order.ClientOrderID, "position-1", "entry"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := storage.GetOrderByClientOrderID(order.ClientOrderID)
+	if err != nil || reopened == nil || !reopened.SubmissionAttempted {
+		t.Fatalf("generic order after marker = %#v, err=%v; want attempted", reopened, err)
+	}
+	reopenedProjection, err := storage.GetManagedOrder(order.ClientOrderID)
+	if err != nil || reopenedProjection == nil || !reopenedProjection.SubmissionAttempted {
+		t.Fatalf("managed projection after marker = %#v, err=%v; want attempted", reopenedProjection, err)
+	}
+}
+
+func TestMarkManagedSubmissionAttemptedFailsClosedAndRollsBack(t *testing.T) {
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-marker-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &interfaces.Order{ClientOrderID: "managed-marker-rollback", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "gtc", Status: "pending", Purpose: "entry", SubmittedAt: time.Now()}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	projection := &models.DBManagedOrder{DurableIdentity: storage.DurableIdentity(), PositionID: "position-1", Role: "protection", Purpose: "protection", ClientOrderID: order.ClientOrderID, Symbol: order.Symbol, Side: "sell", OrderType: "stop", TimeInForce: "gtc", RequestedQty: order.Qty, Lifecycle: "submitting"}
+	if err := storage.SaveManagedOrder(projection); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.MarkManagedSubmissionAttempted(order.ClientOrderID, "position-1", "entry"); err == nil {
+		t.Fatal("MarkManagedSubmissionAttempted() succeeded for mismatched role")
+	}
+	reopened, err := storage.GetOrderByClientOrderID(order.ClientOrderID)
+	if err != nil || reopened == nil || reopened.SubmissionAttempted {
+		t.Fatalf("generic order after failed marker = %#v, err=%v; want unattempted", reopened, err)
+	}
+	reopenedProjection, err := storage.GetManagedOrder(order.ClientOrderID)
+	if err != nil || reopenedProjection == nil || reopenedProjection.SubmissionAttempted {
+		t.Fatalf("managed projection after failed marker = %#v, err=%v; want unattempted", reopenedProjection, err)
+	}
+}
+
+func setManagedIdentity(t *testing.T, broker string) {
+	t.Helper()
+	t.Setenv("ALPACA_ACCOUNT_ID", broker)
+	t.Setenv("ALPACA_PAPER", "true")
+	t.Setenv("OPENPROPHET_TENANT_ID", "tenant-1")
+	t.Setenv("OPENPROPHET_SANDBOX_ID", "sandbox-1")
+}
+
+func TestManagedOrderProjectionPersistsRoleIdentityAndWatermark(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &models.DBManagedOrder{
+		PositionID:    "position-1",
+		Role:          "protection",
+		Purpose:       "protection",
+		ClientOrderID: "client-protection-1",
+		BrokerOrderID: "broker-protection-1",
+		DurableIdentity: models.DurableIdentity{
+			BrokerAccountID: "broker-account-1",
+			PaperLive:       "paper",
+			TenantID:        "tenant-1",
+			SandboxID:       "sandbox-1",
+		},
+		Symbol:              "AAPL",
+		Side:                "sell",
+		AssetClass:          "us_equity",
+		OrderType:           "limit",
+		TimeInForce:         "day",
+		RequestedQty:        5,
+		FilledQty:           2,
+		FillWatermark:       2,
+		Revision:            1,
+		Lifecycle:           "partially_filled",
+		SubmissionAttempted: true,
+	}
+	if err := storage.SaveManagedOrder(order); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := storage.GetManagedOrder(order.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh == nil || fresh.Role != "protection" || fresh.PositionID != "position-1" || fresh.FillWatermark != 2 || !fresh.SubmissionAttempted {
+		t.Fatalf("managed order projection was not preserved: %#v", fresh)
+	}
+}
+
+func TestManagedOrderProjectionRejectsIdentityReuse(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-identity.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &models.DBManagedOrder{
+		PositionID:    "position-1",
+		Role:          "entry",
+		Purpose:       "entry",
+		ClientOrderID: "client-entry-1",
+		DurableIdentity: models.DurableIdentity{
+			BrokerAccountID: "broker-account-1",
+			PaperLive:       "paper",
+			TenantID:        "tenant-1",
+			SandboxID:       "sandbox-1",
+		},
+		Symbol:       "AAPL",
+		Side:         "buy",
+		RequestedQty: 1,
+		Lifecycle:    "planned",
+	}
+	if err := storage.SaveManagedOrder(order); err != nil {
+		t.Fatal(err)
+	}
+
+	mismatched := *order
+	mismatched.BrokerAccountID = "broker-account-2"
+	if err := storage.SaveManagedOrder(&mismatched); err == nil {
+		t.Fatal("managed order identity reuse should be rejected")
+	}
+}
+
+func TestManagedOrderProjectionRejectsBrokerIdentityRotation(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-broker-id.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &models.DBManagedOrder{
+		PositionID:    "position-1",
+		Role:          "entry",
+		Purpose:       "entry",
+		ClientOrderID: "client-entry-1",
+		BrokerOrderID: "broker-order-1",
+		DurableIdentity: models.DurableIdentity{
+			BrokerAccountID: "broker-account-1",
+			PaperLive:       "paper",
+			TenantID:        "tenant-1",
+			SandboxID:       "sandbox-1",
+		},
+		Symbol:       "AAPL",
+		Side:         "buy",
+		RequestedQty: 1,
+		Lifecycle:    "accepted",
+	}
+	if err := storage.SaveManagedOrder(order); err != nil {
+		t.Fatal(err)
+	}
+
+	rotated := *order
+	rotated.BrokerOrderID = "broker-order-2"
+	if err := storage.SaveManagedOrder(&rotated); err == nil {
+		t.Fatal("managed order broker identity rotation should be rejected")
+	}
+}
+
+func TestManagedOrderProjectionRejectsContractIdentityMutation(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-contract.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	limit := 101.0
+	order := &models.DBManagedOrder{
+		PositionID: "position-1", Role: "protection", Purpose: "protection",
+		ClientOrderID: "client-contract-1", Symbol: "AAPL", Side: "sell",
+		AssetClass: "us_equity", OrderType: "limit", TimeInForce: "gtc",
+		RequestedQty: 2, LimitPrice: &limit, Lifecycle: "planned",
+		DurableIdentity: models.DurableIdentity{BrokerAccountID: "broker-account-1", PaperLive: "paper", TenantID: "tenant-1", SandboxID: "sandbox-1"},
+	}
+	if err := storage.SaveManagedOrder(order); err != nil {
+		t.Fatal(err)
+	}
+
+	mutated := *order
+	mutated.Purpose = "close"
+	mutated.OrderType = "market"
+	mutated.LimitPrice = nil
+	if err := storage.SaveManagedOrder(&mutated); err == nil {
+		t.Fatal("managed order contract mutation should be rejected")
+	}
+}
+
+func TestManagedOrderProjectionKeepsCumulativeWatermarkAcrossSnapshots(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-watermark.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &models.DBManagedOrder{
+		PositionID:    "position-1",
+		Role:          "close",
+		Purpose:       "close",
+		ClientOrderID: "client-close-1",
+		DurableIdentity: models.DurableIdentity{
+			BrokerAccountID: "broker-account-1",
+			PaperLive:       "paper",
+			TenantID:        "tenant-1",
+			SandboxID:       "sandbox-1",
+		},
+		Symbol:        "AAPL",
+		Side:          "sell",
+		RequestedQty:  5,
+		FilledQty:     3,
+		FillWatermark: 3,
+		Lifecycle:     "partially_filled",
+	}
+	if err := storage.SaveManagedOrder(order); err != nil {
+		t.Fatal(err)
+	}
+
+	repeated := *order
+	repeated.FilledQty = 1
+	repeated.FillWatermark = 1
+	if err := storage.SaveManagedOrder(&repeated); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := storage.GetManagedOrder(order.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.FilledQty != 3 || fresh.FillWatermark != 3 {
+		t.Fatalf("cumulative fill evidence regressed: filled=%v watermark=%v", fresh.FilledQty, fresh.FillWatermark)
+	}
+}
+
+func TestManagedOrderProjectionRequiresCompleteIdentity(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-missing-identity.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &models.DBManagedOrder{
+		PositionID:    "position-1",
+		Role:          "entry",
+		Purpose:       "entry",
+		ClientOrderID: "client-entry-identity",
+		DurableIdentity: models.DurableIdentity{
+			BrokerAccountID: "broker-account-1",
+			PaperLive:       "paper",
+			TenantID:        "tenant-1",
+		},
+		Symbol:       "AAPL",
+		Side:         "buy",
+		RequestedQty: 1,
+		Lifecycle:    "planned",
+	}
+	if err := storage.SaveManagedOrder(order); err == nil {
+		t.Fatal("managed order with incomplete durable identity should be rejected")
+	}
+}
+
+func TestManagedOrderReadRejectsMismatchedRuntimeIdentity(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "managed-orders-read-identity.db")
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := &models.DBManagedOrder{
+		PositionID: "position-1", Role: "entry", Purpose: "entry", ClientOrderID: "client-read-identity",
+		DurableIdentity: models.DurableIdentity{BrokerAccountID: "broker-account-1", PaperLive: "paper", TenantID: "tenant-1", SandboxID: "sandbox-1"},
+		Symbol:          "AAPL", Side: "buy", RequestedQty: 1, Lifecycle: "planned",
+	}
+	if err := storage.SaveManagedOrder(order); err != nil {
+		storage.Close()
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	setManagedIdentity(t, "broker-account-2")
+	other, err := NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if _, err := other.GetManagedOrder(order.ClientOrderID); err == nil {
+		t.Fatal("managed-order read should reject a mismatched runtime identity")
+	}
+}
+
+func TestSaveManagedPositionRejectsStaleRevision(t *testing.T) {
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "positions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	position := &models.DBManagedPosition{PositionID: "managed-1", Symbol: "AAPL", Side: "buy", Status: "ACTIVE", EntryClientOrderID: "entry-1"}
+	if err := storage.SaveManagedPosition(position); err != nil {
+		t.Fatal(err)
+	}
+	stale := *position
+	position.Status = "CLOSED"
+	position.ExitClientOrderID = "exit-1"
+	if err := storage.SaveManagedPosition(position); err != nil {
+		t.Fatal(err)
+	}
+	stale.Status = "ACTIVE"
+	if err := storage.SaveManagedPosition(&stale); err == nil {
+		t.Fatal("stale managed-position update should be rejected")
+	}
+	stored, err := storage.GetManagedPosition(position.PositionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "CLOSED" || stored.ExitClientOrderID != "exit-1" {
+		t.Fatalf("stored position regressed: %#v", stored)
+	}
+}
+
 func TestSavePositionAllowsMultipleSnapshotsForSameSymbol(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
 	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "positions.db"))
 	if err != nil {
 		t.Fatal(err)

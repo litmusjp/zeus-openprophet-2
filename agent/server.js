@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 // Prophet Agent Web Server - SSE streaming dashboard + agent control
-import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import fs from 'fs/promises';
@@ -11,16 +10,16 @@ import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import axios from 'axios';
-import { isTrustedLocalRequest } from './auth.js';
+
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { buildTradeLedger } from './trade-ledger.js';
 import ChatStore from './chat-store.js';
-import AgentOrchestrator from './orchestrator.js';
-import { alpacaTradingUrl, DEFAULT_AGENT_MODEL, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
-import { migrateLegacyDataForAccount } from './data-migration.js';
+import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
+import { alpacaTradingUrl, DEFAULT_AGENT_MODEL, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS, tradingPolicyEnvironment } from './defaults.js';
+import { migrateLegacyDataForSandbox } from './data-migration.js';
 import {
-  loadConfig, getConfig, saveConfig,
+  loadConfig, getConfig, saveConfig, ensureBrokerAccountBinding,
   addAccount, removeAccount, setActiveAccount, setActiveSandbox, getActiveAccount, getAccountById,
   addAgent, updateAgent, removeAgent, setActiveAgent, getActiveAgent, getAgentById, getResolvedAgentForSandbox,
   addStrategy, updateStrategy, removeStrategy,
@@ -34,37 +33,46 @@ import {
   getAvailableModels,
 } from './config-store.js';
 import { formatSlackNotification } from './slack-format.js';
+import { createAuthMiddleware } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
+// Resolve the only server-owned mode before reading any credential, broker
+// endpoint, broker port, auth, or runtime setting.
+const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'inert';
+const EXECUTION_START_ENABLED = EXECUTION_MODE === 'enabled';
 
 // Secure-by-default: if no TRADING_BOT_TOKEN is configured, mint an ephemeral one now and
 // inject it into the environment BEFORE anything reads it, so the Go backend it spawns, this
 // server's own axios calls, and the MCP subprocess all authenticate. Without this, the
 // loopback trading API would accept unauthenticated orders from any local process. Set an
 // explicit TRADING_BOT_TOKEN in .env to use a stable, shareable token instead.
-if (!process.env.TRADING_BOT_TOKEN) {
+if (EXECUTION_START_ENABLED && !process.env.TRADING_BOT_TOKEN) {
   process.env.TRADING_BOT_TOKEN = randomBytes(32).toString('hex');
   console.log('[auth] No TRADING_BOT_TOKEN set — generated an ephemeral session token for the trading API.');
 }
 
-const PORT = process.env.AGENT_PORT || 3737;
-const TRADING_BOT_PORT = process.env.TRADING_BOT_PORT || '4534';
-const TRADING_BOT_URL = process.env.TRADING_BOT_URL || `http://127.0.0.1:${TRADING_BOT_PORT}`;
-const TRADING_BOT_TOKEN = process.env.TRADING_BOT_TOKEN || '';
-
-function getSandboxDbPathForAccount(accountId) {
-  return path.join(PROJECT_ROOT, 'data', 'sandboxes', accountId, 'prophet_trader.db');
+if (EXECUTION_START_ENABLED && !process.env.TRADING_BOT_OPERATOR_TOKEN) {
+  process.env.TRADING_BOT_OPERATOR_TOKEN = randomBytes(32).toString('hex');
 }
 
+const PORT = EXECUTION_START_ENABLED ? (process.env.AGENT_PORT || 3737) : 3737;
+const TRADING_BOT_PORT = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_PORT || '4534') : null;
+const TRADING_BOT_URL = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_URL || `http://127.0.0.1:${TRADING_BOT_PORT}`) : null;
+const TRADING_BOT_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_TOKEN || '') : '';
+const TRADING_BOT_PROCESS_NONCE = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_PROCESS_NONCE || randomBytes(32).toString('hex')) : null;
+
 function getPersistedSandboxOrders(sandbox) {
-  const dbPath = getSandboxDbPathForAccount(sandbox.accountId);
+  const dbPath = path.join(PROJECT_ROOT, 'data', 'sandboxes', sandbox.id, 'prophet_trader.db');
   if (!existsSync(dbPath)) return [];
   let db;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
     return db.prepare(`
-      SELECT order_id AS ID, symbol AS Symbol, qty AS Qty, side AS Side, type AS Type,
+      SELECT order_id AS ID, client_order_id AS ClientOrderID,
+             broker_account_id AS BrokerAccountID, paper_live AS PaperLive,
+             tenant_id AS TenantID, sandbox_id AS SandboxID,
+             symbol AS Symbol, qty AS Qty, side AS Side, type AS Type,
              status AS Status, filled_qty AS FilledQty, filled_avg_price AS FilledAvgPrice,
              submitted_at AS SubmittedAt, filled_at AS FilledAt
       FROM orders ORDER BY submitted_at ASC
@@ -78,25 +86,47 @@ function getPersistedSandboxOrders(sandbox) {
 }
 
 // Pooled HTTP agent for Go backend calls — reuses TCP connections
-const goHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 10, keepAliveMsecs: 30000 });
-const goAxios = axios.create({
+function unavailableBrokerClient() {
+  const unavailable = async () => { throw new Error('broker backend is unavailable in inert mode'); };
+  return { get: unavailable, post: unavailable, put: unavailable, delete: unavailable, defaults: { headers: { common: {} } } };
+}
+const goAxios = EXECUTION_START_ENABLED ? axios.create({
   baseURL: TRADING_BOT_URL,
-  httpAgent: goHttpAgent,
+  httpAgent: new http.Agent({ keepAlive: true, maxSockets: 10, keepAliveMsecs: 30000 }),
   timeout: 5000,
   headers: TRADING_BOT_TOKEN ? { Authorization: `Bearer ${TRADING_BOT_TOKEN}` } : {},
-});
+}) : unavailableBrokerClient();
 
 const app = express();
 // --- BASIC AUTH SETUP ---
-const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER || (process.env.NODE_ENV === 'production' ? '' : 'admin');
-const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS || (process.env.NODE_ENV === 'production' ? '' : 'secret');
+const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER || '';
+const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS || '';
 const BASIC_AUTH_CONFIGURED = Boolean(BASIC_AUTH_USER && BASIC_AUTH_PASS);
 
-app.use((req, res, next) => {
-  if (isTrustedLocalRequest(req)) {
-    return next();
+function hasValidBasicAuth(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Basic ')) return false;
+  let credentials;
+  try {
+    credentials = Buffer.from(authHeader.slice(6), 'base64').toString();
+  } catch {
+    return false;
   }
+  const separator = credentials.indexOf(':');
+  const user = separator >= 0 ? credentials.slice(0, separator) : '';
+  const pass = separator >= 0 ? credentials.slice(separator + 1) : '';
+  return BASIC_AUTH_CONFIGURED && user === BASIC_AUTH_USER && pass === BASIC_AUTH_PASS;
+}
 
+function operatorAuthMiddleware(req, res, next) {
+  const configuredOperatorToken = process.env.OPERATOR_TOKEN || '';
+  const providedOperatorToken = req.headers['x-openprophet-operator-token'];
+  if (configuredOperatorToken && providedOperatorToken === configuredOperatorToken) return next();
+  if (hasValidBasicAuth(req)) return next();
+  return res.status(BASIC_AUTH_CONFIGURED || configuredOperatorToken ? 403 : 503).json({ error: 'operator authorization is required' });
+}
+
+app.use((req, res, next) => {
   if (!BASIC_AUTH_CONFIGURED) {
     return res.status(503).send('Basic authentication is not configured.');
   }
@@ -131,19 +161,9 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '1mb' }));
 
 // ── Auth Middleware ────────────────────────────────────────────────
-// Token-based auth. Set AGENT_AUTH_TOKEN env var to enable.
-// Without it, server is open (for local dev). With it, all API routes require the token.
+// Token-based auth. The server-owned boundary is fail-closed when the token is absent.
 const AUTH_TOKEN = process.env.AGENT_AUTH_TOKEN || '';
-function authMiddleware(req, res, next) {
-  if (!AUTH_TOKEN) return next(); // no token configured = open access
-  // Allow health check unauthenticated
-  if (req.path === '/api/health') return next();
-  // Authorization headers avoid leaking bearer tokens through URLs and access logs.
-  const header = req.headers.authorization;
-  const token = header?.startsWith('Bearer ') ? header.slice(7) : "";
-  if (token === AUTH_TOKEN) return next();
-  res.status(401).json({ error: 'Unauthorized. Set Authorization: Bearer <token> header.' });
-}
+const authMiddleware = createAuthMiddleware({ token: AUTH_TOKEN });
 app.use('/api', authMiddleware);
 
 // ── Go Backend Manager ─────────────────────────────────────────────
@@ -189,12 +209,20 @@ function rebuildAndRestart(account, reason) {
   if (acc) startGoBackend(acc);
 }
 
-async function startGoBackend(account) {
+export async function startGoBackend(account) {
+  if (!EXECUTION_START_ENABLED) throw new Error('execution mode is inert; backend startup is disabled');
   // Kill existing if running
   await stopGoBackend();
 
   if (!account) {
     console.log('  No active account — Go backend not started');
+    return false;
+  }
+
+  try {
+    account = await ensureBrokerAccountBinding(account.id);
+  } catch (err) {
+    console.error(`  Broker account identity verification failed: ${err.message}`);
     return false;
   }
 
@@ -207,22 +235,26 @@ async function startGoBackend(account) {
     return false;
   }
 
-  const env = {
-    ...process.env,
-    ALPACA_API_KEY: account.publicKey,
-    ALPACA_SECRET_KEY: account.secretKey,
-    ALPACA_BASE_URL: alpacaTradingUrl(account.paper, account.baseUrl),
-    ALPACA_PAPER: account.paper ? 'true' : 'false',
-    PORT: TRADING_BOT_PORT,
-    SERVER_HOST: '127.0.0.1',
-    TRADING_BOT_TOKEN,
-    DATABASE_PATH: getSandboxDbPathForAccount(account.id),
-    ACTIVITY_LOG_DIR: path.join(PROJECT_ROOT, 'data', 'sandboxes', account.id, 'activity_logs'),
-    OPENPROPHET_ACCOUNT_ID: account.id,
-    OPENPROPHET_SANDBOX_ID: `sbx_${account.id}`,
-  };
+  const sandbox = getActiveSandbox();
+  const sandboxId = sandbox?.accountId === account.id ? sandbox.id : `sbx_${account.id}`;
+  const env = buildGoBackendEnv(process.env, {
+    account,
+    sandboxId,
+    processNonce: TRADING_BOT_PROCESS_NONCE,
+    port: TRADING_BOT_PORT,
+    databasePath: path.join(PROJECT_ROOT, 'data', 'sandboxes', sandboxId, 'prophet_trader.db'),
+    activityLogDir: path.join(PROJECT_ROOT, 'data', 'sandboxes', sandboxId, 'activity_logs'),
+    permissions: getPermissionsForSandbox(sandboxId),
+  });
+  env.TRADING_BOT_TOKEN = TRADING_BOT_TOKEN;
+  env.TRADING_BOT_PROCESS_NONCE = TRADING_BOT_PROCESS_NONCE;
 
   await fs.mkdir(path.dirname(env.DATABASE_PATH), { recursive: true });
+  Object.assign(goAxios.defaults.headers.common, {
+    'X-OpenProphet-Sandbox-ID': sandboxId,
+    'X-OpenProphet-Account-ID': account.id,
+    'X-OpenProphet-Process-Nonce': TRADING_BOT_PROCESS_NONCE,
+  });
 
   console.log(`  Starting Go backend for account "${account.name}" (${account.paper ? 'paper' : 'live'})...`);
 
@@ -284,7 +316,11 @@ async function startGoBackend(account) {
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 500));
     try {
-      await goAxios.get('/health', { timeout: 2000 });
+      const response = await goAxios.get('/health', { timeout: 2000 });
+      const health = response.data || {};
+      if (!health.ready || health.sandbox_id !== sandboxId || health.account_id !== account.id || health.broker_account_id !== account.brokerAccountId || health.paper !== account.paper || health.reconciliation_complete !== true || health.process_nonce !== TRADING_BOT_PROCESS_NONCE) {
+        throw new Error('trading backend identity/readiness mismatch');
+      }
       goReady = true;
       goRebuildAttempted = false; // healthy now — allow a fresh rebuild if it ever breaks later
       console.log(`  Go backend ready on port ${TRADING_BOT_PORT} (account: ${account.name})`);
@@ -317,33 +353,31 @@ async function stopGoBackend() {
     goReady = false;
     await new Promise(r => setTimeout(r, 500));
   }
-  // Kill any orphaned Go backend on the port (but NOT our own Node process)
-  const myPid = process.pid;
-  try {
-    const pids = execSync(`lsof -t -i :${TRADING_BOT_PORT} -sTCP:LISTEN 2>/dev/null`, { encoding: 'utf-8' }).trim();
-    if (pids) {
-      for (const pid of pids.split('\n')) {
-        const p = parseInt(pid);
-        if (p && p !== myPid) {
-          try { process.kill(p, 'SIGTERM'); } catch {}
-        }
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
-  } catch {}
+  // Never terminate an unknown listener on a shared port. Without an
+  // owned process handle and matching runtime identity, ownership is unknown.
 }
 
 // ── Load Config ────────────────────────────────────────────────────
+if (process.env.OPENPROPHET_EXECUTION_MODE === 'enabled') {
+  await import('dotenv/config');
+}
 await loadConfig();
 const initialActiveAccount = getActiveAccount();
-if (initialActiveAccount?.id) {
-  const migration = await migrateLegacyDataForAccount(initialActiveAccount.id);
+if (EXECUTION_START_ENABLED && initialActiveAccount?.id) {
+  const migration = await migrateLegacyDataForSandbox(getActiveSandbox()?.id || `sbx_${initialActiveAccount.id}`, initialActiveAccount.id);
   if (migration.migrated) {
     console.log(`  Migrated legacy data into sandbox for account ${initialActiveAccount.id}: ${migration.copied.join(', ')}`);
   }
 }
 
 // ── Agent Instance ─────────────────────────────────────────────────
+// Inert startup is intentionally terminal. Do not construct the harness,
+// orchestrator, runtime supervisors, or their event/timer infrastructure.
+if (!EXECUTION_START_ENABLED) {
+  console.log('  Dashboard unavailable: execution mode is inert');
+  process.exit(0);
+}
+
 const chatStore = new ChatStore();
 const orchestrator = new AgentOrchestrator({
   chatStore,
@@ -375,7 +409,10 @@ function createHarnessForActiveSandbox() {
       AGENT_URL: `http://localhost:${PORT}`,
       OPENPROPHET_SANDBOX_ID: sandbox?.id || '',
       OPENPROPHET_ACCOUNT_ID: sandbox?.accountId || '',
-      DATABASE_PATH: sandbox?.accountId ? getSandboxDbPathForAccount(sandbox.accountId) : '',
+      OPENPROPHET_PROCESS_NONCE: TRADING_BOT_PROCESS_NONCE,
+      TRADING_BOT_PROCESS_NONCE: TRADING_BOT_PROCESS_NONCE,
+      DATABASE_PATH: sandbox?.id ? path.join(PROJECT_ROOT, 'data', 'sandboxes', sandbox.id, 'prophet_trader.db') : '',
+      ...tradingPolicyEnvironment(sandbox?.id ? getPermissionsForSandbox(sandbox.id) : {}),
     },
   });
 }
@@ -387,7 +424,7 @@ function rebindHarness() {
 }
 
 function getOrCreateSandboxRuntime(sandboxId) {
-  if (!sandboxId || isActiveSandbox(sandboxId)) return null;
+  if (!EXECUTION_START_ENABLED || !sandboxId || isActiveSandbox(sandboxId)) return null;
   const runtime = orchestrator.ensureRuntime(sandboxId);
   bindOperationalHooks(runtime.harness);
   return runtime;
@@ -499,7 +536,7 @@ function scheduleDailySummaryForHarness(targetHarness) {
         const pnl = equity - lastEquity;
         const pnlPct = lastEquity ? ((pnl / lastEquity) * 100).toFixed(2) : '0.00';
         const emoji = pnl >= 0 ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
-        notifySlack(`${emoji} *Daily Summary*\nP&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPct}%)\nPortfolio: $${equity.toFixed(2)}\nBeats: ${targetHarness.state.stats.totalBeats} | Trades: ${targetHarness.state.stats.trades} | Errors: ${targetHarness.state.stats.errors}`, sandboxId);
+        notifySlack(`${emoji} *Daily Summary*\nP&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPct}%)\nPortfolio: $${equity.toFixed(2)}\nBeats: ${targetHarness.state.stats.totalBeats} | Order events: ${targetHarness.state.stats.trades} | Errors: ${targetHarness.state.stats.errors}`, sandboxId);
       } catch {}
     }
     scheduleDailySummaryForHarness(targetHarness);
@@ -525,14 +562,41 @@ function bindOperationalHooks(targetHarness) {
     const sandboxId = targetHarness.sandboxId;
     if (slackEnabled('tradeExecuted', sandboxId)) {
       const side = (trade.side || '').toUpperCase();
-      const emoji = side === 'BUY' ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
-      notifySlack(`${emoji} *Trade Executed*\n${side} ${trade.quantity || '?'}x ${trade.symbol || '??'}${trade.price ? ' @ $' + trade.price : ''}\nTool: ${trade.tool || 'unknown'}`, sandboxId);
+      const lifecycleLabels = {
+        filled: 'Filled',
+        filled_canceled: 'Filled — Canceled',
+        filled_rejected: 'Filled — Rejected',
+        filled_expired: 'Filled — Expired',
+        filled_done_for_day: 'Filled — Done for Day',
+        filled_replaced: 'Filled — Replaced',
+        partially_filled: 'Partially Filled',
+        partially_filled_canceled: 'Partially Filled — Canceled',
+        partially_filled_rejected: 'Partially Filled — Rejected',
+        partially_filled_expired: 'Partially Filled — Expired',
+        partially_filled_done_for_day: 'Partially Filled — Done for Day',
+        partially_filled_replaced: 'Partially Filled — Replaced',
+        submitted: 'Submitted — execution not confirmed',
+        planned: 'Planned for Next Session — not submitted',
+        rejected: 'Rejected',
+        canceled: 'Canceled',
+        expired: 'Expired',
+        submit_failed: 'Submission Failed',
+        submission_uncertain: 'Submission Uncertain — reconcile before retrying',
+        unknown: 'Result Unknown',
+      };
+      const label = lifecycleLabels[trade.lifecycle] || `Lifecycle: ${trade.lifecycle || 'unknown'}`;
+      const emoji = trade.executionConfirmed ? (side === 'BUY' ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:') : ':information_source:';
+      notifySlack(`${emoji} *Order ${label}*\n${side} ${trade.quantity || '?'}x ${trade.symbol || '??'}${trade.price ? ' @ $' + trade.price : ''}\nStatus: ${trade.status || 'unknown'}${trade.orderId ? ` | Broker ID: ${trade.orderId}` : ''}\nTool: ${trade.tool || 'unknown'}`, sandboxId);
     }
+    if (!trade.executionConfirmed || !trade.fullFill) return;
     const sideLower = (trade.side || '').toLowerCase();
-    if (sideLower === 'buy' && slackEnabled('positionOpened', sandboxId)) {
+    const intent = String(trade.positionIntent || '').toLowerCase();
+    const opening = intent ? intent.endsWith('to_open') : sideLower === 'buy';
+    const closing = intent ? intent.endsWith('to_close') : sideLower === 'sell';
+    if (opening && slackEnabled('positionOpened', sandboxId)) {
       notifySlack(`:new: *Position Opened*\n${trade.symbol || '??'} | ${trade.quantity || '?'} contracts${trade.price ? ' @ $' + trade.price : ''}`, sandboxId);
     }
-    if (sideLower === 'sell' && slackEnabled('positionClosed', sandboxId)) {
+    if (closing && slackEnabled('positionClosed', sandboxId)) {
       notifySlack(`:checkered_flag: *Position Closed*\n${trade.symbol || '??'} | ${trade.quantity || '?'} contracts${trade.price ? ' @ $' + trade.price : ''}`, sandboxId);
     }
   });
@@ -1154,7 +1218,7 @@ app.post('/api/sandboxes/:id/activate', async (req, res) => {
     rebindHarness();
     const account = getActiveAccount();
     if (account) {
-      await migrateLegacyDataForAccount(account.id);
+      await migrateLegacyDataForSandbox(getActiveSandbox()?.id || `sbx_${account.id}`, account.id);
       await startGoBackend(account);
       if (wasRunning) await harness.start();
     }
@@ -1400,7 +1464,7 @@ app.post('/api/accounts/:id/activate', async (req, res) => {
     broadcast('config', safeConfig());
     // Restart Go backend with new account credentials
     if (account) {
-      await migrateLegacyDataForAccount(account.id);
+      await migrateLegacyDataForSandbox(getActiveSandbox()?.id || `sbx_${account.id}`, account.id);
       broadcast('agent_log', {
         message: `Switching to account "${account.name}"... restarting trading backend.`,
         level: 'info',
@@ -1584,13 +1648,22 @@ app.get('/api/permissions', (req, res) => {
   res.json(getPermissions());
 });
 
-app.put('/api/permissions', async (req, res) => {
+app.put('/api/permissions', operatorAuthMiddleware, async (req, res) => {
   try {
     const { sandboxId, ...permBody } = req.body || {};
     if (sandboxId) {
       await updatePermissionsForSandbox(sandboxId, permBody);
+      const targetSandbox = getSandbox(sandboxId);
+      if (!targetSandbox) throw new Error(`Sandbox not found: ${sandboxId}`);
+      if (isActiveSandbox(sandboxId)) {
+        await startGoBackend(getAccountById(targetSandbox.accountId));
+      } else {
+        await orchestrator.startGoBackend(sandboxId);
+      }
     } else {
       await updatePermissions(permBody);
+      const activeAccount = getActiveAccount();
+      if (activeAccount) await startGoBackend(activeAccount);
     }
     broadcast('config', safeConfig());
     res.json({ ok: true });
@@ -1634,29 +1707,69 @@ app.post('/api/plugins/slack/test', async (req, res) => {
 });
 
 // ── Verified trade ledger ─────────────────────────────────────────
-async function reconcileSandboxOrders(sandbox) {
-  const localOrders = getPersistedSandboxOrders(sandbox);
+async function reconcileSandboxOrders(sandbox, account) {
+  let localIdentityMismatch = false;
+  const localOrders = getPersistedSandboxOrders(sandbox).filter(order => {
+    if (order.SandboxID !== sandbox.id || order.BrokerAccountID !== account.brokerAccountId || order.PaperLive !== (account.paper ? 'paper' : 'live')) return false;
+    if (order.TenantID !== account.id) {
+      localIdentityMismatch = true;
+      return false;
+    }
+    return true;
+  });
   try {
     // This endpoint is data-only: never start an execution-capable backend while reading trades.
     const client = sandbox.id === getActiveSandbox()?.id
       ? goAxios
       : orchestrator.getSandboxRuntime(sandbox.id)?.goAxios || null;
-    if (!client) return localOrders;
+    if (!client) return { orders: localOrders, complete: false, broker_state: 'unavailable' };
     const { data } = await client.get('/api/v1/orders', { params: { status: 'all' } });
-    const brokerOrders = Array.isArray(data) ? data : [];
+    const brokerOrders = Array.isArray(data)
+      ? data
+      : (data && Array.isArray(data.orders) ? data.orders : null);
+    if (!brokerOrders) {
+      return { orders: localOrders, complete: false, broker_state: 'invalid_response' };
+    }
     const merged = new Map();
-    for (const order of localOrders) {
-      const key = order.ID || order.ClientOrderID || `${order.Symbol}:${order.SubmittedAt}`;
-      merged.set(key, order);
-    }
+    let unmatchedFilled = false;
+    let unmatchedBrokerFilled = false;
     for (const order of brokerOrders) {
-      const key = order.ID || order.ClientOrderID || `${order.Symbol}:${order.SubmittedAt}`;
-      merged.set(key, { ...(merged.get(key) || {}), ...order });
+      if (order.broker_account_id && order.broker_account_id !== account.brokerAccountId) continue;
+      if (order.paper_live && order.paper_live !== (account.paper ? 'paper' : 'live')) continue;
+      const key = order.id || order.ID || order.client_order_id || order.ClientOrderID;
+      if (!key) continue;
+      const normalized = {
+        ...order,
+        BrokerAccountID: account.brokerAccountId,
+        PaperLive: account.paper ? 'paper' : 'live',
+        TenantID: account.id,
+        SandboxID: sandbox.id,
+        broker_identity_verified: true,
+      };
+      if (Number(order.filled_qty ?? order.FilledQty ?? 0) > 0) {
+        const localMatch = localOrders.some(local => local.ID === key || local.ClientOrderID === key);
+        if (!localMatch) {
+          unmatchedBrokerFilled = true;
+          continue;
+        }
+      }
+      merged.set(key, normalized);
     }
-    return [...merged.values()].sort((a, b) => String(a.SubmittedAt || '').localeCompare(String(b.SubmittedAt || '')));
+    for (const order of localOrders) {
+      const key = order.ID || order.ClientOrderID;
+      const brokerOrder = key && merged.get(key);
+      if (brokerOrder) {
+        merged.set(key, { ...order, ...brokerOrder });
+      } else if (Number(order.FilledQty || 0) > 0) {
+        unmatchedFilled = true;
+      } else if (key) {
+        merged.set(key, { ...order, evidence: 'local_unconfirmed' });
+      }
+    }
+    return { orders: [...merged.values()].sort((a, b) => String(a.SubmittedAt || a.submitted_at || '').localeCompare(String(b.SubmittedAt || b.submitted_at || ''))), complete: !localIdentityMismatch && !unmatchedFilled && !unmatchedBrokerFilled, broker_state: 'available' };
   } catch (err) {
     console.warn(`[trades] Alpaca reconciliation failed for ${sandbox.id}: ${err.message}`);
-    return localOrders;
+    return { orders: localOrders, complete: false, broker_state: 'unavailable', error: err.message };
   }
 }
 
@@ -1668,21 +1781,33 @@ app.get('/api/trades', async (req, res) => {
       .filter(sandbox => !requested || sandbox.id === requested);
     const orders = [];
     const trades = [];
+    let complete = true;
+    const brokerStates = new Set();
     for (const sandbox of sandboxes) {
       const account = getAccountById(sandbox.accountId);
-      if (!account) continue;
+      if (!account || !account.brokerAccountId || typeof account.paper !== 'boolean') {
+        complete = false;
+        brokerStates.add('identity_unavailable');
+        continue;
+      }
       const metadata = {
         accountId: account.id,
         accountName: account.name,
+        brokerAccountId: account.brokerAccountId,
+        paperLive: account.paper ? 'paper' : 'live',
+        identityVerified: true,
         agentId: getResolvedAgentForSandbox(sandbox.id)?.id || sandbox.agentId || null,
         agentName: getResolvedAgentForSandbox(sandbox.id)?.name || 'Unassigned',
         sandboxId: sandbox.id,
       };
-      const sandboxOrders = await reconcileSandboxOrders(sandbox);
+      const reconciliation = await reconcileSandboxOrders(sandbox, account);
+      complete = complete && reconciliation.complete;
+      brokerStates.add(reconciliation.broker_state);
+      const sandboxOrders = reconciliation.orders;
       orders.push(...sandboxOrders.map(order => ({ ...order, ...metadata })));
       trades.push(...buildTradeLedger(sandboxOrders, metadata));
     }
-    res.json({ generatedAt: new Date().toISOString(), orders, trades });
+    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], orders, trades });
   } catch (err) {
     res.status(500).json({ error: `Could not load verified trades: ${err.message}` });
   }
@@ -1805,11 +1930,18 @@ app.post('/api/auth/logout', (req, res) => {
 // ── Health ──────────────────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
   let botHealthy = false;
-  try {
-    await goAxios.get('/health', { timeout: 3000 });
-    botHealthy = true;
-  } catch {}
   const account = getActiveAccount();
+  try {
+    const response = await goAxios.get('/health', { timeout: 3000 });
+    const health = response.data || {};
+    botHealthy = health.ready === true &&
+      health.broker_account_id === account?.brokerAccountId &&
+      health.paper === account?.paper &&
+      health.reconciliation_complete === true &&
+      health.sandbox_id === (getActiveSandbox()?.id || '') &&
+      health.account_id === account?.id &&
+      health.process_nonce === TRADING_BOT_PROCESS_NONCE;
+  } catch {}
   const sandboxStates = getSandboxes().map(sandbox => ({
     sandboxId: sandbox.id,
     port: isActiveSandbox(sandbox.id) ? Number(TRADING_BOT_PORT) : orchestrator.getSandboxRuntime(sandbox.id)?.port || null,
@@ -1817,7 +1949,7 @@ app.get('/api/health', async (req, res) => {
     goPid: isActiveSandbox(sandbox.id) ? (goProc?.pid || null) : (orchestrator.getSandboxRuntime(sandbox.id)?.goProc?.pid || null),
     state: isActiveSandbox(sandbox.id) ? harness.state.toJSON() : (orchestrator.getSandboxRuntime(sandbox.id)?.harness.state.toJSON() || null),
   }));
-  res.json({
+  res.status(botHealthy ? 200 : 503).json({
     agent: 'healthy',
     trading_bot: botHealthy ? 'healthy' : 'unavailable',
     trading_bot_managed: goProc !== null,
@@ -1843,7 +1975,7 @@ app.use((req, res, next) => {
 // ── Start Server ───────────────────────────────────────────────────
 
 for (const sandbox of getSandboxes()) {
-  if (!isActiveSandbox(sandbox.id)) {
+  if (EXECUTION_START_ENABLED && !isActiveSandbox(sandbox.id)) {
     const runtime = orchestrator.ensureRuntime(sandbox.id);
     bindOperationalHooks(runtime.harness);
   }
@@ -1851,8 +1983,10 @@ for (const sandbox of getSandboxes()) {
 
 // Start Go backend with active account
 const activeAccount = getActiveAccount();
-if (activeAccount) {
+if (EXECUTION_START_ENABLED && activeAccount) {
   await startGoBackend(activeAccount);
+} else if (!EXECUTION_START_ENABLED) {
+  console.log('  Execution mode is inert — Go backend not started');
 } else {
   console.log('  No active account configured — Go backend not started');
 }
@@ -1873,9 +2007,13 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n  Prophet Agent Dashboard: http://localhost:${PORT}`);
-  console.log(`  Network:                http://0.0.0.0:${PORT}`);
-  console.log(`  Trading Bot Backend:    ${TRADING_BOT_URL}`);
-  console.log(`  Active Account:         ${activeAccount?.name || 'none'}\n`);
-});
+if (EXECUTION_START_ENABLED) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n  Prophet Agent Dashboard: http://localhost:${PORT}`);
+    console.log(`  Network:                http://0.0.0.0:${PORT}`);
+    console.log(`  Trading Bot Backend:    ${TRADING_BOT_URL}`);
+    console.log(`  Active Account:         ${activeAccount?.name || 'none'}\n`);
+  });
+} else {
+  console.log('  Dashboard unavailable: execution mode is inert');
+}

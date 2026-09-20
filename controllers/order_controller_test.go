@@ -3,16 +3,64 @@ package controllers
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
+	"prophet-trader/services"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 type reconciliationTradingService struct {
 	orders map[string]*interfaces.Order
 	err    error
+}
+
+func TestGetAccountFailsClosedWhenBrokerServiceIsUnavailable(t *testing.T) {
+	oc := NewOrderController(nil, nil, nil)
+	if _, err := oc.GetAccount(); err == nil {
+		t.Fatal("expected inert mode account read to fail closed")
+	}
+}
+
+func TestInertReadRoutesFailClosedWithoutBrokerOrMarketData(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oc := NewOrderController(nil, nil, nil)
+	tests := []struct {
+		name    string
+		path    string
+		handler func(*gin.Context)
+	}{
+		{"positions", "/positions", oc.HandleGetPositions},
+		{"account", "/account", oc.HandleGetAccount},
+		{"orders", "/orders", oc.HandleGetOrders},
+		{"clock", "/clock", oc.HandleGetMarketClock},
+		{"quote", "/market/quote/AAPL", oc.HandleGetQuote},
+		{"bar", "/market/bar/AAPL", oc.HandleGetBar},
+		{"bars", "/market/bars/AAPL", oc.HandleGetBars},
+		{"options positions", "/options/positions", oc.ListOptionsPositions},
+		{"options position", "/options/position/AAPL", oc.GetOptionsPosition},
+		{"options chain", "/options/chain/AAPL", oc.GetOptionsChain},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = req
+			if tc.name == "quote" || tc.name == "bar" || tc.name == "bars" || tc.name == "options position" || tc.name == "options chain" {
+				ctx.Params = gin.Params{{Key: "symbol", Value: "AAPL"}}
+			}
+			tc.handler(ctx)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+			}
+		})
+	}
 }
 
 func (s *reconciliationTradingService) PlaceOrder(context.Context, *interfaces.Order) (*interfaces.OrderResult, error) {
@@ -74,8 +122,8 @@ func TestReconcileOpenOrdersOnlyUpdatesConfirmedOrders(t *testing.T) {
 	defer storage.Close()
 
 	for _, order := range []*interfaces.Order{
-		{ClientOrderID: "op-confirmed", Symbol: "AAPL", Status: "pending"},
-		{ClientOrderID: "op-error", Symbol: "MSFT", Status: "submit_failed"},
+		{ClientOrderID: "op-confirmed", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Status: "pending"},
+		{ClientOrderID: "op-error", Symbol: "MSFT", Status: "submit_failed", SubmissionAttempted: true},
 	} {
 		if err := storage.SaveOrder(order); err != nil {
 			t.Fatalf("SaveOrder(%q) error = %v", order.ClientOrderID, err)
@@ -86,7 +134,13 @@ func TestReconcileOpenOrdersOnlyUpdatesConfirmedOrders(t *testing.T) {
 		orders: map[string]*interfaces.Order{
 			"op-confirmed": {
 				ID:             "broker-confirmed",
-				Status:         "accepted",
+				ClientOrderID:  "op-confirmed",
+				Symbol:         "AAPL",
+				Qty:            1,
+				Side:           "buy",
+				Type:           "market",
+				TimeInForce:    "day",
+				Status:         "filled",
 				FilledQty:      1,
 				FilledAvgPrice: floatPtr(123.45),
 			},
@@ -104,7 +158,7 @@ func TestReconcileOpenOrdersOnlyUpdatesConfirmedOrders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrder(confirmed) error = %v", err)
 	}
-	if confirmed.Status != "accepted" || confirmed.FilledQty != 1 || confirmed.FilledAvgPrice == nil || *confirmed.FilledAvgPrice != 123.45 {
+	if confirmed.Status != "filled" || confirmed.FilledQty != 1 || confirmed.FilledAvgPrice == nil || *confirmed.FilledAvgPrice != 123.45 {
 		t.Fatalf("confirmed order = %#v, want broker state", confirmed)
 	}
 
@@ -112,8 +166,15 @@ func TestReconcileOpenOrdersOnlyUpdatesConfirmedOrders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrdersNeedingReconciliation() error = %v", err)
 	}
-	if len(pending) != 1 || pending[0].ClientOrderID != "op-error" || pending[0].Status != "submit_failed" {
-		t.Fatalf("orders left untouched after lookup error = %#v, want op-error submit_failed", pending)
+	if len(pending) != 1 {
+		t.Fatalf("orders needing later reconciliation = %#v, want only failed lookup", pending)
+	}
+	seen := map[string]string{}
+	for _, order := range pending {
+		seen[order.ClientOrderID] = order.Status
+	}
+	if seen["op-error"] != "submit_failed" {
+		t.Fatalf("orders needing later reconciliation = %#v, want op-error submit_failed", seen)
 	}
 }
 
@@ -132,7 +193,21 @@ type placeOrderRecorder struct {
 
 func (s *placeOrderRecorder) PlaceOrder(_ context.Context, o *interfaces.Order) (*interfaces.OrderResult, error) {
 	s.placed = o
-	return s.result, s.placeErr
+	if s.result == nil {
+		return nil, s.placeErr
+	}
+	result := *s.result
+	result.ClientOrderID = o.ClientOrderID
+	result.Symbol = o.Symbol
+	result.Qty = o.Qty
+	result.Side = o.Side
+	result.Type = o.Type
+	result.TimeInForce = o.TimeInForce
+	result.LimitPrice = o.LimitPrice
+	result.StopPrice = o.StopPrice
+	result.PositionIntent = o.PositionIntent
+	result.Purpose = o.Purpose
+	return &result, s.placeErr
 }
 
 func TestBuyPersistsIntentBeforeSubmit(t *testing.T) {
@@ -147,7 +222,7 @@ func TestBuyPersistsIntentBeforeSubmit(t *testing.T) {
 	rec := &placeOrderRecorder{reconciliationTradingService: &reconciliationTradingService{}, placeErr: errors.New("broker timeout")}
 	oc := NewOrderController(rec, nil, storage)
 
-	if _, err := oc.Buy(context.Background(), BuyRequest{Symbol: "AAPL", Qty: 1, Type: "market"}); err == nil {
+	if _, err := oc.Buy(context.Background(), BuyRequest{Symbol: "AAPL", Qty: 1, Type: "market", ClientOrderID: "buy-fail-1"}); err == nil {
 		t.Fatal("Buy() expected an error when the broker submit fails")
 	}
 	if rec.placed == nil || rec.placed.ClientOrderID == "" {
@@ -169,10 +244,10 @@ func TestBuyPersistsIntentBeforeSubmit(t *testing.T) {
 	}
 	defer storage2.Close()
 
-	rec2 := &placeOrderRecorder{reconciliationTradingService: &reconciliationTradingService{}, result: &interfaces.OrderResult{OrderID: "broker-1", Status: "accepted"}}
+	rec2 := &placeOrderRecorder{reconciliationTradingService: &reconciliationTradingService{}, result: &interfaces.OrderResult{OrderID: "broker-1", Status: "accepted", BrokerAccountID: "test-broker-account", PaperLive: "paper", TenantID: "test-tenant", SandboxID: "test-sandbox"}}
 	oc2 := NewOrderController(rec2, nil, storage2)
 
-	res, err := oc2.Buy(context.Background(), BuyRequest{Symbol: "MSFT", Qty: 2, Type: "market"})
+	res, err := oc2.Buy(context.Background(), BuyRequest{Symbol: "MSFT", Qty: 2, Type: "market", ClientOrderID: "buy-ok-1"})
 	if err != nil {
 		t.Fatalf("Buy() unexpected error = %v", err)
 	}
@@ -192,5 +267,42 @@ func TestBuyPersistsIntentBeforeSubmit(t *testing.T) {
 	}
 	if len(all) != 1 {
 		t.Fatalf("expected exactly 1 row after pre-submit + post-submit upsert, got %d", len(all))
+	}
+}
+
+func TestSellRetryReloadsPlannedIntentRevision(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "sell-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	nextOpen := time.Now().Add(time.Hour)
+	intent := &interfaces.Order{ClientOrderID: "sell-retry", Symbol: "AAPL", Qty: 2, Side: "sell", Type: "market", TimeInForce: "day", Status: "pending", Purpose: "close"}
+	if err := storage.SaveOrder(intent); err != nil {
+		t.Fatal(err)
+	}
+	intent.Status, intent.NextEligibleAt, intent.ExpiresAt = "planned_for_next_session", &nextOpen, func() *time.Time { v := nextOpen.Add(time.Hour); return &v }()
+	if err := storage.SaveOrder(intent); err != nil {
+		t.Fatal(err)
+	}
+	persistedBefore, err := storage.GetOrderByClientOrderID(intent.ClientOrderID)
+	if err != nil || persistedBefore.Revision <= 1 || persistedBefore.Status != "planned_for_next_session" {
+		t.Fatalf("planned intent = %#v, err=%v; want non-zero retry revision and planned lifecycle", persistedBefore, err)
+	}
+
+	rec := &placeOrderRecorder{reconciliationTradingService: &reconciliationTradingService{}, placeErr: &services.MarketClosedError{NextOpen: nextOpen}}
+	oc := NewOrderController(rec, nil, storage)
+	if _, err := oc.Sell(context.Background(), SellRequest{Symbol: "AAPL", Qty: 2, Type: "market", ClientOrderID: intent.ClientOrderID}); err == nil {
+		t.Fatal("Sell() expected the closed-session error")
+	}
+	after, err := storage.GetOrderByClientOrderID(intent.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision <= persistedBefore.Revision || after.Status != "planned_for_next_session" {
+		t.Fatalf("retry lifecycle = %#v; want monotonic revision and planned status without stale CAS", after)
+	}
+	if rec.placed == nil || rec.placed.Revision <= persistedBefore.Revision {
+		t.Fatalf("submitted retry = %#v; want persisted server revision to advance", rec.placed)
 	}
 }

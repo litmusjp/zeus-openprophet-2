@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -355,7 +356,7 @@ ANTHROPIC_API_KEY=user_anthropic_key
 		t.Fatalf("stat failed: %v", err)
 	}
 	perm := info.Mode().Perm()
-	if perm != 0600 {
+	if runtime.GOOS != "windows" && perm != 0600 {
 		t.Errorf("expected mode 0600, got %o", perm)
 	}
 }
@@ -485,7 +486,7 @@ func TestInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat failed: %v", err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Errorf("expected 0600 permissions on key file, got %o", info.Mode().Perm())
 	}
 
@@ -638,7 +639,7 @@ func TestUpdatePreservesCredentialsAndUsesSavedEntitlement(t *testing.T) {
 	if !strings.Contains(string(content), "OPENPROPHET_IMAGE=example/openprophet:v2") || !strings.Contains(string(content), "ANTHROPIC_API_KEY=local-only") {
 		t.Fatalf("update did not preserve local environment: %s", content)
 	}
-	if mode, err := os.Stat(envPath); err != nil || mode.Mode().Perm() != 0600 {
+	if mode, err := os.Stat(envPath); err != nil || (runtime.GOOS != "windows" && mode.Mode().Perm() != 0600) {
 		t.Fatalf("updated environment permissions are not 0600")
 	}
 	if strings.Contains(stdout.String()+stderr.String(), key) {

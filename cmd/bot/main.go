@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"prophet-trader/config"
 	"prophet-trader/controllers"
 	"prophet-trader/database"
@@ -19,6 +24,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 )
+
+func executionModeEnabled(mode string) bool {
+	return strings.EqualFold(strings.TrimSpace(mode), "enabled")
+}
+
+func shouldStartHTTPServer(executionEnabled bool) bool {
+	return executionEnabled
+}
 
 func main() {
 	// Load configuration
@@ -40,36 +53,78 @@ func main() {
 	}
 
 	logger.Info("Starting Prophet Trader Bot...")
+	executionEnabled := executionModeEnabled(cfg.ExecutionMode)
+	if !executionEnabled {
+		logger.Warn("Execution mode is inert; broker trading service will not be initialized")
+		return
+	}
 
 	// Validate required configuration
-	if cfg.AlpacaAPIKey == "" || cfg.AlpacaSecretKey == "" {
+	if executionEnabled && (cfg.AlpacaAPIKey == "" || cfg.AlpacaSecretKey == "") {
 		logger.Fatal("Alpaca API credentials not configured. Please set ALPACA_API_KEY and ALPACA_SECRET_KEY")
 	}
 
 	// Initialize services
 	logger.Info("Initializing services...")
 
-	// Create trading service
-	tradingService, err := services.NewAlpacaTradingService(
-		cfg.AlpacaAPIKey,
-		cfg.AlpacaSecretKey,
-		cfg.AlpacaBaseURL,
-		cfg.AlpacaPaper,
-	)
-	if err != nil {
-		logger.Warn("Failed to create trading service (will retry on requests):", err)
+	// Create trading service only when explicitly enabled.
+	var tradingService *services.AlpacaTradingService
+	if executionEnabled {
+		var err error
+		tradingService, err = services.NewAlpacaTradingService(
+			cfg.AlpacaAPIKey,
+			cfg.AlpacaSecretKey,
+			cfg.AlpacaBaseURL,
+			cfg.AlpacaPaper,
+		)
+		if err != nil {
+			logger.Warn("Failed to create trading service (will retry on requests):", err)
+		}
 	}
 
-	// Create data service
-	dataService := services.NewAlpacaDataService(
-		cfg.AlpacaAPIKey,
-		cfg.AlpacaSecretKey,
-	)
+	// Inert startup must not initialize any broker-backed client.
+	var dataService *services.AlpacaDataService
+	if executionEnabled {
+		dataService = services.NewAlpacaDataService(cfg.AlpacaAPIKey, cfg.AlpacaSecretKey)
+	}
 
-	// Create storage service
-	storageService, err := database.NewLocalStorage(cfg.DatabasePath)
+	var storageService *database.LocalStorage
+	var err error
+	if executionEnabled {
+		storageService, err = database.NewLocalStorage(cfg.DatabasePath)
+	}
 	if err != nil {
-		logger.Fatal("Failed to create storage service:", err)
+		if executionEnabled {
+			logger.Fatal("Failed to create storage service:", err)
+		}
+		logger.Warn("Inert storage unavailable; broker-backed persistence routes will remain unavailable:", err)
+	}
+	if tradingService != nil {
+		tradingService.SetLocalOrderProvider(func(context.Context) ([]*interfaces.Order, error) {
+			all, err := storageService.GetOrders("")
+			if err != nil {
+				return nil, err
+			}
+			// Risk reservations are scoped to this runtime's durable identity.
+			// Never aggregate unverified sibling databases across accounts or tenants.
+			pending := make([]*interfaces.Order, 0, len(all))
+			for _, order := range all {
+				if order == nil || order.Purpose != "entry" {
+					continue
+				}
+				switch strings.ToLower(order.Status) {
+				case "filled", "canceled", "cancelled", "rejected", "expired", "done_for_day", "replaced":
+					continue
+				default:
+					pending = append(pending, order)
+				}
+			}
+			return pending, nil
+		})
+		accountKey := os.Getenv("ALPACA_ACCOUNT_ID")
+		accountHash := sha256.Sum256([]byte(accountKey))
+		lockPath := filepath.Join(filepath.Dir(filepath.Dir(cfg.DatabasePath)), "account-"+hex.EncodeToString(accountHash[:])[:24]+".opening.lock")
+		tradingService.SetOpeningReservationLock(lockPath)
 	}
 
 	// Create order controller
@@ -95,6 +150,7 @@ func main() {
 
 	// Test account connection
 	logger.Info("Testing Alpaca connection...")
+	brokerReady := false
 	if tradingService != nil {
 		if account, err := orderController.GetAccount(); err != nil {
 			logger.Warn("Failed to connect to Alpaca (trading will be unavailable):", err)
@@ -104,24 +160,32 @@ func main() {
 				"buying_power":    account.BuyingPower,
 				"portfolio_value": account.PortfolioValue,
 			}).Info("Successfully connected to Alpaca")
+			brokerReady = true
 		}
 	} else {
 		logger.Warn("Trading service unavailable - API credentials may be invalid")
 	}
 
+	orderController.SetExecutionBlocked(true)
 	if tradingService != nil {
-		// Run reconciliation in the background: the Alpaca SDK lookup ignores the context,
-		// so a slow/hung broker call must never block startup or serving. It only repairs
-		// local records; trading resumes on the agent heartbeat regardless.
-		go func() {
-			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer reconcileCancel()
-			reconciled, skipped := orderController.ReconcileOpenOrders(reconcileCtx)
-			logger.WithFields(logrus.Fields{
-				"reconciled": reconciled,
-				"skipped":    skipped,
-			}).Info("Startup order reconciliation complete")
-		}()
+		tradingService.SetExecutionBlocked(true)
+	}
+	reconcileSkipped := 1
+	managedSkipped := 1
+	if brokerReady {
+		reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		reconciled, skipped := orderController.ReconcileOpenOrders(reconcileCtx)
+		reconcileCancel()
+		reconcileSkipped = skipped
+		logger.WithFields(logrus.Fields{
+			"reconciled": reconciled,
+			"skipped":    skipped,
+		}).Info("Startup order reconciliation complete")
+		if skipped > 0 {
+			logger.Error("Trading execution remains blocked because persisted order state is unresolved")
+		}
+	} else {
+		logger.Error("Trading execution remains blocked because the trading service is unavailable")
 	}
 
 	// Start background tasks
@@ -130,6 +194,20 @@ func main() {
 
 	// Create position manager
 	positionManager := services.NewPositionManager(tradingService, dataService, storageService)
+	positionManager.SetExecutionBlocked(true)
+	if brokerReady {
+		managedCtx, managedCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		managedSkipped = positionManager.ReconcilePersistedPositions(managedCtx)
+		managedCancel()
+	}
+	if executionEnabled && brokerReady && reconcileSkipped == 0 && managedSkipped == 0 {
+		os.Setenv("OPENPROPHET_RECONCILIATION_COMPLETE", "true")
+		orderController.SetExecutionBlocked(false)
+		tradingService.SetExecutionBlocked(false)
+		positionManager.SetExecutionBlocked(false)
+	} else {
+		logger.WithFields(logrus.Fields{"order_skipped": reconcileSkipped, "managed_skipped": managedSkipped}).Error("Trading execution remains blocked after startup reconciliation")
+	}
 	positionController := controllers.NewPositionManagementController(positionManager)
 
 	// Create activity logger
@@ -140,23 +218,29 @@ func main() {
 	activityLogger := services.NewActivityLogger(activityLogDir)
 	activityController := controllers.NewActivityController(activityLogger)
 
-	// Start trading session automatically
-	if account, err := orderController.GetAccount(); err == nil {
-		activityLogger.StartSession(ctx, account.PortfolioValue)
-		logger.Info("Activity logging session started")
+	// Start trading session automatically only after an enabled broker connection.
+	if executionEnabled && tradingService != nil {
+		if account, err := orderController.GetAccount(); err == nil {
+			activityLogger.StartSession(ctx, account.PortfolioValue)
+			logger.Info("Activity logging session started")
+		}
 	}
 
 	// Setup HTTP server
-	router := setupRouter(orderController, newsController, intelligenceController, positionController, activityController, economicFeedsController)
+	router := setupRouter(orderController, brokerReady, positionManager, newsController, intelligenceController, positionController, activityController, economicFeedsController)
 
 	// Start data cleanup routine
-	go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
+	if storageService != nil {
+		go startDataCleanup(ctx, storageService, cfg.DataRetentionDays, logger)
+	}
 
-	// Start position monitor
-	go startPositionMonitor(ctx, orderController, storageService, logger)
-
-	// Start managed position monitoring
-	go positionManager.MonitorPositions(ctx)
+	// Start position monitor only after persisted order reconciliation clears the execution gate.
+	if storageService != nil && !orderController.ExecutionBlocked() {
+		go startPositionMonitor(ctx, orderController, storageService, logger)
+		go positionManager.MonitorPositions(ctx)
+	} else {
+		logger.Error("Position monitoring disabled because trading execution is blocked")
+	}
 
 	// Setup graceful shutdown
 	shutdown := make(chan os.Signal, 1)
@@ -172,15 +256,33 @@ func main() {
 
 	// Start HTTP server
 	logger.WithFields(logrus.Fields{"host": cfg.ServerHost, "port": cfg.ServerPort}).Info("Starting HTTP server...")
-	if err := router.Run(cfg.ServerHost + ":" + cfg.ServerPort); err != nil {
-		logger.Fatal("Failed to start server:", err)
+	if shouldStartHTTPServer(executionEnabled) {
+		if err := router.Run(cfg.ServerHost + ":" + cfg.ServerPort); err != nil {
+			logger.Fatal("Failed to start server:", err)
+		}
 	}
 }
 
-func setupRouter(orderController *controllers.OrderController, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController) *gin.Engine {
+func setupRouter(orderController *controllers.OrderController, tradingReady bool, positionManager *services.PositionManager, newsController *controllers.NewsController, intelligenceController *controllers.IntelligenceController, positionController *controllers.PositionManagementController, activityController *controllers.ActivityController, economicFeedsController *controllers.EconomicFeedsController) *gin.Engine {
 	router := gin.Default()
 	if err := router.SetTrustedProxies(nil); err != nil {
 		panic(fmt.Sprintf("failed to disable trusted proxies: %v", err))
+	}
+	expectedSandboxID := os.Getenv("OPENPROPHET_SANDBOX_ID")
+	expectedAccountID := os.Getenv("OPENPROPHET_ACCOUNT_ID")
+	expectedProcessNonce := os.Getenv("OPENPROPHET_PROCESS_NONCE")
+	if expectedSandboxID == "" || expectedAccountID == "" || expectedProcessNonce == "" || os.Getenv("ALPACA_ACCOUNT_ID") == "" {
+		router.Use(func(c *gin.Context) {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "complete backend identity is required"})
+		})
+	} else {
+		router.Use(func(c *gin.Context) {
+			if c.GetHeader("X-OpenProphet-Sandbox-ID") != expectedSandboxID || c.GetHeader("X-OpenProphet-Account-ID") != expectedAccountID || c.GetHeader("X-OpenProphet-Process-Nonce") != expectedProcessNonce {
+				c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "backend identity mismatch"})
+				return
+			}
+			c.Next()
+		})
 	}
 
 	// Enable CORS
@@ -190,7 +292,7 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 			c.Writer.Header().Set("Vary", "Origin")
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-OpenProphet-Sandbox-ID, X-OpenProphet-Account-ID, X-OpenProphet-Process-Nonce")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -200,13 +302,64 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 
 	// Health check
 	router.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "healthy"})
+		brokerAvailable := tradingReady
+		if brokerAvailable {
+			if _, err := orderController.GetAccount(); err != nil {
+				brokerAvailable = false
+			}
+		}
+		reconciliationComplete := os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true"
+		identityComplete := os.Getenv("OPENPROPHET_SANDBOX_ID") != "" && os.Getenv("OPENPROPHET_ACCOUNT_ID") != "" && os.Getenv("ALPACA_ACCOUNT_ID") != "" && os.Getenv("OPENPROPHET_PROCESS_NONCE") != ""
+		ready := brokerAvailable && identityComplete && reconciliationComplete && !orderController.ExecutionBlocked() && !positionManager.ExecutionBlocked()
+		status := "healthy"
+		httpStatus := 200
+		if !ready {
+			status = "degraded"
+			httpStatus = 503
+		}
+		c.JSON(httpStatus, gin.H{
+			"status":                  status,
+			"ready":                   ready,
+			"execution_ready":         ready,
+			"sandbox_id":              os.Getenv("OPENPROPHET_SANDBOX_ID"),
+			"account_id":              os.Getenv("OPENPROPHET_ACCOUNT_ID"),
+			"broker_account_id":       os.Getenv("ALPACA_ACCOUNT_ID"),
+			"paper":                   config.AppConfig.AlpacaPaper,
+			"reconciliation_complete": os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true",
+			"process_nonce":           os.Getenv("OPENPROPHET_PROCESS_NONCE"),
+		})
 	})
 
 	// Trading endpoints
 	api := router.Group("/api/v1")
 	api.Use(func(c *gin.Context) {
-		if config.AppConfig.AuthToken == "" || c.GetHeader("Authorization") == "Bearer "+config.AppConfig.AuthToken {
+		host, _, splitErr := net.SplitHostPort(c.Request.RemoteAddr)
+		if splitErr != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+			c.AbortWithStatusJSON(403, gin.H{"error": "trading API is internal-only"})
+			return
+		}
+		if config.AppConfig.AuthToken == "" {
+			c.AbortWithStatusJSON(503, gin.H{"error": "trading API authentication is not configured"})
+			return
+		}
+		if c.GetHeader("Authorization") == "Bearer "+config.AppConfig.AuthToken {
+			expected := map[string]string{
+				"X-OpenProphet-Sandbox-ID":    os.Getenv("OPENPROPHET_SANDBOX_ID"),
+				"X-OpenProphet-Account-ID":    os.Getenv("OPENPROPHET_ACCOUNT_ID"),
+				"X-OpenProphet-Process-Nonce": os.Getenv("OPENPROPHET_PROCESS_NONCE"),
+			}
+			for header, value := range expected {
+				if value == "" || c.GetHeader(header) != value {
+					c.AbortWithStatusJSON(403, gin.H{"error": "trading backend identity mismatch"})
+					return
+				}
+			}
+			if c.Request.Method == http.MethodDelete && (strings.HasPrefix(c.Request.URL.Path, "/api/v1/orders/") || strings.HasPrefix(c.Request.URL.Path, "/api/v1/positions/managed/")) {
+				if config.AppConfig.OperatorToken == "" || c.GetHeader("X-OpenProphet-Operator-Token") != config.AppConfig.OperatorToken {
+					c.AbortWithStatusJSON(403, gin.H{"error": "operator authorization is required for cancellation"})
+					return
+				}
+			}
 			c.Next()
 			return
 		}
@@ -218,6 +371,7 @@ func setupRouter(orderController *controllers.OrderController, newsController *c
 		api.POST("/orders/sell", orderController.HandleSell)
 		api.DELETE("/orders/:id", orderController.HandleCancelOrder)
 		api.GET("/orders", orderController.HandleGetOrders)
+		api.GET("/clock", orderController.HandleGetMarketClock)
 
 		// Position and account endpoints
 		api.GET("/positions", orderController.HandleGetPositions)

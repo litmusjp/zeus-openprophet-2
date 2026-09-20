@@ -47,7 +47,16 @@ export function getHeartbeatScheduleSeconds(baseSeconds, phase, currentMinutes =
   return secondsUntilBoundary > 0 ? Math.min(baseSeconds, secondsUntilBoundary) : baseSeconds;
 }
 
-export function tradeEventFromToolUse(fullToolName, toolInput = {}) {
+function parseOrderToolResult(toolResult) {
+  if (toolResult && typeof toolResult === 'object') return toolResult;
+  if (typeof toolResult !== 'string' || !toolResult.trim()) return {};
+  try { return JSON.parse(toolResult); } catch {}
+  const json = toolResult.match(/\{[\s\S]*\}/)?.[0];
+  if (!json) return {};
+  try { return JSON.parse(json); } catch { return {}; }
+}
+
+export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult = '') {
   const tool = String(fullToolName || '').replace('prophet_', '');
   const defaultSides = {
     place_buy_order: 'buy',
@@ -57,13 +66,37 @@ export function tradeEventFromToolUse(fullToolName, toolInput = {}) {
     close_managed_position: 'sell',
   };
   if (!Object.hasOwn(defaultSides, tool)) return null;
+
+  const result = parseOrderToolResult(toolResult);
+  const status = String(result.status || result.Status || '').toLowerCase();
+  const filledQty = Number(result.filled_qty ?? result.FilledQty ?? 0);
+  const requestedQty = Number(toolInput.quantity ?? toolInput.qty ?? 0);
+  const hasRequestedQty = Number.isFinite(requestedQty) && requestedQty > 0;
+  const hasFill = Number.isFinite(filledQty) && filledQty > 0;
+  const fullFill = hasFill && hasRequestedQty && filledQty >= requestedQty - 1e-9;
+  const fillStatuses = ['filled', 'partially_filled', 'canceled', 'rejected', 'expired', 'done_for_day', 'replaced'];
+  const executionConfirmed = result.execution_confirmed === true && hasFill && fillStatuses.includes(status);
+  let lifecycle = 'unknown';
+  if (status === 'filled' && fullFill) lifecycle = 'filled';
+  else if (hasFill && fillStatuses.includes(status)) lifecycle = `${fullFill ? 'filled' : 'partially_filled'}_${status}`;
+  else if (executionConfirmed) lifecycle = fullFill ? 'filled' : 'partially_filled';
+  else if (status === 'planned_for_next_session') lifecycle = 'planned';
+  else if (['rejected', 'canceled', 'expired', 'submit_failed', 'submission_uncertain'].includes(status)) lifecycle = status;
+  else if (['accepted', 'new', 'pending_new', 'open', 'pending'].includes(status)) lifecycle = 'submitted';
+
   return {
     type: 'order',
     tool,
     symbol: toolInput.symbol || '??',
     side: toolInput.side || defaultSides[tool] || 'unknown',
-    quantity: toolInput.quantity || toolInput.qty,
-    price: toolInput.limit_price,
+    quantity: executionConfirmed && filledQty > 0 ? filledQty : (toolInput.quantity || toolInput.qty),
+    price: executionConfirmed ? Number(result.filled_avg_price ?? result.FilledAvgPrice ?? 0) || undefined : undefined,
+    orderId: result.order_id || result.OrderID || undefined,
+    status: status || 'unknown',
+    lifecycle,
+    executionConfirmed,
+    fullFill,
+    positionIntent: toolInput.position_intent || undefined,
   };
 }
 
@@ -129,11 +162,13 @@ Each time you wake, work this loop in order and stop once you've acted or confir
 7. RECORD — call \`prophet_log_decision\` with the reasoning behind every trade; when a position closes, call \`prophet_store_trade_setup\` with the realized result so your memory compounds.
 
 ## Execution Contract (strict)
-- There is no queue, schedule, delayed-entry, or "place at market open" tool. Every order tool submits immediately to the broker.
-- A written plan, intention, watchlist item, or statement that you "will place" a trade is NOT an order and must never be reported as queued, submitted, or placed.
-- During pre-market, record and review a candidate plan only; do not submit a future entry to stage market-open execution.
-- At the first market-open heartbeat, re-check price, liquidity, account, positions, risk, and thesis, then call the exact registered order tool immediately if the setup remains valid. If you do not call the tool, report "not submitted".
-- Only report an order as placed/submitted after the order tool returns a broker response containing its order identity/status. Never claim an order was placed without that broker-confirmed response; never claim execution from your own narrative.
+- Every direct buy/sell/options or managed-entry call must include a fresh caller-generated \`client_order_id\`; reuse that exact ID only when reconciling the same persisted or uncertain intent. Managed exits use their persisted per-position identity. Never generate a new ID to retry.
+- Every options submission is checked against the broker-authoritative regular-session clock immediately before the broker call. A closed-session response is saved as \`planned_for_next_session\`; it is an application intent, NOT a broker order.
+- A written plan, intention, watchlist item, or statement that you "will place" a trade is NOT an order and must never be reported as queued, submitted, or placed unless the tool returns the explicit planned status.
+- Use \`prophet_place_options_order\` for OCC option symbols. Never send an OCC option symbol through \`prophet_place_buy_order\`, \`prophet_place_sell_order\`, or managed-position tools. Always pass the underlying and explicit \`position_intent\` (\`buy_to_open\`, \`buy_to_close\`, \`sell_to_open\`, or \`sell_to_close\`).
+- At the first valid-session heartbeat, review \`prophet_get_orders\` for \`planned_for_next_session\`. Re-submit the exact intent using its returned \`client_order_id\`; never create a new intent for the same plan, and re-check price, liquidity, account, positions, risk, and thesis before submitting once. Do not duplicate an existing broker order.
+- Treat \`accepted\`, \`new\`, \`pending_new\`, and \`open\` as broker acknowledgement only. Any positive filled quantity is execution-confirmed, including a partial fill whose final status is \`canceled\`, \`rejected\`, \`expired\`, or \`done_for_day\`. Treat \`rejected\`, \`canceled\`, \`expired\`, \`submit_failed\`, and \`submission_uncertain\` with zero filled quantity as non-executions.
+- Report the exact lifecycle state. Never say "trade executed", "position opened", or "position closed" for an accepted or planned order.
 
 ## Phase Playbook (ET)
 - Pre-market (4–9:30): gather intelligence, build a watchlist and theses. Don't chase thin pre-market prints.
@@ -985,7 +1020,7 @@ ${userBlock}`;
 
         // Track only tools that execute trades. Read-only tools such as
         // get_orders and get_managed_positions must not inflate trade telemetry.
-        const trade = tradeEventFromToolUse(fullToolName, toolInput);
+        const trade = tradeEventFromToolUse(fullToolName, toolInput, resultStr);
         if (trade) {
           this.state.stats.trades++;
           this.state.addTrade(trade);

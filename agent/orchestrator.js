@@ -4,10 +4,11 @@ import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import axios from 'axios';
 
 import { AgentHarness } from './harness.js';
-import { alpacaTradingUrl, portForAgent } from './defaults.js';
+import { alpacaTradingUrl, portForAgent, tradingPolicyEnvironment } from './defaults.js';
 import {
   getSandbox,
   getSandboxes,
@@ -37,6 +38,37 @@ function portOffsetForSandbox(sandboxId) {
 
 export { shouldShowGoLogLine, createGoLogLineBuffer };
 
+// The tenant is derived from the server-owned account binding. An inherited
+// tenant is only acceptable when it agrees; callers cannot redirect a runtime
+// to another tenant through environment input.
+export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, port, databasePath, activityLogDir, permissions }) {
+  const tenantID = String(account?.id || '').trim();
+  if (!tenantID) throw new Error('server-owned tenant identity is missing');
+  const inheritedTenant = String(baseEnv?.OPENPROPHET_TENANT_ID || '').trim();
+  if (inheritedTenant && inheritedTenant !== tenantID) {
+    throw new Error(`server-owned tenant identity conflicts with inherited tenant for sandbox ${sandboxId}`);
+  }
+  return {
+    ...baseEnv,
+    ALPACA_API_KEY: account.publicKey,
+    ALPACA_SECRET_KEY: account.secretKey,
+    ALPACA_BASE_URL: alpacaTradingUrl(account.paper, account.baseUrl),
+    ALPACA_PAPER: account.paper ? 'true' : 'false',
+    ALPACA_ACCOUNT_ID: account.brokerAccountId,
+    OPENPROPHET_TENANT_ID: tenantID,
+    PORT: String(port),
+    SERVER_HOST: '127.0.0.1',
+    TRADING_BOT_TOKEN: baseEnv?.TRADING_BOT_TOKEN || '',
+    TRADING_BOT_OPERATOR_TOKEN: baseEnv?.TRADING_BOT_OPERATOR_TOKEN || '',
+    DATABASE_PATH: databasePath,
+    ACTIVITY_LOG_DIR: activityLogDir,
+    OPENPROPHET_SANDBOX_ID: sandboxId,
+    OPENPROPHET_ACCOUNT_ID: account.id,
+    OPENPROPHET_PROCESS_NONCE: processNonce,
+    ...tradingPolicyEnvironment(permissions),
+  };
+}
+
 export class AgentOrchestrator extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -45,18 +77,24 @@ export class AgentOrchestrator extends EventEmitter {
     this.tradingBotBasePort = Number(options.tradingBotBasePort || process.env.TRADING_BOT_PORT || 4534);
     this.chatStore = options.chatStore || null;
     this.runtimes = new Map();
+    this.portOwners = new Map();
     this._binaryReady = false;
   }
 
   getSandboxPort(sandboxId) {
-    // Deterministic per-sandbox port via the shared, tested allocation policy.
-    return portForAgent(sandboxId, this.tradingBotBasePort);
+    const existing = this.runtimes.get(sandboxId);
+    if (existing) return existing.port;
+    const preferred = portForAgent(sandboxId, this.tradingBotBasePort);
+    let port = preferred;
+    while (this.portOwners.has(port) && this.portOwners.get(port) !== sandboxId) {
+      port += 1;
+    }
+    this.portOwners.set(port, sandboxId);
+    return port;
   }
 
   getSandboxDbPath(sandboxId) {
-    const sandbox = getSandbox(sandboxId);
-    const accountId = sandbox?.accountId || sandboxId;
-    return path.join(this.projectRoot, 'data', 'sandboxes', accountId, 'prophet_trader.db');
+    return path.join(this.projectRoot, 'data', 'sandboxes', sandboxId, 'prophet_trader.db');
   }
 
   getSandboxRuntime(sandboxId) {
@@ -84,11 +122,18 @@ export class AgentOrchestrator extends EventEmitter {
     const tradingBotUrl = `http://127.0.0.1:${port}`;
     const goHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 10, keepAliveMsecs: 30000 });
     const tradingBotToken = process.env.TRADING_BOT_TOKEN || '';
+    const processNonce = randomUUID();
+    const identityHeaders = {
+      Authorization: `Bearer ${tradingBotToken}`,
+      'X-OpenProphet-Sandbox-ID': sandboxId,
+      'X-OpenProphet-Account-ID': sandbox.accountId,
+      'X-OpenProphet-Process-Nonce': processNonce,
+    };
     const goAxios = axios.create({
       baseURL: tradingBotUrl,
       httpAgent: goHttpAgent,
       timeout: 5000,
-      headers: tradingBotToken ? { Authorization: `Bearer ${tradingBotToken}` } : {},
+      headers: identityHeaders,
     });
 
     const harness = new AgentHarness({
@@ -109,6 +154,11 @@ export class AgentOrchestrator extends EventEmitter {
         AGENT_URL: this.agentUrl,
         OPENPROPHET_SANDBOX_ID: sandboxId,
         OPENPROPHET_ACCOUNT_ID: sandbox.accountId,
+        OPENPROPHET_PROCESS_NONCE: processNonce,
+        TRADING_BOT_SANDBOX_ID: sandboxId,
+        TRADING_BOT_ACCOUNT_ID: sandbox.accountId,
+        TRADING_BOT_PROCESS_NONCE: processNonce,
+        ...tradingPolicyEnvironment(getPermissionsForSandbox(sandboxId)),
         DATABASE_PATH: this.getSandboxDbPath(sandboxId),
       },
     });
@@ -118,10 +168,13 @@ export class AgentOrchestrator extends EventEmitter {
       sandbox,
       port,
       tradingBotUrl,
+      processNonce,
+      identityHeaders,
       goAxios,
       goReady: false,
       goProc: null,
       harness,
+      portCollisionAttempts: 0,
     };
 
     for (const event of HARNESS_EVENTS) {
@@ -159,28 +212,33 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   async startGoBackend(sandboxId, _isRetry = false) {
+    if (process.env.OPENPROPHET_EXECUTION_MODE !== 'enabled') {
+      throw new Error('execution mode is inert; backend startup is disabled');
+    }
     const runtime = this.ensureRuntime(sandboxId);
+    runtime.processNonce = randomUUID();
+    runtime.identityHeaders = {
+      ...runtime.identityHeaders,
+      'X-OpenProphet-Process-Nonce': runtime.processNonce,
+    };
+    runtime.goAxios.defaults.headers.common['X-OpenProphet-Process-Nonce'] = runtime.processNonce;
     const account = getAccountById(runtime.sandbox.accountId);
     if (!account) throw new Error(`Account not found for sandbox ${sandboxId}`);
+    if (!account.brokerAccountId) throw new Error(`Broker account binding is missing for sandbox ${sandboxId}`);
 
     await this.stopGoBackend(sandboxId);
     await this._ensureBinary();
     await fs.mkdir(path.dirname(this.getSandboxDbPath(sandboxId)), { recursive: true });
 
-    const env = {
-      ...process.env,
-      ALPACA_API_KEY: account.publicKey,
-      ALPACA_SECRET_KEY: account.secretKey,
-      ALPACA_BASE_URL: alpacaTradingUrl(account.paper, account.baseUrl),
-      ALPACA_PAPER: account.paper ? 'true' : 'false',
-      PORT: String(runtime.port),
-      SERVER_HOST: '127.0.0.1',
-      TRADING_BOT_TOKEN: process.env.TRADING_BOT_TOKEN || '',
-      DATABASE_PATH: this.getSandboxDbPath(sandboxId),
-      ACTIVITY_LOG_DIR: path.join(this.projectRoot, 'data', 'sandboxes', account.id, 'activity_logs'),
-      OPENPROPHET_SANDBOX_ID: sandboxId,
-      OPENPROPHET_ACCOUNT_ID: account.id,
-    };
+    const env = buildGoBackendEnv(process.env, {
+      account,
+      sandboxId,
+      processNonce: runtime.processNonce,
+      port: runtime.port,
+      databasePath: this.getSandboxDbPath(sandboxId),
+      activityLogDir: path.join(this.projectRoot, 'data', 'sandboxes', sandboxId, 'activity_logs'),
+      permissions: getPermissionsForSandbox(sandboxId),
+    });
 
     const binaryPath = path.join(this.projectRoot, 'prophet_bot');
     runtime.goProc = spawn(binaryPath, [], {
@@ -220,7 +278,25 @@ export class AgentOrchestrator extends EventEmitter {
     for (let i = 0; i < 20; i++) {
       await new Promise(resolve => setTimeout(resolve, 500));
       try {
-        await runtime.goAxios.get('/health', { timeout: 2000 });
+        const response = await runtime.goAxios.get('/health', { timeout: 2000 });
+        const health = response.data || {};
+        if (health.sandbox_id && health.sandbox_id !== sandboxId) {
+          if (runtime.portCollisionAttempts >= 5) {
+            throw new Error(`port collision persisted for sandbox ${sandboxId}`);
+          }
+          runtime.portCollisionAttempts += 1;
+          this.portOwners.delete(runtime.port);
+          runtime.port = runtime.port + 1;
+          while (this.portOwners.has(runtime.port)) runtime.port += 1;
+          this.portOwners.set(runtime.port, sandboxId);
+          runtime.tradingBotUrl = `http://127.0.0.1:${runtime.port}`;
+          runtime.goAxios = axios.create({ baseURL: runtime.tradingBotUrl, httpAgent: new http.Agent({ keepAlive: true, maxSockets: 10 }), timeout: 5000, headers: runtime.identityHeaders });
+          await this.stopGoBackend(sandboxId);
+          return this.startGoBackend(sandboxId, _isRetry);
+        }
+        if (!health.ready || health.sandbox_id !== sandboxId || health.account_id !== account.id || health.broker_account_id !== account.brokerAccountId || health.paper !== account.paper || health.reconciliation_complete !== true || health.process_nonce !== runtime.processNonce) {
+          throw new Error('trading backend identity/readiness mismatch');
+        }
         runtime.goReady = true;
         this.emit('agent_log', {
           sandboxId,

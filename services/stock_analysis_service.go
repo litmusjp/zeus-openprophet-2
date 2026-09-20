@@ -35,52 +35,52 @@ func NewStockAnalysisService(dataService interfaces.DataService, newsService *Ne
 
 // StockAnalysis represents comprehensive analysis of a stock
 type StockAnalysis struct {
-	Symbol          string                 `json:"symbol"`
-	CurrentPrice    float64                `json:"current_price"`
-	MarketCap       string                 `json:"market_cap_estimate"`
-	Technical       TechnicalAnalysis      `json:"technical"`
-	NewsSummary     string                 `json:"news_summary"` // Just summary, not full articles
-	TradeSetup      TradeSetup             `json:"trade_setup"`
-	Timestamp       time.Time              `json:"timestamp"`
+	Symbol       string            `json:"symbol"`
+	CurrentPrice float64           `json:"current_price"`
+	MarketCap    string            `json:"market_cap_estimate"`
+	Technical    TechnicalAnalysis `json:"technical"`
+	NewsSummary  string            `json:"news_summary"` // Just summary, not full articles
+	TradeSetup   TradeSetup        `json:"trade_setup"`
+	Timestamp    time.Time         `json:"timestamp"`
 }
 
 // TechnicalAnalysis contains technical indicators
 type TechnicalAnalysis struct {
-	Price         float64  `json:"price"`
-	DayChange     float64  `json:"day_change_percent"`
-	Volume        int64    `json:"volume"`
-	AvgVolume     int64    `json:"avg_volume_30d"`
-	VolumeRatio   float64  `json:"volume_ratio"` // Current vs avg
-	Trend         string   `json:"trend"` // "BULLISH", "BEARISH", "NEUTRAL"
-	Support       float64  `json:"support_level"`
-	Resistance    float64  `json:"resistance_level"`
-	Volatility    float64  `json:"volatility_30d"`
-	RSI           float64  `json:"rsi_14"` // 0-100
-	PriceStrength string   `json:"price_strength"` // "OVERSOLD", "NEUTRAL", "OVERBOUGHT"
+	Price         float64 `json:"price"`
+	DayChange     float64 `json:"day_change_percent"`
+	Volume        int64   `json:"volume"`
+	AvgVolume     int64   `json:"avg_volume_30d"`
+	VolumeRatio   float64 `json:"volume_ratio"` // Current vs avg
+	Trend         string  `json:"trend"`        // "BULLISH", "BEARISH", "NEUTRAL"
+	Support       float64 `json:"support_level"`
+	Resistance    float64 `json:"resistance_level"`
+	Volatility    float64 `json:"volatility_30d"`
+	RSI           float64 `json:"rsi_14"`         // 0-100
+	PriceStrength string  `json:"price_strength"` // "OVERSOLD", "NEUTRAL", "OVERBOUGHT"
 }
 
 // TradeSetup provides neutral trading data for AI interpretation
 type TradeSetup struct {
 	// Price Levels (NEUTRAL - just data)
-	Entry          float64  `json:"entry"`          // Current price
-	StopLoss       float64  `json:"stop_loss"`      // Suggested -15% stop
-	TakeProfit     float64  `json:"take_profit"`    // Suggested +30% target
-	RiskReward     float64  `json:"risk_reward"`    // Ratio
+	Entry      float64 `json:"entry"`       // Current price
+	StopLoss   float64 `json:"stop_loss"`   // Suggested -15% stop
+	TakeProfit float64 `json:"take_profit"` // Suggested +30% target
+	RiskReward float64 `json:"risk_reward"` // Ratio
 
 	// Catalysts (NEUTRAL - just facts)
-	RecentNews     []string `json:"recent_news"`    // Headlines only
-	KeyCatalysts   []string `json:"key_catalysts"`  // Factual catalysts
+	RecentNews   []string `json:"recent_news"`   // Headlines only
+	KeyCatalysts []string `json:"key_catalysts"` // Factual catalysts
 
 	// Scoring (NEUTRAL - numerical only)
-	TechnicalScore int      `json:"technical_score"` // 0-10 based on indicators
-	CatalystScore  int      `json:"catalyst_score"`  // 0-10 based on news recency/quality
-	VolumeScore    int      `json:"volume_score"`    // 0-10 based on volume ratio
+	TechnicalScore int `json:"technical_score"` // 0-10 based on indicators
+	CatalystScore  int `json:"catalyst_score"`  // 0-10 based on news recency/quality
+	VolumeScore    int `json:"volume_score"`    // 0-10 based on volume ratio
 
 	// Overall (NEUTRAL - composite)
-	CompositeScore int      `json:"composite_score"` // 0-10 (avg of above)
+	CompositeScore int `json:"composite_score"` // 0-10 (avg of above)
 
 	// Notes (FACTUAL - no recommendation)
-	Notes          string   `json:"notes"`           // Factual observations only
+	Notes string `json:"notes"` // Factual observations only
 }
 
 // AnalyzeStocks analyzes multiple stocks and returns comprehensive analysis
@@ -103,6 +103,9 @@ func (sas *StockAnalysisService) AnalyzeStocks(ctx context.Context, symbols []st
 
 // AnalyzeStock provides comprehensive analysis for a single stock
 func (sas *StockAnalysisService) AnalyzeStock(ctx context.Context, symbol string) (*StockAnalysis, error) {
+	if sas.dataService == nil {
+		return nil, fmt.Errorf("market data is unavailable in inert mode")
+	}
 	analysis := &StockAnalysis{
 		Symbol:    symbol,
 		Timestamp: time.Now(),
@@ -330,8 +333,8 @@ func (sas *StockAnalysisService) estimateMarketCap(price float64, symbol string)
 func (sas *StockAnalysisService) generateTradeSetup(tech TechnicalAnalysis, catalysts []string, currentPrice float64) TradeSetup {
 	setup := TradeSetup{
 		Entry:        currentPrice,
-		StopLoss:     currentPrice * 0.85,  // Default 15% stop
-		TakeProfit:   currentPrice * 1.30,  // Default 30% target
+		StopLoss:     currentPrice * 0.85, // Default 15% stop
+		TakeProfit:   currentPrice * 1.30, // Default 30% target
 		RiskReward:   2.0,
 		RecentNews:   catalysts,
 		KeyCatalysts: catalysts,

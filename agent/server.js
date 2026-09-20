@@ -33,7 +33,7 @@ import {
   getAvailableModels,
 } from './config-store.js';
 import { formatSlackNotification } from './slack-format.js';
-import { createAuthMiddleware } from './auth.js';
+import { createAuthMiddleware, markBasicAuthContext, resolveApiAuthToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -150,6 +150,7 @@ app.use((req, res, next) => {
   const pass = separator >= 0 ? credentials.slice(separator + 1) : '';
 
   if (user === BASIC_AUTH_USER && pass === BASIC_AUTH_PASS) {
+    markBasicAuthContext(req);
     return next();
   }
 
@@ -162,7 +163,11 @@ app.use(express.json({ limit: '1mb' }));
 
 // ── Auth Middleware ────────────────────────────────────────────────
 // Token-based auth. The server-owned boundary is fail-closed when the token is absent.
-const AUTH_TOKEN = process.env.AGENT_AUTH_TOKEN || '';
+const AUTH_TOKEN = resolveApiAuthToken({
+  executionEnabled: EXECUTION_START_ENABLED,
+  agentToken: process.env.AGENT_AUTH_TOKEN || '',
+  serverToken: TRADING_BOT_TOKEN,
+});
 const authMiddleware = createAuthMiddleware({ token: AUTH_TOKEN });
 app.use('/api', authMiddleware);
 

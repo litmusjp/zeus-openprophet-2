@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthMiddleware, markBasicAuthContext, resolveApiAuthToken } from '../agent/auth.js';
+import { createAuthMiddleware, createBasicAuthMiddleware, isValidApiBearerRequest, markBasicAuthContext, resolveApiAuthToken } from '../agent/auth.js';
 import { enforcePermissions } from '../mcp-permission-guard.js';
 
 function responseDouble() {
@@ -8,9 +8,46 @@ function responseDouble() {
     statusCode: null,
     body: null,
     status(code) { this.statusCode = code; return this; },
+    setHeader() { return this; },
+    send(body) { this.body = body; return this; },
     json(body) { this.body = body; return this; },
   };
 }
+
+test('outer Basic Auth composes with API bearer auth at the server boundary', () => {
+  const token = 'server-owned-token';
+  const outer = createBasicAuthMiddleware({ username: 'admin', password: 'secret', apiToken: token });
+  const downstream = createAuthMiddleware({ token });
+
+  const validApi = { path: '/api/permissions', headers: { authorization: `Bearer ${token}` } };
+  const validApiResponse = responseDouble();
+  let downstreamCalled = false;
+  outer(validApi, validApiResponse, () => downstream(validApi, validApiResponse, () => { downstreamCalled = true; }));
+  assert.equal(downstreamCalled, true);
+
+  for (const authorization of [undefined, 'Bearer wrong']) {
+    const req = { path: '/api/permissions', headers: authorization ? { authorization } : {} };
+    const res = responseDouble();
+    let called = false;
+    outer(req, res, () => { called = true; });
+    assert.equal(called, false);
+    assert.equal(res.statusCode, 401);
+  }
+
+  const dashboardBearer = { path: '/dashboard', headers: { authorization: `Bearer ${token}` } };
+  const dashboardResponse = responseDouble();
+  let dashboardCalled = false;
+  outer(dashboardBearer, dashboardResponse, () => { dashboardCalled = true; });
+  assert.equal(dashboardCalled, false);
+  assert.equal(dashboardResponse.statusCode, 401);
+
+  const dashboardBasic = { path: '/dashboard', headers: { authorization: `Basic ${Buffer.from('admin:secret').toString('base64')}` } };
+  const basicResponse = responseDouble();
+  let basicCalled = false;
+  outer(dashboardBasic, basicResponse, () => { basicCalled = true; });
+  assert.equal(basicCalled, true);
+  assert.equal(isValidApiBearerRequest({ req: dashboardBasic, token }), false);
+});
 
 test('agent API auth rejects missing token, including non-health routes', () => {
   const middleware = createAuthMiddleware({ token: '' });

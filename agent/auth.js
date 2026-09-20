@@ -20,6 +20,49 @@ export function resolveApiAuthToken({ executionEnabled, agentToken = '', serverT
   return executionEnabled ? (agentToken || serverToken || '') : '';
 }
 
+// The outer dashboard boundary may admit only an exact server-owned bearer
+// credential for an API path. The mounted API middleware remains authoritative.
+export function isValidApiBearerRequest({ req, token }) {
+  const requestPath = req?.path || '';
+  const isApiPath = requestPath === '/api' || requestPath.startsWith('/api/');
+  const authorization = req?.headers?.authorization;
+  return Boolean(token) && isApiPath && authorization === `Bearer ${token}`;
+}
+
+export function createBasicAuthMiddleware({ username, password, apiToken }) {
+  const configured = Boolean(username && password);
+
+  return function basicAuthMiddleware(req, res, next) {
+    if (isValidApiBearerRequest({ req, token: apiToken })) return next();
+    if (!configured) return res.status(503).send('Basic authentication is not configured.');
+
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Basic ')) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
+      return res.status(401).send('Authentication required.');
+    }
+
+    let credentials;
+    try {
+      credentials = Buffer.from(authHeader.slice(6), 'base64').toString();
+    } catch {
+      res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
+      return res.status(401).send('Authentication required.');
+    }
+    const separator = credentials.indexOf(':');
+    const user = separator >= 0 ? credentials.slice(0, separator) : '';
+    const pass = separator >= 0 ? credentials.slice(separator + 1) : '';
+
+    if (user === username && pass === password) {
+      markBasicAuthContext(req);
+      return next();
+    }
+
+    res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
+    return res.status(401).send('Access denied.');
+  };
+}
+
 export function createAuthMiddleware({ token }) {
   return function authMiddleware(req, res, next) {
     // Health is the sole unauthenticated readiness exception. When mounted at

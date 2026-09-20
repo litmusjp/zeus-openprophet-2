@@ -37,7 +37,7 @@ import {
 } from './config-store.js';
 import { formatSlackNotification } from './slack-format.js';
 import { accountDailyPnl } from './daily-pnl.js';
-import { createAuthMiddleware, markBasicAuthContext, resolveApiAuthToken } from './auth.js';
+import { createAuthMiddleware, createBasicAuthMiddleware, resolveApiAuthToken } from './auth.js';
 import { excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -66,6 +66,11 @@ const TRADING_BOT_PORT = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_PORT
 const TRADING_BOT_URL = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_URL || `http://127.0.0.1:${TRADING_BOT_PORT}`) : null;
 const TRADING_BOT_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_TOKEN || '') : '';
 const TRADING_BOT_PROCESS_NONCE = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_PROCESS_NONCE || randomBytes(32).toString('hex')) : null;
+const AUTH_TOKEN = resolveApiAuthToken({
+  executionEnabled: EXECUTION_START_ENABLED,
+  agentToken: process.env.AGENT_AUTH_TOKEN || '',
+  serverToken: TRADING_BOT_TOKEN,
+});
 
 function getPersistedSandboxOrders(sandbox) {
   const dbPath = path.join(PROJECT_ROOT, 'data', 'sandboxes', sandbox.id, 'prophet_trader.db');
@@ -131,48 +136,17 @@ function operatorAuthMiddleware(req, res, next) {
   return res.status(BASIC_AUTH_CONFIGURED || configuredOperatorToken ? 403 : 503).json({ error: 'operator authorization is required' });
 }
 
-app.use((req, res, next) => {
-  if (!BASIC_AUTH_CONFIGURED) {
-    return res.status(503).send('Basic authentication is not configured.');
-  }
-
-  // Enforce Basic Auth for external web visitors
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Basic ')) {
-    res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
-    return res.status(401).send('Authentication required.');
-  }
-
-  let credentials;
-  try {
-    credentials = Buffer.from(authHeader.slice(6), 'base64').toString();
-  } catch {
-    res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
-    return res.status(401).send('Authentication required.');
-  }
-  const separator = credentials.indexOf(':');
-  const user = separator >= 0 ? credentials.slice(0, separator) : '';
-  const pass = separator >= 0 ? credentials.slice(separator + 1) : '';
-
-  if (user === BASIC_AUTH_USER && pass === BASIC_AUTH_PASS) {
-    markBasicAuthContext(req);
-    return next();
-  }
-
-  res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
-  return res.status(401).send('Access denied.');
-});
+app.use(createBasicAuthMiddleware({
+  username: BASIC_AUTH_USER,
+  password: BASIC_AUTH_PASS,
+  apiToken: AUTH_TOKEN,
+}));
 // ------------------------
 
 app.use(express.json({ limit: '1mb' }));
 
 // ── Auth Middleware ────────────────────────────────────────────────
 // Token-based auth. The server-owned boundary is fail-closed when the token is absent.
-const AUTH_TOKEN = resolveApiAuthToken({
-  executionEnabled: EXECUTION_START_ENABLED,
-  agentToken: process.env.AGENT_AUTH_TOKEN || '',
-  serverToken: TRADING_BOT_TOKEN,
-});
 const authMiddleware = createAuthMiddleware({ token: AUTH_TOKEN });
 app.use('/api', authMiddleware);
 

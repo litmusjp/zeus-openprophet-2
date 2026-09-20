@@ -2013,38 +2013,6 @@ function renderVerifiedTradeFeed() {
   });
 }
 
-function renderTradeChart() {
-  const svg = document.getElementById('trade-chart');
-  const empty = document.getElementById('trade-chart-empty');
-  if (!svg) return;
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
-  if (!verifiedReconciliationComplete) {
-    empty.hidden = false;
-    return;
-  }
-  const data = verifiedTrades.filter(t => Number.isFinite(Number(t.pnl))).sort((a,b) => new Date(a.timestamp) - new Date(b.timestamp));
-  empty.hidden = data.length > 0;
-  if (!data.length) return;
-  const W=900, H=300, left=58, right=18, top=18, bottom=38, plotW=W-left-right, plotH=H-top-bottom;
-  const maxAbs=Math.max(1, ...data.map(t => Math.abs(Number(t.pnl))));
-  const zero=top+plotH/2;
-  const y=v => zero-(Number(v)/maxAbs)*(plotH/2-.5);
-  const ns='http://www.w3.org/2000/svg';
-  const make=(tag,attrs={})=>{const n=document.createElementNS(ns,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));return n;};
-  [top,zero,H-bottom].forEach(v=>svg.appendChild(make('line',{x1:left,y1:v,x2:W-right,y2:v,class:'chart-grid'})));
-  const yl=make('text',{x:left-8,y:top+4,'text-anchor':'end',class:'chart-label'}); yl.textContent='+'+fmtPnl(maxAbs); svg.appendChild(yl);
-  const zl=make('text',{x:left-8,y:zero+4,'text-anchor':'end',class:'chart-label'}); zl.textContent='$0'; svg.appendChild(zl);
-  const nl=make('text',{x:left-8,y:H-bottom+4,'text-anchor':'end',class:'chart-label'}); nl.textContent=fmtPnl(-maxAbs); svg.appendChild(nl);
-  svg.appendChild(make('line',{x1:left,y1:zero,x2:W-right,y2:zero,class:'chart-axis'}));
-  const gap=Math.max(2,Math.min(10,plotW/data.length*.2)), barW=Math.max(4,(plotW/data.length)-gap);
-  data.forEach((t,i)=>{
-    const val=Number(t.pnl), x=left+i*(plotW/data.length)+(gap/2), yy=val>=0?y(val):zero, h=Math.max(2,Math.abs(y(val)-zero));
-    const bar=make('rect',{x,y:yy,width:barW,height:h,rx:2,class:'trade-bar',fill:(t.accountId||'').endsWith('4caa9897')||String(t.accountName||'').toLowerCase().includes('1')?'#4f8cff':'#c084fc','tabindex':'0'});
-    const tip=`${t.accountName || 'Unknown account'} / ${t.agentName || 'Unassigned'}\n${t.symbol}\n${fmtPnl(val)}\n${new Date(t.timestamp).toLocaleString()}`;
-    bar.addEventListener('mouseenter',e=>showTradeTooltip(e,tip)); bar.addEventListener('focus',e=>showTradeTooltip(e,tip)); bar.addEventListener('mouseleave',hideTradeTooltip); bar.addEventListener('blur',hideTradeTooltip);
-    svg.appendChild(bar);
-  });
-}
 function selectedTradeAccounts() {
   return new Set([...document.querySelectorAll('.trade-account-toggle input:checked')].map(input => input.value));
 }

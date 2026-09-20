@@ -43,4 +43,5 @@ test('verified trade feed requires broker identity and positive fill evidence', 
   assert.match(html, /verifiedOrders\.filter\(isBrokerConfirmedFill\)/);
   assert.match(html, /qty > 0/);
   assert.match(html, /price > 0/);
+  assert.equal((html.match(/function renderTradeChart\(\)/g) || []).length, 1);
 });

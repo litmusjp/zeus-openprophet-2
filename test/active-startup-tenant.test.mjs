@@ -10,3 +10,17 @@ test('active Go startup derives tenant from the bound account and rejects inheri
   assert.match(source, /if \(order\.TenantID !== account\.id\) \{\s*localIdentityMismatch/);
   assert.match(source, /complete: !localIdentityMismatch && !unmatchedFilled/);
 });
+
+test('active Go startup preserves the existing binary during forced rebuilds', () => {
+  assert.match(source, /if \(!force && existsSync\(binaryPath\)\) return binaryPath;/);
+  assert.match(source, /execSync\('go version', \{ cwd: PROJECT_ROOT, stdio: 'pipe' \}\)/);
+  assert.match(source, /replaceBinaryWithRollback\(binaryPath, temporaryPath => execSync/);
+  assert.match(source, /ensureGoBinarySerialized/);
+});
+
+test('active Go startup serializes the global backend lifecycle queue', () => {
+  assert.match(source, /let startTail = Promise\.resolve\(\);/);
+  assert.match(source, /const run = startTail\.then\(\(\) => startGoBackendUnlocked\(account, sandboxId\)\);/);
+  assert.match(source, /startTail = run\.catch\(\(\) => \{\}\);/);
+  assert.doesNotMatch(source, /const startTails = new Map/);
+});

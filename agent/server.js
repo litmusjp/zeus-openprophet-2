@@ -4,7 +4,7 @@
 import express from 'express';
 import http from 'http';
 import fs from 'fs/promises';
-import { existsSync, rmSync } from 'fs';
+import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
@@ -16,6 +16,8 @@ import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeC
 import { buildTradeLedger } from './trade-ledger.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
+import { replaceBinaryWithRollback } from './binary-replacement.js';
+import { enqueueProphetBotBinaryOperation } from './binary-operation-lock.js';
 import { alpacaTradingUrl, DEFAULT_AGENT_MODEL, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS, tradingPolicyEnvironment } from './defaults.js';
 import { migrateLegacyDataForSandbox } from './data-migration.js';
 import {
@@ -176,25 +178,37 @@ app.use('/api', authMiddleware);
 let goProc = null;
 let goReady = false;
 let goRebuildAttempted = false; // guard so a broken binary rebuilds once, not in a loop
+let startTail = Promise.resolve();
 
 // Build the Go binary if it is missing, or if `force` (e.g. the committed binary was built
 // for another OS/arch and cannot exec on this machine). Returns the binary path or throws.
 function ensureGoBinary(force = false) {
   const binaryPath = path.join(PROJECT_ROOT, 'prophet_bot');
-  if (force || !existsSync(binaryPath)) {
-    console.log(force ? '  Rebuilding Go binary for this platform...' : '  Building Go binary...');
-    // `go build -o` refuses to overwrite an existing file it doesn't recognize as its own
-    // output (e.g. a wrong-arch or corrupt binary), so remove it first when rebuilding.
-    if (force && existsSync(binaryPath)) {
-      try { rmSync(binaryPath, { force: true }); } catch { /* fall through to build */ }
+  if (!force && existsSync(binaryPath)) return binaryPath;
+
+  console.log(force ? '  Rebuilding Go binary for this platform...' : '  Building Go binary...');
+  if (force) {
+    try {
+      execSync('go version', { cwd: PROJECT_ROOT, stdio: 'pipe' });
+    } catch {
+      throw new Error('Go is unavailable; refusing to rebuild the trading binary');
     }
-    execSync('go build -o prophet_bot ./cmd/bot', { cwd: PROJECT_ROOT, timeout: 120000 });
   }
+
+  replaceBinaryWithRollback(binaryPath, temporaryPath => execSync(`go build -o "${temporaryPath}" ./cmd/bot`, {
+      cwd: PROJECT_ROOT,
+      timeout: 120000,
+      stdio: 'pipe',
+    }));
   return binaryPath;
 }
 
+function ensureGoBinarySerialized(force = false) {
+  return enqueueProphetBotBinaryOperation(() => ensureGoBinary(force));
+}
+
 // When the binary can't run (spawn error / immediate crash), rebuild it once and retry.
-function rebuildAndRestart(account, reason) {
+async function rebuildAndRestart(account, reason) {
   if (goRebuildAttempted) {
     console.error(`  Go backend still failing (${reason}) after a rebuild — giving up.`);
     broadcast('agent_log', {
@@ -205,7 +219,7 @@ function rebuildAndRestart(account, reason) {
   }
   goRebuildAttempted = true;
   try {
-    ensureGoBinary(true);
+    await ensureGoBinarySerialized(true);
   } catch (err) {
     console.error('  Go rebuild failed:', err.message);
     return;
@@ -215,6 +229,14 @@ function rebuildAndRestart(account, reason) {
 }
 
 export async function startGoBackend(account) {
+  const sandbox = getActiveSandbox();
+  const sandboxId = sandbox?.accountId === account?.id ? sandbox.id : `sbx_${account?.id || 'active'}`;
+  const run = startTail.then(() => startGoBackendUnlocked(account, sandboxId));
+  startTail = run.catch(() => {});
+  return run;
+}
+
+async function startGoBackendUnlocked(account, sandboxId) {
   if (!EXECUTION_START_ENABLED) throw new Error('execution mode is inert; backend startup is disabled');
   // Kill existing if running
   await stopGoBackend();
@@ -234,14 +256,12 @@ export async function startGoBackend(account) {
   // Ensure a runnable binary exists (build if missing).
   let binaryPath;
   try {
-    binaryPath = ensureGoBinary();
+    binaryPath = await ensureGoBinarySerialized();
   } catch (err) {
     console.error('  Failed to build Go binary:', err.message);
     return false;
   }
 
-  const sandbox = getActiveSandbox();
-  const sandboxId = sandbox?.accountId === account.id ? sandbox.id : `sbx_${account.id}`;
   const env = buildGoBackendEnv(process.env, {
     account,
     sandboxId,
@@ -268,7 +288,7 @@ export async function startGoBackend(account) {
   const handleEarlyFailure = (reason) => {
     if (earlyFailureHandled) return;
     earlyFailureHandled = true;
-    rebuildAndRestart(account, reason);
+    void rebuildAndRestart(account, reason);
   };
 
   goProc = spawn(binaryPath, [], {

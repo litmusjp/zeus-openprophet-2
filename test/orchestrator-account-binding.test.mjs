@@ -28,8 +28,33 @@ test('non-active sandbox startup verifies and persists a missing broker binding,
     const runtime = {
       sandbox: { accountId: 'litmus2' },
       processNonce: '',
-      identityHeaders: {},
-      goAxios: { defaults: { headers: { common: {} } } },
+      identityHeaders: {
+        Authorization: 'Bearer test-token',
+        'X-OpenProphet-Sandbox-ID': 'sbx_litmus2',
+        'X-OpenProphet-Account-ID': 'litmus2',
+        'X-OpenProphet-Process-Nonce': 'old-nonce',
+      },
+      goAxios: {
+        defaults: {
+          headers: {
+            Authorization: 'Bearer test-token',
+            'X-OpenProphet-Sandbox-ID': 'sbx_litmus2',
+            'X-OpenProphet-Account-ID': 'litmus2',
+            'X-OpenProphet-Process-Nonce': 'old-nonce',
+            common: { 'X-OpenProphet-Process-Nonce': 'old-nonce' },
+          },
+        },
+      },
+      harness: {
+        state: { running: false },
+        async stop() { this.state.running = false; },
+        opencodeEnv: {
+          OPENPROPHET_PROCESS_NONCE: 'old-nonce',
+          TRADING_BOT_PROCESS_NONCE: 'old-nonce',
+          OPENPROPHET_SANDBOX_ID: 'sbx_litmus2',
+          OPENPROPHET_ACCOUNT_ID: 'litmus2',
+        },
+      },
       port: 4540,
       goProc: { pid: 1234 },
     };
@@ -44,6 +69,15 @@ test('non-active sandbox startup verifies and persists a missing broker binding,
       return { ok: true, status: 200, async json() { return { id: 'paper-2-verified' }; } };
     };
     await assert.rejects(() => orchestrator.startGoBackend('sbx_litmus2'), /test stops before spawning/);
+    assert.notEqual(runtime.processNonce, 'old-nonce');
+    assert.equal(runtime.identityHeaders['X-OpenProphet-Sandbox-ID'], 'sbx_litmus2');
+    assert.equal(runtime.identityHeaders['X-OpenProphet-Account-ID'], 'litmus2');
+    assert.equal(runtime.goAxios.defaults.headers['X-OpenProphet-Process-Nonce'], runtime.processNonce);
+    assert.equal(runtime.goAxios.defaults.headers.common['X-OpenProphet-Process-Nonce'], runtime.processNonce);
+    assert.equal(runtime.harness.opencodeEnv.OPENPROPHET_PROCESS_NONCE, runtime.processNonce);
+    assert.equal(runtime.harness.opencodeEnv.TRADING_BOT_PROCESS_NONCE, runtime.processNonce);
+    assert.equal(runtime.harness.opencodeEnv.OPENPROPHET_SANDBOX_ID, 'sbx_litmus2');
+    assert.equal(runtime.harness.opencodeEnv.OPENPROPHET_ACCOUNT_ID, 'litmus2');
     assert.equal(store.getAccountById('litmus2').brokerAccountId, 'paper-2-verified');
     const persisted = JSON.parse(await fs.readFile(configPath, 'utf8'));
     assert.equal(persisted.accounts.find(account => account.id === 'litmus2').brokerAccountId, 'paper-2-verified');
@@ -85,6 +119,19 @@ test('non-active sandbox startup verifies and persists a missing broker binding,
     assert.equal(reachedBackendStart, false);
     const mismatchPersisted = JSON.parse(await fs.readFile(configPath, 'utf8'));
     assert.equal(mismatchPersisted.accounts.find(account => account.id === 'litmus2').brokerAccountId, 'paper-2-persisted');
+
+    runtime.processNonce = 'old-nonce';
+    runtime.harness.state.running = true;
+    let fencedNonce;
+    runtime.harness.stop = async () => {
+      fencedNonce = runtime.processNonce;
+      runtime.harness.state.running = false;
+    };
+    orchestrator._ensureBinary = async () => { throw new Error('test stops before spawning'); };
+    globalThis.fetch = async () => ({ ok: true, status: 200, async json() { return { id: 'paper-2-persisted' }; } });
+    await assert.rejects(() => orchestrator.startGoBackend('sbx_litmus2'), /test stops before spawning/);
+    assert.equal(fencedNonce, 'old-nonce');
+    assert.notEqual(runtime.processNonce, fencedNonce);
   } finally {
     globalThis.fetch = previousFetch;
     if (previous.config === undefined) delete process.env.OPENPROPHET_CONFIG_PATH;

@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import axios from 'axios';
+import { replaceBinaryWithRollback } from './binary-replacement.js';
+import { enqueueProphetBotBinaryOperation } from './binary-operation-lock.js';
 
 import { AgentHarness } from './harness.js';
 import { alpacaTradingUrl, portForAgent, tradingPolicyEnvironment } from './defaults.js';
@@ -38,6 +40,28 @@ function portOffsetForSandbox(sandboxId) {
 }
 
 export { shouldShowGoLogLine, createGoLogLineBuffer };
+
+function setRuntimeProcessNonce(runtime) {
+  const header = 'X-OpenProphet-Process-Nonce';
+  const processNonce = runtime.processNonce;
+  runtime.identityHeaders = {
+    ...runtime.identityHeaders,
+    [header]: processNonce,
+  };
+  const headers = runtime.goAxios?.defaults?.headers;
+  if (headers) {
+    headers[header] = processNonce;
+    headers.common = {
+      ...(headers.common || {}),
+      [header]: processNonce,
+    };
+  }
+  const opencodeEnv = runtime.harness?.opencodeEnv;
+  if (opencodeEnv) {
+    opencodeEnv.OPENPROPHET_PROCESS_NONCE = processNonce;
+    opencodeEnv.TRADING_BOT_PROCESS_NONCE = processNonce;
+  }
+}
 
 // The tenant is derived from the server-owned account binding. An inherited
 // tenant is only acceptable when it agrees; callers cannot redirect a runtime
@@ -80,6 +104,7 @@ export class AgentOrchestrator extends EventEmitter {
     this.runtimes = new Map();
     this.portOwners = new Map();
     this._binaryReady = false;
+    this._startTails = new Map();
   }
 
   getSandboxPort(sandboxId) {
@@ -195,35 +220,62 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   async _ensureBinary(force = false) {
-    if (!force && this._binaryReady) return;
+    return enqueueProphetBotBinaryOperation(() => this._ensureBinaryUnlocked(force));
+  }
+
+  async _ensureBinaryUnlocked(force = false) {
     const binaryPath = path.join(this.projectRoot, 'prophet_bot');
-    let exists = true;
-    try { await fs.access(binaryPath); } catch { exists = false; }
-    if (force || !exists) {
-      // `go build -o` refuses to overwrite a file it doesn't recognize as its own output
-      // (a stale/wrong-arch binary), so remove it first when rebuilding.
-      if (force && exists) { try { await fs.rm(binaryPath, { force: true }); } catch { /* fall through */ } }
-      execSync('go build -o prophet_bot ./cmd/bot', {
+    if (!force && this._binaryReady) return;
+    if (!force) {
+      try {
+        const stat = await fs.stat(binaryPath);
+        if (stat.isFile()) {
+          this._binaryReady = true;
+          return binaryPath;
+        }
+      } catch { /* build the missing binary below */ }
+    }
+    this._binaryReady = false;
+    if (force) {
+      try {
+        execSync('go version', { cwd: this.projectRoot, stdio: 'pipe' });
+      } catch {
+        throw new Error('Go is unavailable; refusing to rebuild the trading binary');
+      }
+    }
+
+    try {
+      replaceBinaryWithRollback(binaryPath, temporaryPath => execSync(`go build -o "${temporaryPath}" ./cmd/bot`, {
         cwd: this.projectRoot,
         timeout: 120000,
         stdio: 'pipe',
-      });
+      }));
+    } catch (error) {
+      this._binaryReady = false;
+      throw error;
     }
     this._binaryReady = true;
+    return binaryPath;
   }
 
-  async startGoBackend(sandboxId, _isRetry = false) {
+  async startGoBackend(sandboxId, _isRetry = false, _restartHarness = undefined) {
+    const previous = this._startTails.get(sandboxId) || Promise.resolve();
+    const run = previous.then(() => this._startGoBackend(sandboxId, _isRetry, _restartHarness));
+    this._startTails.set(sandboxId, run.catch(() => {}));
+    return run;
+  }
+
+  async _startGoBackend(sandboxId, _isRetry = false, _restartHarness = undefined) {
     const executionMode = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
     if (executionMode !== 'paper' && executionMode !== 'enabled') {
       throw new Error('execution mode is inert; backend startup is disabled');
     }
     const runtime = this.ensureRuntime(sandboxId);
+    const restartHarness = _restartHarness ?? runtime.harness.state.running;
+    // Fence the OpenCode child before rotating its server-owned process nonce.
+    if (runtime.harness.state.running) await runtime.harness.stop();
     runtime.processNonce = randomUUID();
-    runtime.identityHeaders = {
-      ...runtime.identityHeaders,
-      'X-OpenProphet-Process-Nonce': runtime.processNonce,
-    };
-    runtime.goAxios.defaults.headers.common['X-OpenProphet-Process-Nonce'] = runtime.processNonce;
+    setRuntimeProcessNonce(runtime);
     const account = getAccountById(runtime.sandbox.accountId);
     if (!account) throw new Error(`Account not found for sandbox ${sandboxId}`);
     await this.stopGoBackend(sandboxId);
@@ -293,8 +345,9 @@ export class AgentOrchestrator extends EventEmitter {
           this.portOwners.set(runtime.port, sandboxId);
           runtime.tradingBotUrl = `http://127.0.0.1:${runtime.port}`;
           runtime.goAxios = axios.create({ baseURL: runtime.tradingBotUrl, httpAgent: new http.Agent({ keepAlive: true, maxSockets: 10 }), timeout: 5000, headers: runtime.identityHeaders });
+          setRuntimeProcessNonce(runtime);
           await this.stopGoBackend(sandboxId);
-          return this.startGoBackend(sandboxId, _isRetry);
+          return this._startGoBackend(sandboxId, _isRetry, restartHarness);
         }
         if (!health.ready || health.sandbox_id !== sandboxId || health.account_id !== boundAccount.id || health.broker_account_id !== boundAccount.brokerAccountId || health.paper !== boundAccount.paper || health.reconciliation_complete !== true || health.process_nonce !== runtime.processNonce) {
           throw new Error('trading backend identity/readiness mismatch');
@@ -305,6 +358,7 @@ export class AgentOrchestrator extends EventEmitter {
           level: 'success',
           message: `Trading backend ready on port ${runtime.port} for ${boundAccount.name}`,
         });
+        if (restartHarness && !runtime.harness.state.running) await runtime.harness.start();
         return runtime;
       } catch {
         // keep waiting
@@ -315,7 +369,7 @@ export class AgentOrchestrator extends EventEmitter {
     if (!_isRetry) {
       this.emit('agent_log', { sandboxId, level: 'warning', message: `Trading backend did not become ready — rebuilding binary for this platform and retrying...` });
       await this._ensureBinary(true);
-      return this.startGoBackend(sandboxId, true);
+      return this._startGoBackend(sandboxId, true, restartHarness);
     }
 
     throw new Error(`Trading backend failed to start for sandbox ${sandboxId}`);

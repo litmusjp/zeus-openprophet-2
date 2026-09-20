@@ -787,8 +787,7 @@
             <div class="trade-chart-controls">
               <label>Range <select id="trade-range" onchange="updateTradeChart()"><option value="all">Since trading began</option><option value="7d">Past week</option><option value="1d">Last trading day</option></select></label>
               <label>View <select id="trade-mode" onchange="updateTradeChart()"><option value="timeseries">Time-series</option><option value="cumulative">Cumulative P/L</option></select></label>
-              <label class="trade-account-toggle"><input type="checkbox" value="Litmus1" checked onchange="updateTradeChart()"> Litmus 1</label>
-              <label class="trade-account-toggle"><input type="checkbox" value="Litmus2" checked onchange="updateTradeChart()"> Litmus 2</label>
+          <span id="trade-account-toggles"></span>
             </div>
             <button class="btn sm" onclick="loadVerifiedTrades()">Refresh</button>
           </div>
@@ -1894,9 +1893,12 @@ async function refreshPortfolio() {
       const pv = '$' + Number(acc.PortfolioValue||acc.portfolio_value||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const cv = '$' + Number(acc.Cash||acc.cash||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const bv = '$' + Number(acc.BuyingPower||acc.buying_power||0).toLocaleString('en-US',{minimumFractionDigits:2});
-      const pnl = Number(acc.Equity||acc.equity||0) - Number(acc.LastEquity||acc.last_equity||0);
-      const pnlStr = (pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2});
-      const cls = pnl>=0? 'positive' : 'negative';
+      const equity = Number(acc.Equity ?? acc.equity);
+      const lastEquity = Number(acc.LastEquity ?? acc.last_equity);
+      const dailyValid = acc.DailyPnLValid !== false && Number.isFinite(equity) && equity > 0 && Number.isFinite(lastEquity) && lastEquity > 0;
+      const pnl = dailyValid ? equity - lastEquity : null;
+      const pnlStr = pnl === null ? '--' : (pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2});
+      const cls = pnl === null ? '' : (pnl>=0? 'positive' : 'negative');
       // Update legacy static IDs
       ['portfolio-value','m-portfolio'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = pv; });
       ['cash-value','m-cash'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = cv; });
@@ -2041,7 +2043,7 @@ function selectedTradeAccounts() {
 function filteredVerifiedTrades() {
   const accounts = selectedTradeAccounts();
   const range = document.getElementById('trade-range')?.value || 'all';
-  const data = verifiedTrades.filter(t => Number.isFinite(Number(t.pnl)) && accounts.has(t.accountName));
+  const data = verifiedTrades.filter(t => Number.isFinite(Number(t.pnl)) && accounts.has(t.accountId || t.accountName));
   if (range === 'all' || !data.length) return data;
   const latest = Math.max(...data.map(t => new Date(t.timestamp || t.exitTime || t.entryTime).getTime()));
   const cutoff = latest - (range === '7d' ? 7 : 1) * 86400000;
@@ -2058,16 +2060,16 @@ function renderTradeChart() {
   const mode = document.getElementById('trade-mode')?.value || 'timeseries';
   const W=900,H=300,left=72,right=18,top=18,bottom=48,plotW=W-left-right,plotH=H-top-bottom;
   const selected = selectedTradeAccounts();
-  const values = mode === 'cumulative' ? [...selected].map(a => data.filter(t=>t.accountName===a).reduce((s,t)=>s+Number(t.pnl||0),0)) : data.map(t=>Number(t.pnl));
+  const values = mode === 'cumulative' ? [...selected].map(a => data.filter(t=>(t.accountId || t.accountName)===a).reduce((s,t)=>s+Number(t.pnl||0),0)) : data.map(t=>Number(t.pnl));
   const maxAbs=Math.max(1,...values.map(Math.abs)), zero=top+plotH/2, y=v=>zero-(Number(v)/maxAbs)*(plotH/2-.5), ns='http://www.w3.org/2000/svg';
   const make=(tag,attrs={})=>{const n=document.createElementNS(ns,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));return n;};
   [top,zero,H-bottom].forEach(v=>svg.appendChild(make('line',{x1:left,y1:v,x2:W-right,y2:v,class:'chart-grid'})));
   const label=(x,y,text,anchor='end')=>{const n=make('text',{x,y,'text-anchor':anchor,class:'chart-label'});n.textContent=text;svg.appendChild(n);};
   label(left-8,top+4,'+'+fmtPnl(maxAbs)); label(left-8,zero+4,'$0'); label(left-8,H-bottom+4,fmtPnl(-maxAbs)); svg.appendChild(make('line',{x1:left,y1:zero,x2:W-right,y2:zero,class:'chart-axis'}));
-  const color=a=>String(a).toLowerCase().includes('1')?'#4f8cff':'#c084fc';
+  const color=a=>{let h=0; for(const c of String(a||'')) h=(h*31+c.charCodeAt(0))%360; return `hsl(${h},72%,52%)`;};
   const bar=(value,x,width,account,tip,xText)=>{const yy=value>=0?y(value):zero,h=Math.max(2,Math.abs(y(value)-zero)),n=make('rect',{x,y:yy,width,height:h,rx:2,class:'trade-bar',fill:color(account),tabindex:'0','aria-label':tip}); n.addEventListener('mouseenter',e=>showTradeTooltip(e,tip)); n.addEventListener('focus',e=>showTradeTooltip(e,tip)); n.addEventListener('mouseleave',hideTradeTooltip); n.addEventListener('blur',hideTradeTooltip); svg.appendChild(n); label(Number(x)+Number(width)/2,H-bottom+16,xText,'middle');};
-  if(mode==='cumulative') { const accounts=[...selected].filter(a=>data.some(t=>t.accountName===a)),slot=plotW/Math.max(1,accounts.length),bw=Math.min(130,slot*.62); accounts.forEach((a,i)=>{const v=data.filter(t=>t.accountName===a).reduce((s,t)=>s+Number(t.pnl||0),0);bar(v,left+i*slot+(slot-bw)/2,bw,a,`${a}\nCumulative realized P/L: ${fmtPnl(v)}`,a.replace('Litmus','Litmus '));}); }
-  else {const gap=Math.max(2,Math.min(10,plotW/data.length*.2)),bw=Math.max(4,plotW/data.length-gap),step=plotW/data.length; data.forEach((t,i)=>{const stamp=new Date(t.timestamp||t.exitTime||t.entryTime),v=Number(t.pnl),x=left+i*step+gap/2,xt=stamp.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});bar(v,x,bw,t.accountName,`${t.accountName||'Unknown account'} / ${t.agentName||'Unassigned'}\n${t.symbol}\n${fmtPnl(v)}\n${stamp.toLocaleString()}`,xt);});}
+  if(mode==='cumulative') { const accounts=[...selected].filter(a=>data.some(t=>(t.accountId || t.accountName)===a)),slot=plotW/Math.max(1,accounts.length),bw=Math.min(130,slot*.62); accounts.forEach((a,i)=>{const v=data.filter(t=>(t.accountId || t.accountName)===a).reduce((s,t)=>s+Number(t.pnl||0),0);const labelName=data.find(t=>(t.accountId || t.accountName)===a)?.accountName || a;bar(v,left+i*slot+(slot-bw)/2,bw,a,`${labelName}\nCumulative realized P/L: ${fmtPnl(v)}`,labelName);}); }
+  else {const gap=Math.max(2,Math.min(10,plotW/data.length*.2)),bw=Math.max(4,plotW/data.length-gap),step=plotW/data.length; data.forEach((t,i)=>{const stamp=new Date(t.timestamp||t.exitTime||t.entryTime),v=Number(t.pnl),x=left+i*step+gap/2,xt=stamp.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});bar(v,x,bw,t.accountId || t.accountName,`${t.accountName||'Unknown account'} / ${t.agentName||'Unassigned'}\n${t.symbol}\n${fmtPnl(v)}\n${stamp.toLocaleString()}`,xt);});}
 }
 function showTradeTooltip(event,text){const tip=document.getElementById('trade-chart-tooltip');if(!tip)return;tip.hidden=false;tip.textContent=text;const r=document.querySelector('.trade-chart-wrap').getBoundingClientRect();tip.style.left=Math.max(4,event.clientX-r.left+8)+'px';tip.style.top=Math.max(4,event.clientY-r.top-70)+'px';}
 
@@ -2088,6 +2090,11 @@ async function loadVerifiedTrades() {
       return;
     }
     verifiedTrades=data.trades||[]; verifiedOrders=data.orders||[];
+    const toggleHost=document.getElementById('trade-account-toggles');
+    if (toggleHost) {
+      const accounts=[...new Map(verifiedTrades.map(t=>[t.accountId || t.accountName, t.accountName || t.accountId || 'Unknown account'])).entries()];
+      toggleHost.innerHTML=accounts.map(([id,name])=>`<label class="trade-account-toggle"><input type="checkbox" value="${String(id).replace(/"/g,'&quot;')}" checked onchange="updateTradeChart()"> ${name}</label>`).join('');
+    }
     const summary=document.getElementById('trade-chart-summary');
     const pnl=verifiedTrades.reduce((sum,t)=>sum+Number(t.pnl||0),0);
     if(summary) summary.textContent=`${verifiedTrades.length} realized trade${verifiedTrades.length===1?'':'s'} | Net P/L ${fmtPnl(pnl)} | Open/unmatched fills are shown as P/L pending.`;

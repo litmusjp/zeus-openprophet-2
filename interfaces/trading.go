@@ -156,17 +156,23 @@ type Position struct {
 }
 
 type Account struct {
-	BrokerAccountID  string
-	PaperLive        string
-	TenantID         string
-	SandboxID        string
-	ID               string
+	BrokerAccountID string
+	PaperLive       string
+	TenantID        string
+	SandboxID       string
+	ID              string
+	// Equity is the broker's current account equity. DailyPnL is explicitly
+	// account-scoped and is valid only for the broker's current daily window.
+	Equity           float64
 	Cash             float64
 	PortfolioValue   float64
 	BuyingPower      float64
 	DayTradeCount    int
 	PatternDayTrader bool
 	LastEquity       float64
+	DailyPnL         float64
+	DailyPnLPercent  float64
+	DailyPnLValid    bool
 }
 
 type Bar struct {

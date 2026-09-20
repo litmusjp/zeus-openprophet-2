@@ -35,6 +35,7 @@ import {
   getAvailableModels,
 } from './config-store.js';
 import { formatSlackNotification } from './slack-format.js';
+import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, markBasicAuthContext, resolveApiAuthToken } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -556,12 +557,10 @@ function scheduleDailySummaryForHarness(targetHarness) {
         const client = getGoClientForSandbox(sandboxId);
         if (!client) return;
         const { data: acc } = await client.get('/api/v1/account');
-        const equity = Number(acc.Equity || acc.equity || 0);
-        const lastEquity = Number(acc.LastEquity || acc.last_equity || 0);
-        const pnl = equity - lastEquity;
-        const pnlPct = lastEquity ? ((pnl / lastEquity) * 100).toFixed(2) : '0.00';
-        const emoji = pnl >= 0 ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
-        notifySlack(`${emoji} *Daily Summary*\nP&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPct}%)\nPortfolio: $${equity.toFixed(2)}\nBeats: ${targetHarness.state.stats.totalBeats} | Order events: ${targetHarness.state.stats.trades} | Errors: ${targetHarness.state.stats.errors}`, sandboxId);
+        const daily = accountDailyPnl(acc);
+        if (!daily) throw new Error('broker daily P&L is unavailable or invalid');
+        const emoji = daily.pnl >= 0 ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
+        notifySlack(`${emoji} *Daily Summary*\nP&L: ${daily.pnl >= 0 ? '+' : ''}$${daily.pnl.toFixed(2)} (${daily.percent.toFixed(2)}%)\nPortfolio: $${daily.equity.toFixed(2)}\nBeats: ${targetHarness.state.stats.totalBeats} | Order events: ${targetHarness.state.stats.trades} | Errors: ${targetHarness.state.stats.errors}`, sandboxId);
       } catch {}
     }
     scheduleDailySummaryForHarness(targetHarness);
@@ -646,10 +645,9 @@ function bindOperationalHooks(targetHarness) {
       const client = getGoClientForSandbox(sandboxId);
       if (!client) return;
       const { data: acc } = await client.get('/api/v1/account', { timeout: 3000 });
-      const equity = Number(acc.Equity || acc.equity || 0);
-      const lastEquity = Number(acc.LastEquity || acc.last_equity || 0);
-      if (!lastEquity) return;
-      const dayLossPct = ((equity - lastEquity) / lastEquity) * 100;
+      const daily = accountDailyPnl(acc);
+      if (!daily) return;
+      const dayLossPct = daily.percent;
       if (dayLossPct <= -perms.maxDailyLoss && !targetHarness.state.paused) {
         targetHarness.pause();
         const msg = `CIRCUIT BREAKER: Daily loss ${dayLossPct.toFixed(2)}% exceeds -${perms.maxDailyLoss}% limit. Agent auto-paused.`;
@@ -1802,8 +1800,10 @@ app.get('/api/trades', async (req, res) => {
   try {
     const config = getConfig();
     const requested = req.query.sandboxId;
+    const requestedAccount = req.query.accountId;
     const sandboxes = Object.values(config.sandboxes || {})
-      .filter(sandbox => !requested || sandbox.id === requested);
+      .filter(sandbox => !requested || sandbox.id === requested)
+      .filter(sandbox => !requestedAccount || sandbox.accountId === requestedAccount);
     const orders = [];
     const trades = [];
     let complete = true;

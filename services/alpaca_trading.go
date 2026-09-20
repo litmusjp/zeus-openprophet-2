@@ -633,6 +633,15 @@ func (s *AlpacaTradingService) GetAccount(ctx context.Context) (*interfaces.Acco
 	if strings.TrimSpace(s.expectedAccountID) == "" || !strings.EqualFold(strings.TrimSpace(alpacaAccount.ID), s.expectedAccountID) {
 		return nil, fmt.Errorf("authenticated Alpaca account identity mismatch")
 	}
+	equity := alpacaAccount.Equity.InexactFloat64()
+	lastEquity := alpacaAccount.LastEquity.InexactFloat64()
+	dailyPnLValid := isPositiveFinite(equity) && isPositiveFinite(lastEquity)
+	dailyPnL := 0.0
+	dailyPnLPercent := 0.0
+	if dailyPnLValid {
+		dailyPnL = equity - lastEquity
+		dailyPnLPercent = dailyPnL / lastEquity * 100
+	}
 
 	return &interfaces.Account{
 		BrokerAccountID:  alpacaAccount.ID,
@@ -640,12 +649,16 @@ func (s *AlpacaTradingService) GetAccount(ctx context.Context) (*interfaces.Acco
 		TenantID:         s.expectedTenantID,
 		SandboxID:        s.expectedSandboxID,
 		ID:               alpacaAccount.ID,
+		Equity:           equity,
 		Cash:             alpacaAccount.Cash.InexactFloat64(),
 		PortfolioValue:   alpacaAccount.PortfolioValue.InexactFloat64(),
 		BuyingPower:      alpacaAccount.BuyingPower.InexactFloat64(),
 		DayTradeCount:    int(alpacaAccount.DaytradeCount),
 		PatternDayTrader: alpacaAccount.PatternDayTrader,
-		LastEquity:       alpacaAccount.LastEquity.InexactFloat64(),
+		LastEquity:       lastEquity,
+		DailyPnL:         dailyPnL,
+		DailyPnLPercent:  dailyPnLPercent,
+		DailyPnLValid:    dailyPnLValid,
 	}, nil
 }
 

@@ -201,11 +201,11 @@ func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot Bro
 		return fmt.Errorf("max order value exceeded: %.2f > %.2f", notional, p.MaxOrderValue)
 	}
 	if p.MaxDailyLoss > 0 {
-		if !isPositiveFinite(snapshot.Account.LastEquity) {
-			return fmt.Errorf("last equity is unavailable; daily loss cap cannot be evaluated")
+		if !snapshot.Account.DailyPnLValid || !isPositiveFinite(snapshot.Account.Equity) || !isPositiveFinite(snapshot.Account.LastEquity) {
+			return fmt.Errorf("account daily P&L is unavailable or invalid; daily loss cap cannot be evaluated")
 		}
-		if snapshot.Account.PortfolioValue-snapshot.Account.LastEquity < 0 {
-			lossPct := (snapshot.Account.LastEquity - snapshot.Account.PortfolioValue) / snapshot.Account.LastEquity * 100
+		if snapshot.Account.DailyPnL < 0 {
+			lossPct := -snapshot.Account.DailyPnLPercent
 			if lossPct >= p.MaxDailyLoss {
 				return fmt.Errorf("daily loss cap exceeded")
 			}

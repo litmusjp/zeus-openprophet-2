@@ -14,7 +14,6 @@ import axios from 'axios';
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { buildTradeLedger } from './trade-ledger.js';
-import { readLegacyHistoryForSandboxAt } from './legacy-history.js';
 import ChatStore from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
@@ -1805,22 +1804,11 @@ app.get('/api/trades', async (req, res) => {
       .filter(sandbox => !requestedAccount || sandbox.accountId === requestedAccount);
     const orders = [];
     const trades = [];
-    const legacyHistory = [];
     const accountStates = new Map();
     let complete = true;
     const brokerStates = new Set();
     for (const sandbox of sandboxes) {
       const account = getAccountById(sandbox.accountId);
-      const legacyMetadata = {
-        accountId: sandbox.accountId,
-        accountName: account?.name || 'Unknown account',
-        agentId: getResolvedAgentForSandbox(sandbox.id)?.id || sandbox.agentId || null,
-        agentName: getResolvedAgentForSandbox(sandbox.id)?.name || 'Unassigned',
-        sandboxId: sandbox.id,
-      };
-      const mappedLegacyOrders = readLegacyHistoryForSandboxAt(PROJECT_ROOT, sandbox)
-        .map(order => ({ ...legacyMetadata, ...order }));
-      legacyHistory.push(...mappedLegacyOrders);
       if (!account || !account.brokerAccountId || typeof account.paper !== 'boolean') {
         complete = false;
         brokerStates.add('identity_unavailable');
@@ -1851,15 +1839,13 @@ app.get('/api/trades', async (req, res) => {
       const sandboxOrders = reconciliation.orders;
       orders.push(...sandboxOrders.map(order => ({ ...order, ...metadata })));
       trades.push(...buildTradeLedger(sandboxOrders, metadata));
-      // Legacy history is display-only. It is deliberately excluded from orders,
-      // reconciliation, risk state, and buildTradeLedger().
     }
     const configuredAccounts = [...new Map(Object.values(config.sandboxes || {}).map(sandbox => {
       const account = getAccountById(sandbox.accountId);
       return [sandbox.accountId, { accountId: sandbox.accountId, accountName: account?.name || 'Unknown account', brokerAccountId: account?.brokerAccountId || null, paper: account?.paper === true, sandboxId: sandbox.id }];
     })).values()];
     const accounts = configuredAccounts.map(account => ({ ...account, ...(accountStates.get(account.accountId) || { complete: false, state: 'unavailable' }) }));
-    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, orders, trades, legacyOrders: legacyHistory });
+    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, orders, trades });
   } catch (err) {
     res.status(500).json({ error: `Could not load verified trades: ${err.message}` });
   }
@@ -1879,7 +1865,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
   try {
     const client = getGoClientForSandbox(req.query.sandboxId);
     if (!client) return res.status(404).json({ error: 'Sandbox trading backend unavailable' });
-    const { data } = await client.get('/api/v1/options/positions');
+    const { data } = await client.get('/api/v1/positions');
     res.json(data);
   } catch { res.status(502).json({ error: 'Trading bot unavailable' }); }
 });

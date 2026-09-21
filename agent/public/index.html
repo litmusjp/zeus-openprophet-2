@@ -793,12 +793,10 @@
           </div>
           <div id="trade-chart-summary" class="trade-chart-summary">Loading verified fills...</div>
           <div class="trade-chart-wrap"><svg id="trade-chart" viewBox="0 0 900 300" role="img" aria-label="Realized profit and loss by trade over time"></svg><div id="trade-chart-tooltip" class="trade-chart-tooltip" hidden></div></div>
-          <div id="trade-chart-empty" class="no-data" hidden>No verified realized fills; legacy/unverified order history cannot produce a P/L bar.</div>
+          <div id="trade-chart-empty" class="no-data" hidden>No verified realized fills.</div>
         </div>
         <div class="trade-section-heading"><span>Verified Trade History</span><span id="trade-ledger-status" class="trade-ledger-status"></span></div>
         <div id="trades-feed"><div class="no-data">Loading verified trades...</div></div>
-        <div class="trade-section-heading"><span>Legacy Order History</span><span class="trade-ledger-status">display-only</span></div>
-        <div id="legacy-trades-feed"><div class="no-data">No legacy order history.</div></div>
       </div>
     </div>
 
@@ -1961,7 +1959,6 @@ function clearPortfolioView(sid) {
 // ── Verified trade ledger and chart ─────────
 let verifiedTrades = [];
 let verifiedOrders = [];
-let legacyOrders = [];
 let verifiedTradesLoading = false;
 let verifiedReconciliationComplete = false;
 let verifiedAccountStates = new Map();
@@ -2019,26 +2016,6 @@ function selectedTradeAccounts() {
   return new Set([...document.querySelectorAll('.trade-account-toggle input:checked')].map(input => input.value));
 }
 
-function renderLegacyTradeFeed() {
-  const feed = document.getElementById('legacy-trades-feed');
-  if (!feed) return;
-  feed.replaceChildren();
-  if (!legacyOrders.length) {
-    const empty = document.createElement('div'); empty.className = 'no-data'; empty.textContent = 'No legacy order history.'; feed.appendChild(empty); return;
-  }
-  [...legacyOrders].sort((a,b) => new Date(b.SubmittedAt || b.submittedAt || 0) - new Date(a.SubmittedAt || a.submittedAt || 0)).slice(0, 100).forEach(order => {
-    const card = document.createElement('div'); card.className = 'trade-card';
-    const header = document.createElement('div'); header.className = 'trade-header';
-    const symbol = document.createElement('span'); symbol.className = 'trade-symbol'; symbol.textContent = order.Symbol || order.symbol || '??';
-    const side = document.createElement('span'); side.className = 'trade-side ' + String(order.Side || order.side || '').toLowerCase(); side.textContent = order.Side || order.side || '--';
-    header.append(symbol, side);
-    const details = document.createElement('div'); details.className = 'trade-details';
-    details.textContent = `${order.accountName || 'Unknown account'} / ${order.agentName || 'Unassigned'} | ${order.Status || order.status || 'status unavailable'} | legacy / unverified | realized P/L unavailable`;
-    const stamp = document.createElement('div'); stamp.className = 'trade-time';
-    const time = order.SubmittedAt || order.submittedAt; stamp.textContent = time ? new Date(time).toLocaleString() : '--';
-    card.append(header, details, stamp); feed.appendChild(card);
-  });
-}
 function filteredVerifiedTrades() {
   const accounts = selectedTradeAccounts();
   const range = document.getElementById('trade-range')?.value || 'all';
@@ -2088,7 +2065,6 @@ async function loadVerifiedTrades() {
     const isCompleteAccount = item => verifiedAccountStates.get(item.accountId || item.accountName)?.complete === true;
     verifiedTrades=(data.trades||[]).filter(isCompleteAccount);
     verifiedOrders=(data.orders||[]).filter(isCompleteAccount);
-    legacyOrders=data.legacyOrders||[];
     const toggleHost=document.getElementById('trade-account-toggles');
     if (toggleHost) {
       toggleHost.replaceChildren();
@@ -2100,9 +2076,9 @@ async function loadVerifiedTrades() {
     }
     const summary=document.getElementById('trade-chart-summary');
     const pnl=verifiedTrades.reduce((sum,t)=>sum+Number(t.pnl||0),0);
-    if(summary) summary.textContent=`${verifiedTrades.length} verified realized trade${verifiedTrades.length===1?'':'s'} | Net P/L ${fmtPnl(pnl)} | ${legacyOrders.length} legacy/unverified order${legacyOrders.length===1?'':'s'} shown below; no legacy P/L is included.`;
+    if(summary) summary.textContent=`${verifiedTrades.length} verified realized trade${verifiedTrades.length===1?'':'s'} | Net P/L ${fmtPnl(pnl)}`;
     const status=document.getElementById('trade-ledger-status'); if(status) status.textContent=(!verifiedReconciliationComplete ? 'Some account reconciliations are incomplete; verified data shown per account' : 'Updated '+new Date(data.generatedAt||Date.now()).toLocaleTimeString());
-    renderTradeChart(); renderVerifiedTradeFeed(); renderLegacyTradeFeed();
+    renderTradeChart(); renderVerifiedTradeFeed();
   } catch(err) {
     verifiedReconciliationComplete = false;
     verifiedTrades = []; verifiedOrders = [];

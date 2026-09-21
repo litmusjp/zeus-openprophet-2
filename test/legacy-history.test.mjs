@@ -75,17 +75,15 @@ test('legacy projection rejects directories and symlinks that resolve outside th
   assert.deepEqual(await readLegacyHistoryForSandboxAt(root, { id: 'sandbox-1', accountId: 'account-1' }), []);
 });
 
-test('API keeps legacy history separate while rendering complete accounts independently', async () => {
+test('Trades page renders only complete verified history', async () => {
   const server = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
   const page = await fs.readFile(new URL('../agent/public/index.html', import.meta.url), 'utf8');
-  assert.match(server, /legacyOrders: legacyHistory/);
   assert.match(server, /buildTradeLedger\(sandboxOrders, metadata\)/);
-  assert.match(server, /legacyHistory\.push/);
-  assert.match(page, /legacyOrders=data\.legacyOrders\|\|\[\]/);
+  assert.doesNotMatch(server, /legacyOrders|readLegacyHistoryForSandboxAt|legacyHistory/);
   assert.match(page, /verifiedReconciliationComplete = data\.complete !== false/);
   assert.match(page, /verifiedAccountStates = new Map/);
   assert.match(page, /verifiedTrades=\(data\.trades\|\|\[\]\)\.filter\(isCompleteAccount\)/);
   assert.match(page, /verifiedOrders=\(data\.orders\|\|\[\]\)\.filter\(isCompleteAccount\)/);
   assert.match(page, /accountRows\.map/);
-  assert.match(page, /legacy \/ unverified \| realized P\/L unavailable/);
+  assert.doesNotMatch(page, /Legacy Order History|legacy-trades-feed|legacyOrders|renderLegacyTradeFeed|legacy \/ unverified/);
 });

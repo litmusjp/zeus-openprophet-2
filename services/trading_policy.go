@@ -12,7 +12,9 @@ import (
 )
 
 // TradingPolicy is the server-owned execution policy applied at the final
-// broker boundary. Zero-valued permissions fail closed for order submission.
+// broker boundary. Zero-valued risk caps are interpreted according to their
+// individual semantics: maxOrderValue==0 is uncapped, while the other opening
+// caps must be explicitly positive.
 type TradingPolicy struct {
 	IsPaper              bool
 	AllowLiveTrading     bool
@@ -158,8 +160,8 @@ func (p TradingPolicy) validateCommon(orderSide, assetClass string, opening bool
 	if !opening {
 		return nil
 	}
-	if p.MaxOrderValue <= 0 || p.MaxPositionPct <= 0 || p.MaxDeployedPct <= 0 || p.MaxOpenPositions <= 0 || p.MaxDailyLoss <= 0 {
-		return fmt.Errorf("opening risk caps must all be explicitly positive")
+	if p.MaxPositionPct <= 0 || p.MaxDeployedPct <= 0 || p.MaxOpenPositions <= 0 || p.MaxDailyLoss <= 0 {
+		return fmt.Errorf("opening risk caps other than maxOrderValue must all be explicitly positive")
 	}
 	return nil
 }

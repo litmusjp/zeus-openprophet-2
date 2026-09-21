@@ -69,6 +69,27 @@ func TestTradingPolicyAllowsPaperOpeningWhenLiveCapabilityIsFalse(t *testing.T) 
 	}
 }
 
+func TestTradingPolicyAllowsUncappedOrderValueWithOtherOpeningCaps(t *testing.T) {
+	policy := TradingPolicy{
+		IsPaper: true, AllowPaperTrading: true, AllowStocks: true, RequireConfirmation: false,
+		MaxPositionPct: 100, MaxDeployedPct: 100, MaxOpenPositions: 10, MaxDailyLoss: 100,
+	}
+	order := &interfaces.Order{Symbol: "XLF", Qty: 10, Side: "buy", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1000), Purpose: "entry"}
+	if _, err := policy.ValidateOrder(order, BrokerRiskSnapshot{Account: validRiskAccount()}); err != nil {
+		t.Fatalf("zero max order value should be uncapped when other opening caps are positive: %v", err)
+	}
+}
+
+func TestTradingPolicyAllowsBackedXLFCloseWithZeroOrderValueCap(t *testing.T) {
+	policy := TradingPolicy{IsPaper: true, AllowPaperTrading: true, AllowStocks: true, RequireConfirmation: false}
+	order := &interfaces.Order{Symbol: "XLF", Qty: 10, Side: "sell", Purpose: "close"}
+	if _, err := policy.ValidateOrder(order, BrokerRiskSnapshot{
+		Positions: []*interfaces.Position{{Symbol: "XLF", Qty: 10, Side: "long"}},
+	}); err != nil {
+		t.Fatalf("backed XLF close should remain allowed with zero max order value: %v", err)
+	}
+}
+
 func TestTradingPolicyRejectsLiveOpeningEvenWhenLiveCapabilityIsTrue(t *testing.T) {
 	policy := TradingPolicy{IsPaper: false, AllowLiveTrading: true, AllowPaperTrading: true, AllowStocks: true, RequireConfirmation: false}
 	order := &interfaces.Order{Symbol: "AAPL", Qty: 1, Side: "buy", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(100), Purpose: "entry"}

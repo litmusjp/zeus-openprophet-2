@@ -105,3 +105,18 @@ test('ledger applies option multiplier to padded OCC symbols', () => {
   assert.equal(trades[0].pnl, 100);
   assert.equal(trades[0].assetType, 'option');
 });
+
+test('zero maxOrderValue leaves permitted stock orders uncapped', () => {
+  assert.doesNotThrow(() => checkPermissions('place_sell_order', {
+    symbol: 'XLF', quantity: 10, limit_price: 100,
+  }, { ...enabled, maxOrderValue: 0 }));
+});
+
+test('positive maxOrderValue still caps permitted stock orders', () => {
+  assert.throws(
+    () => checkPermissions('place_sell_order', {
+      symbol: 'XLF', quantity: 11, limit_price: 100,
+    }, { ...enabled, maxOrderValue: 1000 }),
+    /exceeds max allowed/,
+  );
+});

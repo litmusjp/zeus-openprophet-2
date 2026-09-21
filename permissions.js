@@ -39,11 +39,6 @@ export function checkPermissions(toolName, args = {}, perms = {}, now = new Date
   // Everything below is order-specific
   if (!ORDER_TOOLS.includes(toolName)) return;
 
-  // Opening risk must have an explicit positive order-value cap; zero is not "uncapped".
-  if (toolName !== 'close_managed_position' && toolName !== 'cancel_order' && maxOrderValue <= 0) {
-    throw new Error('Opening orders require a positive maxOrderValue risk cap.');
-  }
-
   // Paper trading is a distinct, safe capability. Live accounts are rejected at
   // the server-owned Go boundary regardless of permission flags.
   if (!allowPaperTrading && toolName !== 'close_managed_position' && toolName !== 'cancel_order') {

@@ -952,13 +952,17 @@
           <div class="section-title">Heartbeat Intervals</div>
           <p style="font-size:13px;color:var(--ink-muted);margin-bottom:12px">Seconds between agent heartbeats per market phase</p>
           <div class="config-card">
+            <div id="heartbeat-clocks" style="display:grid;gap:4px;margin-bottom:14px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink-muted)" aria-live="polite">
+              <div><span>U.S. Eastern</span> <strong id="heartbeat-eastern-clock">--</strong></div>
+              <div><span>Japan Standard (JST)</span> <strong id="heartbeat-jst-clock">--</strong></div>
+            </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px" id="heartbeat-grid">
-              <div class="form-group"><label>Pre-Market</label><input type="number" id="hb-pre_market" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Market Open</label><input type="number" id="hb-market_open" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Midday</label><input type="number" id="hb-midday" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Market Close</label><input type="number" id="hb-market_close" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>After Hours</label><input type="number" id="hb-after_hours" min="60" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Closed</label><input type="number" id="hb-closed" min="60" max="14400" onchange="saveHeartbeat()"></div>
+              <div class="form-group"><label>Pre-Market <span id="hb-range-pre_market" class="form-hint"></span></label><input type="number" id="hb-pre_market" min="30" max="14400" onchange="saveHeartbeat()"></div>
+              <div class="form-group"><label>Market Open <span id="hb-range-market_open" class="form-hint"></span></label><input type="number" id="hb-market_open" min="30" max="14400" onchange="saveHeartbeat()"></div>
+              <div class="form-group"><label>Midday <span id="hb-range-midday" class="form-hint"></span></label><input type="number" id="hb-midday" min="30" max="14400" onchange="saveHeartbeat()"></div>
+              <div class="form-group"><label>Market Close <span id="hb-range-market_close" class="form-hint"></span></label><input type="number" id="hb-market_close" min="30" max="14400" onchange="saveHeartbeat()"></div>
+              <div class="form-group"><label>After Hours <span id="hb-range-after_hours" class="form-hint"></span></label><input type="number" id="hb-after_hours" min="60" max="14400" onchange="saveHeartbeat()"></div>
+              <div class="form-group"><label>Closed <span id="hb-range-closed" class="form-hint"></span></label><input type="number" id="hb-closed" min="60" max="14400" onchange="saveHeartbeat()"></div>
             </div>
             <label style="display:flex;align-items:flex-start;gap:8px;margin-top:14px;text-transform:none;font-weight:400;font-size:13px;line-height:1.4">
               <input type="checkbox" id="hb-force-agent" onchange="saveHeartbeat()">
@@ -1173,7 +1177,7 @@
 let config = { accounts: [], agents: [], strategies: [], models: [] };
 let historyState = { sandboxes: [], chatSessions: [], chatMessages: [], selectedChatId: null, loaded: false };
 let selectedSandboxId = null;
-let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, permissions: {}, slack: {} };
+let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases: {}, permissions: {}, slack: {} };
 const authToken = new URLSearchParams(window.location.search).get('token') || '';
 let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
@@ -1262,10 +1266,14 @@ async function refreshSelectedSandboxConfig() {
     const resp = await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/dashboard');
     if (!resp.ok) throw new Error('Dashboard fetch failed');
     const data = await resp.json();
+    const phaseData = await fetch('/api/heartbeat/phases')
+      .then(phaseResp => phaseResp.ok ? phaseResp.json() : {})
+      .catch(() => ({}));
     sandboxScoped = {
       sandbox: data.sandbox || null,
       agent: data.agent || null,
       heartbeat: data.heartbeat || {},
+      heartbeatPhases: phaseData.phases || data.heartbeatPhases || {},
       permissions: data.permissions || {},
       slack: data.slack || {},
     };
@@ -3685,9 +3693,34 @@ function renderHeartbeat() {
   phases.forEach(p => {
     const el = document.getElementById('hb-' + p);
     if (el && hb[p] !== undefined) el.value = hb[p];
+    const rangeEl = document.getElementById('hb-range-' + p);
+    if (rangeEl) rangeEl.textContent = formatHeartbeatPhaseRange((sandboxScoped.heartbeatPhases || {})[p]);
   });
   const forceEl = document.getElementById('hb-force-agent');
   if (forceEl) forceEl.checked = hb.forceHeartbeatIntervals === true;
+}
+
+function formatHeartbeatPhaseRange(range) {
+  if (!range || range.start === null || range.end === null) return range?.label || 'Markets Closed';
+  const format = minutes => {
+    const hour = Math.floor(minutes / 60) % 24;
+    const minute = minutes % 60;
+    return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${hour < 12 ? 'AM' : 'PM'}`;
+  };
+  return `${format(range.start)}–${format(range.end)} ET`;
+}
+
+function formatHeartbeatClock(now, timeZone, timeZoneName) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone, hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true, timeZoneName,
+  }).format(now);
+}
+
+function updateHeartbeatClocks(now = new Date()) {
+  const eastern = document.getElementById('heartbeat-eastern-clock');
+  const jst = document.getElementById('heartbeat-jst-clock');
+  if (eastern) eastern.textContent = formatHeartbeatClock(now, 'America/New_York', 'short');
+  if (jst) jst.textContent = formatHeartbeatClock(now, 'Asia/Tokyo', 'short').replace(/\sGMT\+9$/, ' JST');
 }
 
 let _hbTimer = null;
@@ -3944,12 +3977,13 @@ function startPolling() {
   connectSSE();
   _pollIntervals = [
     setInterval(updateClock, 1000),
+    setInterval(updateHeartbeatClocks, 1000),
     setInterval(refreshPortfolio, 30000),
     setInterval(checkHealth, 15000),
     setInterval(checkAuth, 30000),
   ];
   // Run immediately on start
-  updateClock(); refreshPortfolio(); checkHealth(); checkAuth();
+  updateClock(); updateHeartbeatClocks(); refreshPortfolio(); checkHealth(); checkAuth();
 }
 function stopPolling() {
   _pollIntervals.forEach(id => clearInterval(id));

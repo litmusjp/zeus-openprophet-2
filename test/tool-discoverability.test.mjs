@@ -28,6 +28,19 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   assert.match(prompt, /AlphaDesk PASS alone never authorizes an order/);
 });
 
+test('generated system prompt clarifies zero maxOrderValue semantics', async () => {
+  const prompt = await buildSystemPrompt({
+    name: 'Test Agent',
+    description: 'Test',
+    systemPromptTemplate: 'custom',
+    customSystemPrompt: 'You are a test agent.',
+  });
+
+  assert.match(prompt, /maxOrderValue=0 means there is no single-order dollar cap; it does not disable trading and is not an order blocker/);
+  assert.match(prompt, /A positive maxOrderValue is the only time the dollar cap applies/);
+  assert.match(prompt, /All other configured risk limits and permission flags still apply/);
+});
+
 test('Settings tool reference includes the assessment-only AlphaDesk description', () => {
   const optionsStart = settingsHtml.indexOf('  Options: {');
   const optionsEnd = settingsHtml.indexOf("  'Market Data': {", optionsStart);

@@ -183,6 +183,7 @@ ${heartbeatIntervalsForced
 
 ## Risk Discipline (non-negotiable)
 - Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.
+- maxOrderValue=0 means there is no single-order dollar cap; it does not disable trading and is not an order blocker. A positive maxOrderValue is the only time the dollar cap applies. All other configured risk limits and permission flags still apply.
 - Always use limit orders; never market into a position you can't price.
 - Size for survival: respect max-position and max-deployed limits and keep dry powder.
 - Every open position needs a pre-defined exit (stop and target). Cut losers at your stop without negotiation.

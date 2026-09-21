@@ -4,7 +4,7 @@
 // harness.js) prevents the two copies from drifting apart or from the real tool set.
 export const TOOL_CATALOG = {
   'Trading': ['get_account', 'get_positions', 'get_orders', 'place_buy_order', 'place_sell_order', 'place_managed_position', 'get_managed_positions', 'close_managed_position', 'cancel_order'],
-  'Options': ['place_options_order', 'get_options_positions', 'get_options_position', 'get_options_chain'],
+  'Options': ['assess_options_strategy', 'place_options_order', 'get_options_positions', 'get_options_position', 'get_options_chain'],
   'Market Data': ['get_quote', 'get_latest_bar', 'get_historical_bars', 'analyze_stocks'],
   'News': ['get_news', 'search_news', 'get_market_news', 'get_quick_market_intelligence', 'get_cleaned_news', 'get_marketwatch_topstories', 'get_marketwatch_realtime'],
   'Intelligence': ['aggregate_and_summarize_news', 'list_news_summaries', 'get_news_summary'],

@@ -957,12 +957,12 @@
               <div><span>Japan Standard (JST)</span> <strong id="heartbeat-jst-clock">--</strong></div>
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px" id="heartbeat-grid">
-              <div class="form-group"><label>Pre-Market <span id="hb-range-pre_market" class="form-hint"></span></label><input type="number" id="hb-pre_market" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Market Open <span id="hb-range-market_open" class="form-hint"></span></label><input type="number" id="hb-market_open" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Midday <span id="hb-range-midday" class="form-hint"></span></label><input type="number" id="hb-midday" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Market Close <span id="hb-range-market_close" class="form-hint"></span></label><input type="number" id="hb-market_close" min="30" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>After Hours <span id="hb-range-after_hours" class="form-hint"></span></label><input type="number" id="hb-after_hours" min="60" max="14400" onchange="saveHeartbeat()"></div>
-              <div class="form-group"><label>Closed <span id="hb-range-closed" class="form-hint"></span></label><input type="number" id="hb-closed" min="60" max="14400" onchange="saveHeartbeat()"></div>
+              <div class="form-group"><label>Pre-Market <span id="hb-range-pre_market" class="form-hint"></span></label><input type="number" id="hb-pre_market" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-pre_market" class="form-hint"></span></div>
+              <div class="form-group"><label>Market Open <span id="hb-range-market_open" class="form-hint"></span></label><input type="number" id="hb-market_open" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-market_open" class="form-hint"></span></div>
+              <div class="form-group"><label>Midday <span id="hb-range-midday" class="form-hint"></span></label><input type="number" id="hb-midday" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-midday" class="form-hint"></span></div>
+              <div class="form-group"><label>Market Close <span id="hb-range-market_close" class="form-hint"></span></label><input type="number" id="hb-market_close" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-market_close" class="form-hint"></span></div>
+              <div class="form-group"><label>After Hours <span id="hb-range-after_hours" class="form-hint"></span></label><input type="number" id="hb-after_hours" min="60" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-after_hours" class="form-hint"></span></div>
+              <div class="form-group"><label>Closed <span id="hb-range-closed" class="form-hint"></span></label><input type="number" id="hb-closed" min="60" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-closed" class="form-hint"></span></div>
             </div>
             <label style="display:flex;align-items:flex-start;gap:8px;margin-top:14px;text-transform:none;font-weight:400;font-size:13px;line-height:1.4">
               <input type="checkbox" id="hb-force-agent" onchange="saveHeartbeat()">
@@ -3696,18 +3696,36 @@ function renderHeartbeat() {
     const rangeEl = document.getElementById('hb-range-' + p);
     if (rangeEl) rangeEl.textContent = formatHeartbeatPhaseRange((sandboxScoped.heartbeatPhases || {})[p]);
   });
+  updateHeartbeatHours();
   const forceEl = document.getElementById('hb-force-agent');
   if (forceEl) forceEl.checked = hb.forceHeartbeatIntervals === true;
 }
 
 function formatHeartbeatPhaseRange(range) {
-  if (!range || range.start === null || range.end === null) return range?.label || 'Markets Closed';
+  if (!range || range.start === null || range.end === null) return range?.label === 'Markets Closed' ? '8:00 PM–4:00 AM ET' : range?.label || 'Markets Closed';
   const format = minutes => {
     const hour = Math.floor(minutes / 60) % 24;
     const minute = minutes % 60;
     return `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${hour < 12 ? 'AM' : 'PM'}`;
   };
   return `${format(range.start)}–${format(range.end)} ET`;
+}
+
+function formatHeartbeatHours(seconds) {
+  const input = String(seconds ?? '').trim();
+  if (!input) return '';
+  const value = Number(input);
+  if (!Number.isFinite(value) || value < 0) return '';
+  const hours = Number((value / 3600).toFixed(2));
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+function updateHeartbeatHours() {
+  ['pre_market','market_open','midday','market_close','after_hours','closed'].forEach(p => {
+    const input = document.getElementById('hb-' + p);
+    const output = document.getElementById('hb-hours-' + p);
+    if (output) output.textContent = formatHeartbeatHours(input?.value);
+  });
 }
 
 function formatHeartbeatClock(now, timeZone, timeZoneName) {

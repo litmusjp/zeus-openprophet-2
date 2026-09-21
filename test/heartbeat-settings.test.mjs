@@ -16,10 +16,22 @@ function pageFunction(name) {
 test('heartbeat settings render phase ranges from the authoritative phase payload', () => {
   const formatRange = pageFunction('formatHeartbeatPhaseRange');
   assert.equal(formatRange({ start: 240, end: 570 }), '4:00 AM–9:30 AM ET');
-  assert.equal(formatRange({ start: null, end: null, label: 'Markets Closed' }), 'Markets Closed');
+  assert.equal(formatRange({ start: null, end: null, label: 'Markets Closed' }), '8:00 PM–4:00 AM ET');
   assert.match(page, /fetch\('\/api\/heartbeat\/phases'\)/);
   assert.match(page, /phaseData\.phases \|\| data\.heartbeatPhases \|\| \{\}/);
   assert.match(page, /formatHeartbeatPhaseRange\(\(sandboxScoped\.heartbeatPhases \|\| \{\}\)\[p\]\)/);
+});
+
+test('heartbeat seconds format as hours without NaN and expose a live output hook', () => {
+  const formatHours = pageFunction('formatHeartbeatHours');
+  assert.equal(formatHours('900'), '0.25 hours');
+  assert.equal(formatHours('3600'), '1 hour');
+  assert.equal(formatHours(''), '');
+  assert.equal(formatHours('not-a-number'), '');
+  assert.doesNotMatch(formatHours('not-a-number'), /NaN/);
+  assert.match(page, /id="hb-hours-pre_market"/);
+  assert.match(page, /oninput="updateHeartbeatHours\(\)" onchange="saveHeartbeat\(\)"/);
+  assert.match(page, /updateHeartbeatHours\(\);/);
 });
 
 test('heartbeat clocks use timezone formatting and refresh every second', () => {

@@ -932,10 +932,10 @@
             <div class="config-card-header"><span class="config-card-title">AlphaDesk hard gate</span><span class="badge" id="alphadesk-badge">Disabled</span></div>
             <div class="config-card-desc">Require a fresh, exact-trade AlphaDesk PASS and qualifying signal before opening or increasing options exposure. Exits remain available.</div>
             <div style="margin-top:16px">
-              <div class="form-group"><label><input type="checkbox" id="alphadesk-enabled" onchange="saveAlphaDeskConfig()"> Enable hard gate</label></div>
+              <div class="form-group"><label><input type="checkbox" id="alphadesk-enabled"> Enable hard gate</label></div>
               <div class="form-group"><label>Assessment URL</label><input type="text" id="alphadesk-url" placeholder="https://alphadesk.example"></div>
               <div class="form-group"><label>API key (write-only)</label><input type="password" id="alphadesk-key" placeholder="Leave blank to keep current key"></div>
-              <div class="config-card-actions"><button class="btn primary sm" onclick="testAlphaDesk()">Test connection</button><span id="alphadesk-test-result" style="font-size:12px;color:var(--ink-faint);margin-left:8px"></span></div>
+              <div class="config-card-actions"><button class="btn primary sm" onclick="saveAlphaDeskConfig()">Save AlphaDesk settings</button><button class="btn primary sm" onclick="testAlphaDesk()">Test connection</button><span id="alphadesk-test-result" style="font-size:12px;color:var(--ink-faint);margin-left:8px"></span></div>
             </div>
           </div>
         </div>
@@ -4028,19 +4028,47 @@ function renderAlphaDesk() {
   b.textContent = a.enabled && a.url ? 'Enabled' : 'Disabled';
   b.style.color = a.enabled && a.url ? 'var(--success)' : 'var(--ink-faint)';
 }
-let _alphaTimer = null;
-function saveAlphaDeskConfig() {
-  clearTimeout(_alphaTimer); _alphaTimer = setTimeout(async () => {
-    const body = { enabled: document.getElementById('alphadesk-enabled').checked, url: document.getElementById('alphadesk-url').value.trim() };
-    const key = document.getElementById('alphadesk-key').value.trim(); if (key) body.apiKey = key;
-    const sid = getEffectiveSandboxId(); if (sid) body.sandboxId = sid;
-    await fetch('/api/plugins/alphadesk', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+function alphaDeskConfigBody() {
+  const body = {
+    enabled: document.getElementById('alphadesk-enabled').checked,
+    url: document.getElementById('alphadesk-url').value.trim(),
+  };
+  const key = document.getElementById('alphadesk-key').value.trim();
+  if (key) body.apiKey = key;
+  const sid = getEffectiveSandboxId();
+  if (sid) body.sandboxId = sid;
+  return body;
+}
+
+async function saveAlphaDeskConfig() {
+  const el = document.getElementById('alphadesk-test-result');
+  el.textContent = 'Saving...'; el.style.color = 'var(--ink-muted)';
+  try {
+    const r = await fetch('/api/plugins/alphadesk', {
+      method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(alphaDeskConfigBody()),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'Unable to save AlphaDesk settings');
     await refreshSelectedSandboxConfig();
-  }, 400);
+    el.textContent = 'Settings saved'; el.style.color = 'var(--success)';
+    return true;
+  } catch (e) {
+    el.textContent = 'Save failed: ' + (e.message || 'Unable to save AlphaDesk settings');
+    el.style.color = 'var(--error)';
+    return false;
+  }
 }
 async function testAlphaDesk() {
-  const el = document.getElementById('alphadesk-test-result'); el.textContent = 'Testing...';
-  try { const sid = getEffectiveSandboxId(); const r = await fetch('/api/plugins/alphadesk/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sid?{sandboxId:sid}:{})}); const d=await r.json(); el.textContent=d.ok?'Connection OK':(d.error||'Failed'); el.style.color=d.ok?'var(--success)':'var(--error)'; } catch(e) { el.textContent='Failed'; el.style.color='var(--error)'; }
+  const el = document.getElementById('alphadesk-test-result');
+  if (!await saveAlphaDeskConfig()) return;
+  el.textContent = 'Testing...'; el.style.color = 'var(--ink-muted)';
+  try {
+    const sid = getEffectiveSandboxId();
+    const r = await fetch('/api/plugins/alphadesk/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sid?{sandboxId:sid}:{})});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'Connection failed');
+    el.textContent = 'Connection OK'; el.style.color = 'var(--success)';
+  } catch(e) { el.textContent='Test failed: ' + (e.message || 'Connection failed'); el.style.color='var(--error)'; }
 }
 function stopPolling() {
   _pollIntervals.forEach(id => clearInterval(id));

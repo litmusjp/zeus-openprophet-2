@@ -3,12 +3,16 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/shopspring/decimal"
+	"github.com/sirupsen/logrus"
 	"prophet-trader/interfaces"
 )
 
@@ -167,6 +171,57 @@ func TestPlaceOptionsOrderClosedDoesNotCallBroker(t *testing.T) {
 	var closedErr *MarketClosedError
 	if !errors.As(err, &closedErr) || calls != 0 {
 		t.Fatalf("PlaceOptionsOrder() err=%v calls=%d, want market-closed and zero broker calls", err, calls)
+	}
+}
+
+func TestRiskReducingOptionsExitDoesNotCallAlphaDesk(t *testing.T) {
+	alphaCalls := 0
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		alphaCalls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer alpha.Close()
+	brokerCalls := 0
+	service := &AlpacaTradingService{
+		clockReader:      fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:           logrus.New(),
+		submissionMarker: func(string) error { return nil },
+		alphaDesk:        &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+			brokerCalls++
+			return &alpaca.Order{ID: "close-1", Status: "accepted", Qty: decimalPtr(decimal.NewFromInt(1)), Symbol: "TSLA251219C00400000", Side: alpaca.Sell, Type: alpaca.Limit, TimeInForce: alpaca.Day}, nil
+		},
+	}
+	_, err := service.PlaceOptionsOrder(context.Background(), &interfaces.OptionsOrder{
+		ClientOrderID: "op-close", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+		Side: "sell", PositionIntent: "sell_to_close", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+	})
+	if alphaCalls != 0 || brokerCalls != 1 || strings.Contains(fmt.Sprint(err), "AlphaDesk") {
+		t.Fatalf("exit err=%v AlphaDesk calls=%d broker calls=%d, want no AlphaDesk call and one broker call", err, alphaCalls, brokerCalls)
+	}
+}
+
+func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
+	alphaCalls := 0
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		alphaCalls++
+		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	defer alpha.Close()
+	service := &AlpacaTradingService{
+		clockReader:      fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:           logrus.New(),
+		submissionMarker: func(string) error { return nil },
+		alphaDesk:        &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+			return &alpaca.Order{ID: "retry-1", Status: "accepted", Qty: decimalPtr(decimal.NewFromInt(1)), Symbol: "TSLA251219C00400000", Side: alpaca.Buy, Type: alpaca.Limit, TimeInForce: alpaca.Day}, nil
+		},
+	}
+	order := &interfaces.OptionsOrder{ClientOrderID: "op-retry", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)}
+	_, _ = service.PlaceOptionsOrder(context.Background(), order)
+	_, _ = service.PlaceOptionsOrder(context.Background(), order)
+	if alphaCalls != 2 {
+		t.Fatalf("AlphaDesk calls = %d, want a fresh assessment on both submissions", alphaCalls)
 	}
 }
 

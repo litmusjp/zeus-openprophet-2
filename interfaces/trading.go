@@ -89,6 +89,7 @@ type Order struct {
 	ExpiresAt           *time.Time // planned-intent authorization expiry
 	Revision            int64      // optimistic lifecycle revision
 	SubmissionAttempted bool       // broker call may have occurred; never blind-retry when true
+	Metadata            string     `json:"metadata,omitempty"` // server-produced audit metadata; never credentials
 }
 
 type OrderRequest struct {
@@ -213,16 +214,34 @@ type MarketData struct {
 
 // Options trading structures
 type OptionsOrder struct {
-	ClientOrderID       string
-	Symbol              string // Options symbol in OCC format (e.g., TSLA251219C00400000)
-	Underlying          string // Underlying stock symbol
-	Qty                 float64
-	Side                string // "buy" or "sell"
-	PositionIntent      string // "buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close"
-	Type                string // "market", "limit"
-	TimeInForce         string // "day", "gtc"
-	LimitPrice          *float64
-	SubmissionAttempted bool
+	ClientOrderID         string
+	Symbol                string // Options symbol in OCC format (e.g., TSLA251219C00400000)
+	Underlying            string // Underlying stock symbol
+	Qty                   float64
+	Side                  string // "buy" or "sell"
+	PositionIntent        string // "buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close"
+	Type                  string // "market", "limit"
+	TimeInForce           string // "day", "gtc"
+	LimitPrice            *float64
+	SubmissionAttempted   bool
+	MarketScannerFeatures any                              `json:"-"`
+	AlphaDeskAssessment   *AlphaDeskAssessment             `json:"-"`
+	AssessmentAuditSink   func(*AlphaDeskAssessment) error `json:"-"`
+}
+
+type AlphaDeskAssessment struct {
+	AssessmentID          string    `json:"assessment_id"`
+	Decision              string    `json:"decision"`
+	SignalScore           *float64  `json:"signal_score,omitempty"`
+	Threshold             *float64  `json:"execution_threshold,omitempty"`
+	Policy                any       `json:"policy,omitempty"`
+	Evidence              any       `json:"evidence,omitempty"`
+	ExpiresAt             time.Time `json:"expires_at"`
+	Fingerprint           string    `json:"trade_fingerprint"`
+	HumanApprovalRequired bool      `json:"human_approval_required"`
+	ExecutionAllowed      bool      `json:"execution_allowed"`
+	QualificationStatus   string    `json:"qualification_status"`
+	Qualified             bool      `json:"qualified"`
 }
 
 type OptionsQuote struct {

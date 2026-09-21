@@ -34,6 +34,7 @@ import {
   getHeartbeatProfiles, getPhaseTimeRanges, applyHeartbeatProfile, updatePhaseTimeRange,
   getAvailableModels,
 } from './config-store.js';
+import { redactSecrets } from './redaction.js';
 import { formatSlackNotification } from './slack-format.js';
 import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, createBasicAuthMiddleware, resolveApiAuthToken } from './auth.js';
@@ -83,7 +84,7 @@ function getPersistedSandboxOrders(sandbox) {
              tenant_id AS TenantID, sandbox_id AS SandboxID,
              symbol AS Symbol, qty AS Qty, side AS Side, type AS Type,
              status AS Status, filled_qty AS FilledQty, filled_avg_price AS FilledAvgPrice,
-             submitted_at AS SubmittedAt, filled_at AS FilledAt
+             submitted_at AS SubmittedAt, filled_at AS FilledAt, metadata AS Metadata
       FROM orders ORDER BY submitted_at ASC
     `).all();
   } catch (err) {
@@ -133,6 +134,17 @@ function operatorAuthMiddleware(req, res, next) {
   if (configuredOperatorToken && providedOperatorToken === configuredOperatorToken) return next();
   if (hasValidBasicAuth(req)) return next();
   return res.status(BASIC_AUTH_CONFIGURED || configuredOperatorToken ? 403 : 503).json({ error: 'operator authorization is required' });
+}
+
+function validateAlphaDeskUrl(raw) {
+  const value = String(raw || '').trim();
+  let parsed;
+  try { parsed = new URL(value); } catch { throw new Error('AlphaDesk URL must be an absolute HTTPS URL'); }
+  if (parsed.username || parsed.password) throw new Error('AlphaDesk URL must not include credentials');
+  const host = parsed.hostname.toLowerCase();
+  if (parsed.protocol === 'https:') return value.replace(/\/$/, '');
+  if (parsed.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)) return value.replace(/\/$/, '');
+  throw new Error('AlphaDesk URL must use HTTPS (HTTP is allowed only for localhost development)');
 }
 
 app.use(createBasicAuthMiddleware({
@@ -246,6 +258,7 @@ async function startGoBackendUnlocked(account, sandboxId) {
     databasePath: path.join(PROJECT_ROOT, 'data', 'sandboxes', sandboxId, 'prophet_trader.db'),
     activityLogDir: path.join(PROJECT_ROOT, 'data', 'sandboxes', sandboxId, 'activity_logs'),
     permissions: getPermissionsForSandbox(sandboxId),
+    alphaDesk: getPluginForSandbox(sandboxId, 'alphadesk'),
   });
   env.TRADING_BOT_TOKEN = TRADING_BOT_TOKEN;
   env.TRADING_BOT_PROCESS_NONCE = TRADING_BOT_PROCESS_NONCE;
@@ -1035,7 +1048,7 @@ app.get('/api/agent/state', (req, res) => {
 
 // Multi-sandbox orchestration
 app.get('/api/sandboxes', (req, res) => {
-  const sandboxes = getSandboxes().map(sandbox => ({
+  const sandboxes = getSandboxes().map(sandbox => redactSecrets({
     ...sandbox,
     runtime: isActiveSandbox(sandbox.id)
       ? harness.state.toJSON()
@@ -1162,7 +1175,7 @@ app.get('/api/sandboxes/:id/config', (req, res) => {
     const sandbox = getSandbox(req.params.id);
     if (!sandbox) return res.status(404).json({ error: 'Sandbox not found' });
     const agent = getResolvedAgentForSandbox(req.params.id);
-    res.json({ sandbox, agent });
+    res.json({ sandbox: redactSecrets(sandbox), agent });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -1188,7 +1201,7 @@ app.get('/api/sandboxes/:id/dashboard', (req, res) => {
     const providers = [...new Set((getAvailableModels()).map(m => m.id.split('/')[0]))];
 
     res.json({
-      sandbox,
+      sandbox: redactSecrets(sandbox),
       agent,
       models: getAvailableModels(),
       providers,
@@ -1196,7 +1209,7 @@ app.get('/api/sandboxes/:id/dashboard', (req, res) => {
       heartbeatProfiles: getHeartbeatProfiles(),
       heartbeatPhases: getPhaseTimeRanges(),
       permissions,
-      slack: slack || {},
+      slack: redactSecrets(slack || {}),
       state,
     });
   } catch (err) { res.status(400).json({ error: err.message }); }
@@ -1236,7 +1249,7 @@ app.put('/api/sandboxes/:id/agent', async (req, res) => {
     const sandbox = await updateSandboxAgentSelection(req.params.id, updates);
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
-    res.json({ ok: true, sandbox, agent: getResolvedAgentForSandbox(req.params.id) });
+    res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -1245,7 +1258,7 @@ app.put('/api/sandboxes/:id/agent/overrides', async (req, res) => {
     const sandbox = await updateSandboxAgentOverrides(req.params.id, req.body || {});
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
-    res.json({ ok: true, sandbox, agent: getResolvedAgentForSandbox(req.params.id) });
+    res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -1257,7 +1270,7 @@ app.put('/api/sandboxes/:id/strategy-rules', async (req, res) => {
     const sandbox = await updateSandboxStrategyRules(req.params.id, req.body.rules);
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
-    res.json({ ok: true, sandbox, agent: getResolvedAgentForSandbox(req.params.id) });
+    res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -1312,24 +1325,6 @@ app.post('/api/agent/heartbeat', (req, res) => {
 // Any config key whose NAME matches this is a credential and must never reach the
 // dashboard/SSE in the clear. Denylist-by-name is defensive: a newly-added secret field
 // (e.g. a plugin token or webhook) is masked automatically instead of silently leaking.
-const SECRET_KEY_RE = /(secret|token|password|passwd|webhook|credential|privatekey|api[_-]?key|publickey)/i;
-
-function redactSecrets(value) {
-  if (Array.isArray(value)) return value.map(redactSecrets);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) {
-      if (typeof v === 'string' && v && SECRET_KEY_RE.test(k)) {
-        out[k] = v.length > 4 ? '****' + v.slice(-4) : '****';
-      } else {
-        out[k] = redactSecrets(v);
-      }
-    }
-    return out;
-  }
-  return value;
-}
-
 function safeConfig() {
   return redactSecrets(getConfig());
 }
@@ -1678,17 +1673,37 @@ app.get('/api/plugins', (req, res) => {
 app.get('/api/plugins/:name', (req, res) => {
   const sandboxId = req.query.sandboxId;
   const plugin = sandboxId ? getPluginForSandbox(sandboxId, req.params.name) : getPlugin(req.params.name);
-  res.json(redactSecrets(plugin || {}));
+  res.json(redactSecrets(plugin || {}, req.params.name.toLowerCase() === 'alphadesk'));
 });
 
-app.put('/api/plugins/:name', async (req, res) => {
+app.put('/api/plugins/:name', (req, res, next) => {
+  if (req.params.name === 'alphadesk') return operatorAuthMiddleware(req, res, next);
+  next();
+}, async (req, res) => {
   try {
     const { sandboxId, ...pluginBody } = req.body || {};
+    if (req.params.name === 'alphadesk' && pluginBody.url) pluginBody.url = validateAlphaDeskUrl(pluginBody.url);
     if (sandboxId) await updatePluginForSandbox(sandboxId, req.params.name, pluginBody);
     else await updatePlugin(req.params.name, pluginBody);
+    if (req.params.name === 'alphadesk') {
+      const activeSandbox = sandboxId ? getSandbox(sandboxId) : getActiveSandbox();
+      const account = activeSandbox ? getAccountById(activeSandbox.accountId) : getActiveAccount();
+      if (activeSandbox?.id === getActiveSandbox()?.id && account) await startGoBackend(account);
+    }
     broadcast('config', safeConfig());
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.post('/api/plugins/alphadesk/test', operatorAuthMiddleware, async (req, res) => {
+  try {
+    const sandboxId = req.body?.sandboxId || req.query.sandboxId;
+    const plugin = sandboxId ? getPluginForSandbox(sandboxId, 'alphadesk') : getPlugin('alphadesk');
+    if (!plugin?.url) return res.status(400).json({ error: 'No AlphaDesk URL configured' });
+    const url = validateAlphaDeskUrl(plugin.url);
+    await axios.get(url, { timeout: 5000, validateStatus: status => status < 500 });
+    res.json({ ok: true });
+  } catch (err) { res.status(502).json({ error: 'AlphaDesk connection failed' }); }
 });
 
 app.post('/api/plugins/slack/test', async (req, res) => {

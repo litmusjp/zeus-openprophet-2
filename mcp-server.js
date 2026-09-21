@@ -790,7 +790,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place a regular-session options order. The broker clock is checked immediately before submission; closed-session requests are saved as planned_for_next_session and are not broker orders.',
+        description: 'Place a regular-session options order. For opening/increasing exposure, the server obtains a fresh AlphaDesk assessment immediately before broker submission; client-supplied or previously returned assessments are not accepted or used. The broker clock is checked immediately before submission; closed-session requests are saved as planned_for_next_session and are not broker orders.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -841,8 +841,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Relevant market context for this setup',
             },
+            market_scanner_features: {
+              type: 'object',
+              description: 'Scanner features for the exact trade; required by AlphaDesk when the hard gate is enabled.',
+            },
           },
           required: ['client_order_id', 'symbol', 'underlying', 'quantity', 'side', 'position_intent', 'order_type'],
+        },
+      },
+      {
+        name: 'assess_options_strategy',
+        description: 'Request deterministic AlphaDesk assessment for the exact proposed options trade. Assessment-only and not broker authorization.',
+        inputSchema: {
+          type: 'object', properties: {
+            symbol: {type:'string'}, underlying: {type:'string'}, quantity: {type:'number'}, side: {type:'string', enum:['buy','sell']}, position_intent: {type:'string', enum:['buy_to_open','buy_to_close','sell_to_open','sell_to_close']}, order_type: {type:'string', enum:['market','limit']}, limit_price: {type:'number'}, market_scanner_features: {type:'object'},
+          }, required: ['symbol','underlying','quantity','side','position_intent','order_type'],
         },
       },
       {
@@ -1837,11 +1850,17 @@ ${allNews.map((article, i) =>
           side: args.side,
           type: args.order_type,
           position_intent: args.position_intent,
-          ...(args.limit_price !== undefined && { limit_price: args.limit_price })
+          ...(args.limit_price !== undefined && { limit_price: args.limit_price }),
+          ...(args.market_scanner_features && { market_scanner_features: args.market_scanner_features })
         };
         const data = await callTradingBot('/options/order', 'POST', requestData);
         if (isOpeningIntent(args.position_intent)) void autoStoreSetup(args, args.side || 'buy');
         return orderResponse(data, args);
+      }
+
+      case 'assess_options_strategy': {
+        const data = await callTradingBot('/options/assessment', 'POST', { symbol: args.symbol, underlying: args.underlying, qty: args.quantity, side: args.side, position_intent: args.position_intent, type: args.order_type, ...(args.limit_price !== undefined && {limit_price: args.limit_price}), ...(args.market_scanner_features && {market_scanner_features: args.market_scanner_features}) });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'get_options_positions': {

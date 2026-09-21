@@ -286,6 +286,7 @@ func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
 		ExpiresAt:           order.ExpiresAt,
 		Revision:            order.Revision,
 		SubmissionAttempted: order.SubmissionAttempted,
+		Metadata:            order.Metadata,
 	}
 
 	var existingRevision int64
@@ -413,6 +414,7 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 		ExpiresAt:           dbOrder.ExpiresAt,
 		Revision:            dbOrder.Revision,
 		SubmissionAttempted: dbOrder.SubmissionAttempted,
+		Metadata:            dbOrder.Metadata,
 	}, nil
 }
 
@@ -510,6 +512,7 @@ func (s *LocalStorage) GetOrders(status string) ([]*interfaces.Order, error) {
 			ExpiresAt:           dbOrder.ExpiresAt,
 			Revision:            dbOrder.Revision,
 			SubmissionAttempted: dbOrder.SubmissionAttempted,
+			Metadata:            dbOrder.Metadata,
 		}
 	}
 

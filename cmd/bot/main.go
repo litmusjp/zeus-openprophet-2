@@ -81,6 +81,9 @@ func main() {
 		if err != nil {
 			logger.Warn("Failed to create trading service (will retry on requests):", err)
 		}
+		if tradingService != nil {
+			tradingService.SetAlphaDeskClient(services.NewAlphaDeskClientFromEnv())
+		}
 	}
 
 	// Inert startup must not initialize any broker-backed client.
@@ -385,6 +388,7 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 
 		// Options trading endpoints
 		api.POST("/options/order", orderController.PlaceOptionsOrder)
+		api.POST("/options/assessment", orderController.AssessOptionsStrategy)
 		api.GET("/options/positions", orderController.ListOptionsPositions)
 		api.GET("/options/position/:symbol", orderController.GetOptionsPosition)
 		api.GET("/options/chain/:symbol", orderController.GetOptionsChain)

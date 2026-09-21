@@ -67,7 +67,7 @@ function setRuntimeProcessNonce(runtime) {
 // The tenant is derived from the server-owned account binding. An inherited
 // tenant is only acceptable when it agrees; callers cannot redirect a runtime
 // to another tenant through environment input.
-export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, port, databasePath, activityLogDir, permissions }) {
+export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, port, databasePath, activityLogDir, permissions, alphaDesk }) {
   const tenantID = String(account?.id || '').trim();
   if (!tenantID) throw new Error('server-owned tenant identity is missing');
   const inheritedTenant = String(baseEnv?.OPENPROPHET_TENANT_ID || '').trim();
@@ -92,6 +92,9 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     OPENPROPHET_ACCOUNT_ID: account.id,
     OPENPROPHET_PROCESS_NONCE: processNonce,
     ...tradingPolicyEnvironment(permissions),
+    ALPHADESK_ENABLED: alphaDesk?.enabled ? 'true' : 'false',
+    ALPHADESK_URL: alphaDesk?.url || '',
+    ALPHADESK_API_KEY: alphaDesk?.apiKey || '',
   };
 }
 
@@ -295,6 +298,7 @@ export class AgentOrchestrator extends EventEmitter {
       databasePath: this.getSandboxDbPath(sandboxId),
       activityLogDir: path.join(this.projectRoot, 'data', 'sandboxes', sandboxId, 'activity_logs'),
       permissions: getPermissionsForSandbox(sandboxId),
+      alphaDesk: getSandbox(sandboxId)?.plugins?.alphadesk,
     });
 
     const binaryPath = path.join(this.projectRoot, 'prophet_bot');

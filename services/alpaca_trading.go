@@ -42,6 +42,15 @@ type AlpacaTradingService struct {
 	openingReservationPath  string
 	submissionMarker        func(string) error
 	managedSubmissionMarker func(string, string, string) error
+	alphaDesk               *AlphaDeskClient
+}
+
+func (s *AlpacaTradingService) SetAlphaDeskClient(client *AlphaDeskClient) { s.alphaDesk = client }
+func (s *AlpacaTradingService) AssessOptionsStrategy(ctx context.Context, order *interfaces.OptionsOrder, features any) (*interfaces.AlphaDeskAssessment, error) {
+	if s.alphaDesk == nil || !s.alphaDesk.Enabled {
+		return nil, nil
+	}
+	return s.alphaDesk.AssessForTrade(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, features)
 }
 
 // SetLocalOrderProvider binds the durable local order store to the broker risk snapshot.
@@ -751,6 +760,15 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	req, err := buildAlpacaOptionsOrderRequest(order)
 	if err != nil {
 		return nil, err
+	}
+	// This is the authorization boundary: fetch and validate fresh server-side
+	// evidence after all local checks and immediately before broker submission.
+	if strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil && s.alphaDesk.Enabled {
+		assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, order.AssessmentAuditSink)
+		if err != nil {
+			return nil, err
+		}
+		order.AlphaDeskAssessment = assessment
 	}
 
 	s.logger.WithFields(logrus.Fields{

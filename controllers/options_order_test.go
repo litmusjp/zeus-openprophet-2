@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -15,6 +16,12 @@ import (
 	"prophet-trader/interfaces"
 	"prophet-trader/services"
 )
+
+func TestOptionsOrderRequestHasNoClientAssessmentAuthorizationField(t *testing.T) {
+	if _, ok := reflect.TypeOf(OptionsOrderRequest{}).FieldByName("Assessment"); ok {
+		t.Fatal("OptionsOrderRequest must not accept a client-supplied AlphaDesk assessment")
+	}
+}
 
 type plannedOptionsTradingService struct {
 	*reconciliationTradingService

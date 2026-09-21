@@ -478,6 +478,14 @@ All runtime config is stored in `data/agent-config.json`. The dashboard provides
     "blockedTools": []
   },
 
+  "plugins": {
+    "alphadesk": {
+      "enabled": false,
+      "url": "https://your-alphadesk-host"
+      // apiKey is write-only in the dashboard and is intentionally omitted here.
+    }
+  },
+
   "accounts": [{ "id": "...", "name": "Paper", "publicKey": "...", "secretKey": "...", "paper": true }],
   "agents": [{ "id": "default", "name": "Prophet", "strategyId": "default", "model": "..." }],
   "strategies": [{ "id": "default", "name": "Aggressive Options", "rulesFile": "TRADING_RULES.md" }],

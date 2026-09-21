@@ -681,6 +681,12 @@ function mergePlugins(plugins = {}) {
         ...(plugins.slack?.notifyOn || {}),
       },
     },
+    alphadesk: {
+      enabled: false,
+      url: '',
+      apiKey: '',
+      ...(plugins.alphadesk || {}),
+    },
   };
 }
 

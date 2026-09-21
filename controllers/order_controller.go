@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -1070,15 +1071,16 @@ func (oc *OrderController) HandleGetBars(c *gin.Context) {
 
 // OptionsOrderRequest represents an options order request
 type OptionsOrderRequest struct {
-	ClientOrderID  string   `json:"client_order_id"`
-	Symbol         string   `json:"symbol" binding:"required"`
-	Underlying     string   `json:"underlying" binding:"required"`
-	Qty            float64  `json:"qty" binding:"required,gt=0"`
-	Side           string   `json:"side" binding:"required,oneof=buy sell"`
-	PositionIntent string   `json:"position_intent" binding:"required,oneof=buy_to_open buy_to_close sell_to_open sell_to_close"`
-	Type           string   `json:"type"`          // "market", "limit"
-	TimeInForce    string   `json:"time_in_force"` // options require "day"
-	LimitPrice     *float64 `json:"limit_price,omitempty"`
+	ClientOrderID         string   `json:"client_order_id"`
+	Symbol                string   `json:"symbol" binding:"required"`
+	Underlying            string   `json:"underlying" binding:"required"`
+	Qty                   float64  `json:"qty" binding:"required,gt=0"`
+	Side                  string   `json:"side" binding:"required,oneof=buy sell"`
+	PositionIntent        string   `json:"position_intent" binding:"required,oneof=buy_to_open buy_to_close sell_to_open sell_to_close"`
+	Type                  string   `json:"type"`          // "market", "limit"
+	TimeInForce           string   `json:"time_in_force"` // options require "day"
+	LimitPrice            *float64 `json:"limit_price,omitempty"`
+	MarketScannerFeatures any      `json:"market_scanner_features,omitempty"`
 }
 
 func optionalFloatEqual(a, b *float64) bool {
@@ -1122,14 +1124,15 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	}
 
 	order := &interfaces.OptionsOrder{
-		Symbol:         req.Symbol,
-		Underlying:     req.Underlying,
-		Qty:            req.Qty,
-		Side:           req.Side,
-		PositionIntent: req.PositionIntent,
-		Type:           req.Type,
-		TimeInForce:    req.TimeInForce,
-		LimitPrice:     req.LimitPrice,
+		Symbol:                req.Symbol,
+		Underlying:            req.Underlying,
+		Qty:                   req.Qty,
+		Side:                  req.Side,
+		PositionIntent:        req.PositionIntent,
+		Type:                  req.Type,
+		TimeInForce:           req.TimeInForce,
+		LimitPrice:            req.LimitPrice,
+		MarketScannerFeatures: req.MarketScannerFeatures,
 	}
 	if err := services.ValidateOptionsOrder(order); err != nil {
 		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", err.Error()))
@@ -1196,6 +1199,14 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		}(),
 		SubmittedAt: time.Now(),
 	}
+	order.AssessmentAuditSink = func(a *interfaces.AlphaDeskAssessment) error {
+		metadata, marshalErr := json.Marshal(a)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		intent.Metadata = string(metadata)
+		return oc.storageService.SaveOrder(intent)
+	}
 	if existing != nil {
 		intent.NextEligibleAt = existing.NextEligibleAt
 		intent.ExpiresAt = existing.ExpiresAt
@@ -1218,7 +1229,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	intent.PaperLive = persistedIntent.PaperLive
 	intent.TenantID = persistedIntent.TenantID
 	intent.SandboxID = persistedIntent.SandboxID
-
+	intent.Revision = persistedIntent.Revision
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1306,6 +1317,33 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	}
 
 	c.JSON(200, result)
+}
+
+// AssessOptionsStrategy is assessment-only; it never authorizes or submits a broker order.
+func (oc *OrderController) AssessOptionsStrategy(c *gin.Context) {
+	var req OptionsOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "invalid options assessment request"})
+		return
+	}
+	assessor, ok := oc.tradingService.(interface {
+		AssessOptionsStrategy(context.Context, *interfaces.OptionsOrder, any) (*interfaces.AlphaDeskAssessment, error)
+	})
+	if !ok {
+		c.JSON(503, gin.H{"error": "AlphaDesk assessment is unavailable"})
+		return
+	}
+	order := &interfaces.OptionsOrder{Symbol: req.Symbol, Underlying: req.Underlying, Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice}
+	a, err := assessor.AssessOptionsStrategy(c.Request.Context(), order, req.MarketScannerFeatures)
+	if err != nil {
+		c.JSON(502, gin.H{"error": err.Error()})
+		return
+	}
+	if a == nil {
+		c.JSON(503, gin.H{"error": "AlphaDesk hard gate is disabled"})
+		return
+	}
+	c.JSON(200, a)
 }
 
 // GetOptionsPosition handles GET /api/options/position/:symbol

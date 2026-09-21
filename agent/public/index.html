@@ -927,6 +927,20 @@
         </div>
 
         <div class="section" style="margin-top:24px">
+          <div class="section-title">AlphaDesk Options Assessment</div>
+          <div class="config-card">
+            <div class="config-card-header"><span class="config-card-title">AlphaDesk hard gate</span><span class="badge" id="alphadesk-badge">Disabled</span></div>
+            <div class="config-card-desc">Require a fresh, exact-trade AlphaDesk PASS and qualifying signal before opening or increasing options exposure. Exits remain available.</div>
+            <div style="margin-top:16px">
+              <div class="form-group"><label><input type="checkbox" id="alphadesk-enabled" onchange="saveAlphaDeskConfig()"> Enable hard gate</label></div>
+              <div class="form-group"><label>Assessment URL</label><input type="text" id="alphadesk-url" placeholder="https://alphadesk.example"></div>
+              <div class="form-group"><label>API key (write-only)</label><input type="password" id="alphadesk-key" placeholder="Leave blank to keep current key"></div>
+              <div class="config-card-actions"><button class="btn primary sm" onclick="testAlphaDesk()">Test connection</button><span id="alphadesk-test-result" style="font-size:12px;color:var(--ink-faint);margin-left:8px"></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section" style="margin-top:24px">
           <div class="section-title">More Plugins Coming</div>
           <div class="config-card" style="opacity:0.5">
             <div class="config-card-header"><span class="config-card-title">Discord</span><span class="badge" style="border-color:var(--ink-faint);color:var(--ink-faint)">Coming Soon</span></div>
@@ -1177,7 +1191,7 @@
 let config = { accounts: [], agents: [], strategies: [], models: [] };
 let historyState = { sandboxes: [], chatSessions: [], chatMessages: [], selectedChatId: null, loaded: false };
 let selectedSandboxId = null;
-let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases: {}, permissions: {}, slack: {} };
+let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases: {}, permissions: {}, slack: {}, alphadesk: {} };
 const authToken = new URLSearchParams(window.location.search).get('token') || '';
 let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
@@ -1276,13 +1290,14 @@ async function refreshSelectedSandboxConfig() {
       heartbeatPhases: phaseData.phases || data.heartbeatPhases || {},
       permissions: data.permissions || {},
       slack: data.slack || {},
+      alphadesk: data.sandbox?.plugins?.alphadesk || {},
     };
     if (data.state) {
       updateState({ ...data.state, sandboxId: sid });
     }
     renderHeartbeat();
     renderPermissions();
-    renderSlack();
+    renderSlack(); renderAlphaDesk();
     renderPromptPreview();
   } catch (e) {
     log('Sandbox config refresh failed: ' + e.message, 'error');
@@ -2185,7 +2200,7 @@ function renderAll() {
   renderSandboxSelector();
   renderSandboxTabs();
   renderAgents(); renderStrategies(); renderAccounts();
-  renderHeartbeat(); renderPermissions(); renderSlack(); renderPromptPreview(); renderToolReference();
+  renderHeartbeat(); renderPermissions(); renderSlack(); renderAlphaDesk(); renderPromptPreview(); renderToolReference();
   document.getElementById('footer-model').textContent = ((sandboxScoped.agent?.model || config.activeModel || '--')).replace('claude-','').split('-202')[0];
 }
 
@@ -4002,6 +4017,30 @@ function startPolling() {
   ];
   // Run immediately on start
   updateClock(); updateHeartbeatClocks(); refreshPortfolio(); checkHealth(); checkAuth();
+}
+
+function renderAlphaDesk() {
+  const a = sandboxScoped.alphadesk || config.plugins?.alphadesk || {};
+  document.getElementById('alphadesk-enabled').checked = !!a.enabled;
+  document.getElementById('alphadesk-url').value = a.url || '';
+  document.getElementById('alphadesk-key').value = '';
+  const b = document.getElementById('alphadesk-badge');
+  b.textContent = a.enabled && a.url ? 'Enabled' : 'Disabled';
+  b.style.color = a.enabled && a.url ? 'var(--success)' : 'var(--ink-faint)';
+}
+let _alphaTimer = null;
+function saveAlphaDeskConfig() {
+  clearTimeout(_alphaTimer); _alphaTimer = setTimeout(async () => {
+    const body = { enabled: document.getElementById('alphadesk-enabled').checked, url: document.getElementById('alphadesk-url').value.trim() };
+    const key = document.getElementById('alphadesk-key').value.trim(); if (key) body.apiKey = key;
+    const sid = getEffectiveSandboxId(); if (sid) body.sandboxId = sid;
+    await fetch('/api/plugins/alphadesk', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    await refreshSelectedSandboxConfig();
+  }, 400);
+}
+async function testAlphaDesk() {
+  const el = document.getElementById('alphadesk-test-result'); el.textContent = 'Testing...';
+  try { const sid = getEffectiveSandboxId(); const r = await fetch('/api/plugins/alphadesk/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sid?{sandboxId:sid}:{})}); const d=await r.json(); el.textContent=d.ok?'Connection OK':(d.error||'Failed'); el.style.color=d.ok?'var(--success)':'var(--error)'; } catch(e) { el.textContent='Failed'; el.style.color='var(--error)'; }
 }
 function stopPolling() {
   _pollIntervals.forEach(id => clearInterval(id));

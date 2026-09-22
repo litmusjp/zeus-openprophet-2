@@ -9,6 +9,8 @@ import (
 	"prophet-trader/models"
 	"prophet-trader/services"
 	"testing"
+
+	"gorm.io/gorm"
 )
 
 type cancelTestStorage struct {
@@ -23,7 +25,7 @@ func (s *cancelTestStorage) GetOrder(orderID string) (*interfaces.Order, error) 
 	if s.order != nil && s.order.ID == orderID {
 		return s.order, nil
 	}
-	return nil, nil
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (s *cancelTestStorage) GetOrderByClientOrderID(clientOrderID string) (*interfaces.Order, error) {

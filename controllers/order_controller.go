@@ -22,6 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
 func newClientOrderID() (string, error) {
@@ -650,8 +651,12 @@ func (oc *OrderController) cancelOrder(orderID string) error {
 		persistedOrder, lookupErr = oc.storageService.GetOrderByClientOrderID(orderID)
 	} else {
 		persistedOrder, lookupErr = oc.storageService.GetOrder(orderID)
-		if lookupErr != nil || persistedOrder == nil {
+		if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			brokerLookupErr := lookupErr
 			persistedOrder, lookupErr = oc.storageService.GetOrderByClientOrderID(orderID)
+			if lookupErr != nil || persistedOrder == nil {
+				lookupErr = brokerLookupErr
+			}
 		}
 	}
 	if lookupErr != nil {
@@ -668,6 +673,9 @@ func (oc *OrderController) cancelOrder(orderID string) error {
 		persistedOrder.TenantID != currentIdentity.TenantID ||
 		persistedOrder.SandboxID != currentIdentity.SandboxID {
 		return fmt.Errorf("cancel rejected: order belongs to a different execution identity")
+	}
+	if strings.EqualFold(strings.TrimSpace(persistedOrder.Status), "planned_for_next_session") && strings.TrimSpace(persistedOrder.ID) == "" {
+		return &services.PlannedIntentConflictError{ClientOrderID: persistedOrder.ClientOrderID}
 	}
 
 	if err := oc.tradingService.CancelOrder(ctx, orderID); err != nil {
@@ -775,6 +783,11 @@ func (oc *OrderController) HandleCancelOrder(c *gin.Context) {
 	}
 
 	if err := oc.CancelOrderWithCapability(orderID, c.GetHeader("X-OpenProphet-Operator-Token")); err != nil {
+		var plannedConflict *services.PlannedIntentConflictError
+		if errors.As(err, &plannedConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "planned_intent_not_broker_visible", "category": "planned_intent_conflict", "details": plannedConflict.Error(), "retryable": false})
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}

@@ -130,6 +130,11 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
     attempts: attempt,
     retryable,
   };
+  const responseDetail = lastError?.response?.data;
+  if (responseDetail && typeof responseDetail === 'object' && !Array.isArray(responseDetail)) {
+    Object.assign(detail, responseDetail);
+    detail.http_status = status || null;
+  }
   const err = new Error(`Trading bot request failed: ${JSON.stringify(detail)}`);
   err.diagnostics = detail;
   throw err;

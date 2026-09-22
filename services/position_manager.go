@@ -468,13 +468,13 @@ func (pm *PositionManager) ensureCloseReady() error {
 func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceManagedPositionRequest) (*ManagedPosition, error) {
 
 	if req == nil {
-		return nil, fmt.Errorf("managed position request is required")
+		return nil, &ManagedRequestError{Err: fmt.Errorf("managed position request is required")}
 	}
 	if err := pm.ensureReady(); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(req.ClientOrderID) == "" {
-		return nil, fmt.Errorf("client_order_id is required for managed entries so retries can be reconciled")
+		return nil, &ManagedRequestError{Err: fmt.Errorf("client_order_id is required for managed entries so retries can be reconciled")}
 	}
 	pm.mu.RLock()
 	for _, existing := range pm.positions {
@@ -492,13 +492,13 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 
 	// Validate request
 	if err := pm.validateRequest(req); err != nil {
-		return nil, fmt.Errorf("invalid request: %w", err)
+		return nil, &ManagedRequestError{Err: fmt.Errorf("invalid request: %w", err)}
 	}
 
 	// Get current price for calculations
 	currentPrice, err := pm.getCurrentPrice(ctx, req.Symbol)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current price: %w", err)
+		return nil, &ManagedAvailabilityError{Err: fmt.Errorf("failed to get current price: %w", err)}
 	}
 
 	// Calculate position parameters
@@ -2630,16 +2630,25 @@ func positiveFinite(value float64) bool {
 }
 
 func (pm *PositionManager) getCurrentPrice(ctx context.Context, symbol string) (float64, error) {
+	if pm.dataService == nil {
+		return 0, fmt.Errorf("market data service is unavailable")
+	}
 	quote, err := pm.dataService.GetLatestQuote(ctx, symbol)
 	if err != nil {
 		return 0, err
+	}
+	if quote == nil {
+		return 0, fmt.Errorf("market data returned no quote")
 	}
 
 	if quote.AskPrice > 0 {
 		return quote.AskPrice, nil
 	}
 
-	return quote.BidPrice, nil
+	if quote.BidPrice > 0 {
+		return quote.BidPrice, nil
+	}
+	return 0, fmt.Errorf("market data returned no usable bid or ask price")
 }
 
 func (pm *PositionManager) calculateQuantity(allocation, price float64) float64 {

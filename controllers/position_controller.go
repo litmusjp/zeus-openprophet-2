@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"prophet-trader/services"
 
@@ -33,9 +34,22 @@ func (pmc *PositionManagementController) HandlePlaceManagedPosition(c *gin.Conte
 
 	position, err := pmc.positionManager.PlaceManagedPosition(c.Request.Context(), &req)
 	if err != nil {
+		var requestErr *services.ManagedRequestError
+		if errors.As(err, &requestErr) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_managed_position_request", "category": "invalid_request", "details": requestErr.Error(), "retryable": false})
+			return
+		}
+		var availabilityErr *services.ManagedAvailabilityError
+		if errors.As(err, &availabilityErr) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "managed_position_unavailable", "category": "market_data_unavailable", "details": availabilityErr.Error(), "retryable": true})
+			return
+		}
+		if services.IsSubmissionUncertain(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "managed_submission_uncertain", "category": "submission_uncertain", "details": err.Error(), "retryable": false})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to place managed position",
-			"details": err.Error(),
+			"error": "managed_position_failed", "category": "internal_error", "details": err.Error(), "retryable": false,
 		})
 		return
 	}

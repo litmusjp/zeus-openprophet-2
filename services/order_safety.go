@@ -72,6 +72,45 @@ type SubmissionUncertainError struct {
 	Result *interfaces.OrderResult
 }
 
+// ManagedRequestError identifies a request that is invalid before any broker interaction.
+type ManagedRequestError struct{ Err error }
+
+func (e *ManagedRequestError) Error() string {
+	if e == nil || e.Err == nil {
+		return "invalid managed position request"
+	}
+	return e.Err.Error()
+}
+func (e *ManagedRequestError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// ManagedAvailabilityError identifies a quote/market-data failure before submission.
+type ManagedAvailabilityError struct{ Err error }
+
+func (e *ManagedAvailabilityError) Error() string {
+	if e == nil || e.Err == nil {
+		return "managed market data is unavailable"
+	}
+	return e.Err.Error()
+}
+func (e *ManagedAvailabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// PlannedIntentConflictError prevents an application-level planned intent from being mistaken for a broker-visible order.
+type PlannedIntentConflictError struct{ ClientOrderID string }
+
+func (e *PlannedIntentConflictError) Error() string {
+	return fmt.Sprintf("cancel conflict: planned intent %q has no broker order ID and cannot be canceled at the broker", e.ClientOrderID)
+}
+
 func (e *SubmissionUncertainError) Error() string {
 	if e == nil || e.Err == nil {
 		return "submission_uncertain: broker submission result is unknown"

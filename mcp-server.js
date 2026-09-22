@@ -72,7 +72,7 @@ async function getTradingBotUrl() {
 let _tradingBotUrl = TRADING_BOT_URL;
 let _lastPortCheck = 0;
 
-async function callTradingBot(endpoint, method = 'GET', data = null) {
+async function callTradingBot(endpoint, method = 'GET', data = null, options = {}) {
   const safe = method === 'GET' || endpoint === '/options/assessment';
   const maxAttempts = safe ? 3 : 1;
   const started = Date.now();
@@ -113,6 +113,8 @@ async function callTradingBot(endpoint, method = 'GET', data = null) {
     } catch (error) {
       lastError = error;
       const status = error?.response?.status || 0;
+      if (options.returnAvailability && status === 503 && error?.response?.data?.category) return error.response.data;
+      if (options.returnValidation && status === 422 && error?.response?.data) return error.response.data;
       const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
       if (!retryable || attempt >= maxAttempts) break;
       await new Promise(resolve => setTimeout(resolve, Math.min(100 * (2 ** (attempt - 1)), 750)));
@@ -880,7 +882,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         description: 'Request deterministic AlphaDesk assessment for the exact proposed options trade. Assessment-only and not broker authorization.',
         inputSchema: {
           type: 'object', properties: {
-            symbol: {type:'string'}, underlying: {type:'string'}, quantity: {type:'number'}, side: {type:'string', enum:['buy','sell']}, position_intent: {type:'string', enum:['buy_to_open','buy_to_close','sell_to_open','sell_to_close']}, order_type: {type:'string', enum:['market','limit']}, limit_price: {type:'number'}, market_scanner_features: {type:'object'},
+            symbol: {type:'string'}, underlying: {type:'string'}, quantity: {type:'number'}, side: {type:'string', enum:['buy','sell']}, position_intent: {type:'string', enum:['buy_to_open','buy_to_close','sell_to_open','sell_to_close']}, order_type: {type:'string', enum:['market','limit']}, limit_price: {type:'number'}, strategy_type: {type:'string'}, legs: {type:'array'}, max_loss: {type:'number'}, greeks: {type:'object'}, market_evidence_at: {type:'string'}, observed_at: {type:'string'}, expires_at: {type:'string'}, market_scanner_features: {type:'object'},
           }, required: ['symbol','underlying','quantity','side','position_intent','order_type'],
         },
       },
@@ -1885,7 +1887,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'assess_options_strategy': {
-        const data = await callTradingBot('/options/assessment', 'POST', { symbol: args.symbol, underlying: args.underlying, qty: args.quantity, side: args.side, position_intent: args.position_intent, type: args.order_type, ...(args.limit_price !== undefined && {limit_price: args.limit_price}), ...(args.market_scanner_features && {market_scanner_features: args.market_scanner_features}) });
+        const data = await callTradingBot('/options/assessment', 'POST', { symbol: args.symbol, underlying: args.underlying, qty: args.quantity, side: args.side, position_intent: args.position_intent, type: args.order_type, ...(args.limit_price !== undefined && {limit_price: args.limit_price}), ...(args.strategy_type && {strategy_type: args.strategy_type}), ...(args.legs && {legs: args.legs}), ...(args.max_loss !== undefined && {max_loss: args.max_loss}), ...(args.greeks && {greeks: args.greeks}), ...(args.market_evidence_at && {market_evidence_at: args.market_evidence_at}), ...(args.observed_at && {observed_at: args.observed_at}), ...(args.expires_at && {expires_at: args.expires_at}), ...(args.market_scanner_features && {market_scanner_features: args.market_scanner_features}) }, { returnValidation: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
@@ -1925,7 +1927,7 @@ ${allNews.map((article, i) =>
 
         if (params.toString()) endpoint += `?${params.toString()}`;
 
-        const data = await callTradingBot(endpoint);
+        const data = await callTradingBot(endpoint, 'GET', null, { returnAvailability: true });
         return {
           content: [
             {

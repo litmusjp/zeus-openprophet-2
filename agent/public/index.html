@@ -2123,7 +2123,7 @@ const TOOL_REFERENCE = {
     cancel_order: 'Cancels an open order by broker order ID.',
   },
   Options: {
-    assess_options_strategy: 'Returns a deterministic AlphaDesk PASS/FAIL/unavailable result and signal score for the exact proposed trade. Assessment-only; not broker authorization.',
+    assess_options_strategy: 'Returns a deterministic AlphaDesk PASS/FAIL/unavailable result and signal score for the exact proposed trade; it always resolves to PASS, FAIL, or UNAVAILABLE, with a nullable score only without scanner features. Assessment-only; not broker authorization. chain market_closed means wait; provider_unavailable means do not trade.',
     place_options_order: 'Submits an options order with contract, side, quantity, and pricing details.',
     get_options_positions: 'Lists current options positions.',
     get_options_position: 'Reads one options position by symbol or contract.',

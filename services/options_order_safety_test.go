@@ -21,6 +21,17 @@ type fakeMarketClock struct {
 	err   error
 }
 
+func readyAssessmentOrder(order *interfaces.OptionsOrder) *interfaces.OptionsOrder {
+	quoted := time.Now().Add(-time.Second)
+	delta, gamma, theta, vega := 0.5, 0.1, -0.2, 0.3
+	order.AssessmentLegs = []interfaces.AlphaDeskAssessmentLeg{{Symbol: order.Symbol, Side: order.Side, Quantity: 1, Price: *order.LimitPrice, Bid: 0.9, Ask: 1.1, QuoteSize: 10, QuotedAt: quoted, Delta: &delta, Gamma: &gamma, Theta: &theta, Vega: &vega}}
+	order.StrategyType = "SINGLE_LEG_OPTION"
+	order.AssessmentMaxLoss = func() *float64 { v := 100.0; return &v }()
+	order.AssessmentGreeks = map[string]float64{"delta": delta, "gamma": gamma, "theta": theta, "vega": vega}
+	order.MarketEvidenceAt, order.ObservedAt, order.AssessmentExpiresAt = quoted, time.Now(), time.Now().Add(time.Minute)
+	return order
+}
+
 func (f fakeMarketClock) GetClock() (*alpaca.Clock, error) {
 	return f.clock, f.err
 }
@@ -217,7 +228,7 @@ func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
 			return &alpaca.Order{ID: "retry-1", Status: "accepted", Qty: decimalPtr(decimal.NewFromInt(1)), Symbol: "TSLA251219C00400000", Side: alpaca.Buy, Type: alpaca.Limit, TimeInForce: alpaca.Day}, nil
 		},
 	}
-	order := &interfaces.OptionsOrder{ClientOrderID: "op-retry", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)}
+	order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "op-retry", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)})
 	_, _ = service.PlaceOptionsOrder(context.Background(), order)
 	_, _ = service.PlaceOptionsOrder(context.Background(), order)
 	if alphaCalls != 2 {
@@ -244,10 +255,10 @@ func TestOpeningOptionsFailsClosedWhenAlphaDeskUnavailable(t *testing.T) {
 			alphaDesk:         &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
 			placeOrderFn:      func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { calls++; return nil, nil },
 		}
-		_, err := service.PlaceOptionsOrder(context.Background(), &interfaces.OptionsOrder{
+		_, err := service.PlaceOptionsOrder(context.Background(), readyAssessmentOrder(&interfaces.OptionsOrder{
 			ClientOrderID: "op-no-alpha", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
 			Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
-		})
+		}))
 		if err == nil || !strings.Contains(err.Error(), "AlphaDesk assessment unavailable") || calls != 0 {
 			t.Fatalf("err=%v broker calls=%d; enabled AlphaDesk outage did not fail closed", err, calls)
 		}

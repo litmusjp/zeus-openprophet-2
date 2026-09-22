@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,59 @@ import (
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
 )
+
+func readyAlphaRequest() AlphaDeskAssessmentRequest {
+	quoted := time.Date(2026, 9, 22, 1, 0, 0, 0, time.UTC)
+	d, g, th, v := 0.5, 0.1, -0.2, 0.3
+	return AlphaDeskAssessmentRequest{UnderlyingSymbol: "AAPL", StrategyType: "SINGLE_LEG_OPTION", Side: "buy", Quantity: 1, LimitPrice: 1.25, Legs: []interfaces.AlphaDeskAssessmentLeg{{Symbol: "AAPL260116C00200000", Side: "buy", Quantity: 1, Price: 1.25, Bid: 1.2, Ask: 1.3, QuoteSize: 10, QuotedAt: quoted, Delta: &d, Gamma: &g, Theta: &th, Vega: &v}}, MaxLoss: 125, Greeks: map[string]float64{"delta": d, "gamma": g, "theta": th, "vega": v}, MarketEvidenceAt: quoted, ObservedAt: quoted.Add(time.Second), ExpiresAt: quoted.Add(time.Minute), TradeFingerprint: "fp"}
+}
+
+func TestAlphaDeskAssessmentUsesExactContractAndMapsLiveResponse(t *testing.T) {
+	var got map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"pass":true,"decision":"PASS","assessment_id":"a-1","market_scanner_signal_score":72.5,"policy_snapshot":{"minimum_signal_score":"65"},"policy_version":"v1","market_evidence_at":"2026-09-22T01:00:00Z","observed_at":"2026-09-22T01:00:01Z","expires_at":"2026-09-22T01:01:00Z","paper_only":true,"human_approval_required":true,"execution_allowed":false}`))
+	}))
+	defer ts.Close()
+	c := &AlphaDeskClient{Enabled: true, URL: ts.URL, APIKey: "secret", HTTP: ts.Client(), Now: time.Now}
+	a, err := c.Assess(context.Background(), readyAlphaRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"underlying_symbol", "strategy_type", "side", "quantity", "limit_price", "legs", "max_loss", "greeks", "market_evidence_at", "observed_at", "expires_at"} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("outbound request missing %q: %#v", key, got)
+		}
+	}
+	if _, ok := got["symbol"]; ok {
+		t.Fatal("legacy symbol field leaked into AlphaDesk request")
+	}
+	if a.SignalScore == nil || *a.SignalScore != 72.5 || a.Threshold == nil || *a.Threshold != 65 {
+		t.Fatalf("mapped assessment = %#v", a)
+	}
+}
+
+func TestAlphaDesk422IsValidationNotGatewayFailure(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnprocessableEntity) }))
+	defer ts.Close()
+	c := &AlphaDeskClient{Enabled: true, URL: ts.URL, APIKey: "secret", HTTP: ts.Client(), Now: time.Now}
+	_, err := c.Assess(context.Background(), readyAlphaRequest())
+	var validation *AlphaDeskValidationError
+	if !errors.As(err, &validation) || validation.Status != http.StatusUnprocessableEntity {
+		t.Fatalf("err=%T %v, want typed 422 validation", err, err)
+	}
+}
+
+func TestAlphaDeskMissingEvidenceIsStructuredUnavailable(t *testing.T) {
+	c := &AlphaDeskClient{Enabled: true, URL: "http://localhost:1", APIKey: "secret", HTTP: http.DefaultClient, Now: time.Now}
+	_, err := c.AssessForTrade(context.Background(), models.DurableIdentity{}, &interfaces.OptionsOrder{Underlying: "AAPL"}, nil)
+	var unavailable *AlphaDeskUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("err=%T %v, want typed unavailable", err, err)
+	}
+}
 
 func testAssessment(fp, decision string, score, threshold float64, expiry time.Time) *interfaces.AlphaDeskAssessment {
 	return &interfaces.AlphaDeskAssessment{AssessmentID: "a-1", Decision: decision, SignalScore: &score, Threshold: &threshold, ExpiresAt: expiry, Fingerprint: fp}

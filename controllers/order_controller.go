@@ -1071,16 +1071,23 @@ func (oc *OrderController) HandleGetBars(c *gin.Context) {
 
 // OptionsOrderRequest represents an options order request
 type OptionsOrderRequest struct {
-	ClientOrderID         string   `json:"client_order_id"`
-	Symbol                string   `json:"symbol" binding:"required"`
-	Underlying            string   `json:"underlying" binding:"required"`
-	Qty                   float64  `json:"qty" binding:"required,gt=0"`
-	Side                  string   `json:"side" binding:"required,oneof=buy sell"`
-	PositionIntent        string   `json:"position_intent" binding:"required,oneof=buy_to_open buy_to_close sell_to_open sell_to_close"`
-	Type                  string   `json:"type"`          // "market", "limit"
-	TimeInForce           string   `json:"time_in_force"` // options require "day"
-	LimitPrice            *float64 `json:"limit_price,omitempty"`
-	MarketScannerFeatures any      `json:"market_scanner_features,omitempty"`
+	ClientOrderID         string                              `json:"client_order_id"`
+	Symbol                string                              `json:"symbol" binding:"required"`
+	Underlying            string                              `json:"underlying" binding:"required"`
+	Qty                   float64                             `json:"qty" binding:"required,gt=0"`
+	Side                  string                              `json:"side" binding:"required,oneof=buy sell"`
+	PositionIntent        string                              `json:"position_intent" binding:"required,oneof=buy_to_open buy_to_close sell_to_open sell_to_close"`
+	Type                  string                              `json:"type"`          // "market", "limit"
+	TimeInForce           string                              `json:"time_in_force"` // options require "day"
+	LimitPrice            *float64                            `json:"limit_price,omitempty"`
+	MarketScannerFeatures any                                 `json:"market_scanner_features,omitempty"`
+	StrategyType          string                              `json:"strategy_type,omitempty"`
+	AssessmentLegs        []interfaces.AlphaDeskAssessmentLeg `json:"legs,omitempty"`
+	MaxLoss               *float64                            `json:"max_loss,omitempty"`
+	Greeks                map[string]float64                  `json:"greeks,omitempty"`
+	MarketEvidenceAt      time.Time                           `json:"market_evidence_at,omitempty"`
+	ObservedAt            time.Time                           `json:"observed_at,omitempty"`
+	ExpiresAt             time.Time                           `json:"expires_at,omitempty"`
 }
 
 func optionalFloatEqual(a, b *float64) bool {
@@ -1334,11 +1341,29 @@ func (oc *OrderController) AssessOptionsStrategy(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "AlphaDesk assessment is unavailable"})
 		return
 	}
-	order := &interfaces.OptionsOrder{Symbol: req.Symbol, Underlying: req.Underlying, Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice}
+	order := &interfaces.OptionsOrder{Symbol: req.Symbol, Underlying: req.Underlying, Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, StrategyType: req.StrategyType, AssessmentLegs: req.AssessmentLegs, AssessmentMaxLoss: req.MaxLoss, AssessmentGreeks: req.Greeks, MarketEvidenceAt: req.MarketEvidenceAt, ObservedAt: req.ObservedAt, AssessmentExpiresAt: req.ExpiresAt}
 	a, err := assessor.AssessOptionsStrategy(c.Request.Context(), order, req.MarketScannerFeatures)
 	if err != nil {
+		var unavailable *services.AlphaDeskUnavailableError
+		if errors.As(err, &unavailable) {
+			assessment := &interfaces.AlphaDeskAssessment{Decision: "UNAVAILABLE", QualificationStatus: "unavailable", Fingerprint: ""}
+			oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("AlphaDesk assessment unavailable")
+			c.JSON(200, assessment)
+			return
+		}
+		var validation *services.AlphaDeskValidationError
+		if errors.As(err, &validation) {
+			oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("AlphaDesk rejected assessment validation")
+			c.JSON(validation.Status, gin.H{"status": "invalid_request", "category": "provider_validation", "error": err.Error()})
+			return
+		}
+		var configuration *services.AlphaDeskConfigurationError
+		if errors.As(err, &configuration) {
+			c.JSON(503, gin.H{"status": "unavailable", "category": "configuration", "error": configuration.Error()})
+			return
+		}
 		oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("AlphaDesk assessment failed")
-		c.JSON(502, gin.H{"error": err.Error()})
+		c.JSON(503, gin.H{"status": "unavailable", "category": "provider_unavailable", "error": "AlphaDesk assessment is unavailable"})
 		return
 	}
 	if a == nil {

@@ -14,6 +14,8 @@ type OptionContract struct {
 	Premium           float64   // Current premium/price
 	Bid               float64
 	Ask               float64
+	BidSize           int64
+	AskSize           int64
 	QuoteTimestamp    time.Time
 	Volume            int64
 	OpenInterest      int64

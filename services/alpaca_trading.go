@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,7 +51,56 @@ func (s *AlpacaTradingService) AssessOptionsStrategy(ctx context.Context, order 
 	if s.alphaDesk == nil || !s.alphaDesk.Enabled {
 		return nil, nil
 	}
+	if order == nil {
+		return nil, &AlphaDeskUnavailableError{Reason: "options assessment order is unavailable"}
+	}
+	if len(order.AssessmentLegs) == 0 {
+		if err := s.enrichOptionsAssessment(ctx, order); err != nil {
+			return nil, err
+		}
+	}
 	return s.alphaDesk.AssessForTrade(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, features)
+}
+
+func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, order *interfaces.OptionsOrder) error {
+	if order.LimitPrice == nil || *order.LimitPrice <= 0 || order.Qty < 1 || order.Qty > 10 || math.Trunc(order.Qty) != order.Qty {
+		return &AlphaDeskUnavailableError{Reason: "valid limit price and integer quantity are required for market evidence"}
+	}
+	_, expiration, _, _, ok := parseOCCOptionSymbol(order.Symbol)
+	if !ok {
+		return &AlphaDeskUnavailableError{Reason: "option contract evidence is unavailable"}
+	}
+	chain, err := s.GetOptionsChain(ctx, order.Underlying, expiration)
+	if err != nil {
+		return &AlphaDeskUnavailableError{Reason: "broker option evidence is unavailable", Err: err}
+	}
+	var contract *interfaces.OptionContract
+	for _, candidate := range chain {
+		if strings.EqualFold(candidate.Symbol, order.Symbol) {
+			contract = candidate
+			break
+		}
+	}
+	if contract == nil || contract.Ask <= 0 || contract.Bid < 0 || contract.QuoteTimestamp.IsZero() || contract.BidSize <= 0 || contract.AskSize <= 0 {
+		return &AlphaDeskUnavailableError{Reason: "fresh broker quote evidence is unavailable"}
+	}
+	quoteSize := float64(contract.AskSize)
+	if strings.EqualFold(order.Side, "sell") {
+		quoteSize = float64(contract.BidSize)
+	}
+	leg := interfaces.AlphaDeskAssessmentLeg{Symbol: contract.Symbol, Side: strings.ToLower(order.Side), Quantity: int(order.Qty), Price: *order.LimitPrice, Bid: contract.Bid, Ask: contract.Ask, QuoteSize: quoteSize, QuotedAt: contract.QuoteTimestamp, Delta: &contract.Delta, Gamma: &contract.Gamma, Theta: &contract.Theta, Vega: &contract.Vega}
+	order.AssessmentLegs = []interfaces.AlphaDeskAssessmentLeg{leg}
+	order.StrategyType = "SINGLE_LEG_OPTION"
+	order.AssessmentGreeks = map[string]float64{"delta": contract.Delta * order.Qty, "gamma": contract.Gamma * order.Qty, "theta": contract.Theta * order.Qty, "vega": contract.Vega * order.Qty}
+	if strings.HasSuffix(strings.ToLower(order.PositionIntent), "_to_open") && strings.EqualFold(order.Side, "buy") {
+		loss := *order.LimitPrice * order.Qty * 100
+		order.AssessmentMaxLoss = &loss
+	} else {
+		return &AlphaDeskUnavailableError{Reason: "maximum loss cannot be established truthfully for this option intent"}
+	}
+	now := time.Now()
+	order.MarketEvidenceAt, order.ObservedAt, order.AssessmentExpiresAt = contract.QuoteTimestamp, now, now.Add(2*time.Minute)
+	return nil
 }
 
 // SetLocalOrderProvider binds the durable local order store to the broker risk snapshot.
@@ -911,6 +961,8 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 			StrikePrice:       strike,
 			Bid:               data.LatestQuote.Bid,
 			Ask:               data.LatestQuote.Ask,
+			BidSize:           int64(data.LatestQuote.BidSize),
+			AskSize:           int64(data.LatestQuote.AskSize),
 			QuoteTimestamp:    data.LatestQuote.T,
 			Premium:           data.LatestTrade.Price,
 			Volume:            int64(data.LatestTrade.Size),

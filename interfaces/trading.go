@@ -227,6 +227,29 @@ type OptionsOrder struct {
 	MarketScannerFeatures any                              `json:"-"`
 	AlphaDeskAssessment   *AlphaDeskAssessment             `json:"-"`
 	AssessmentAuditSink   func(*AlphaDeskAssessment) error `json:"-"`
+	AssessmentLegs        []AlphaDeskAssessmentLeg         `json:"-"`
+	AssessmentMaxLoss     *float64                         `json:"-"`
+	AssessmentGreeks      map[string]float64               `json:"-"`
+	MarketEvidenceAt      time.Time                        `json:"-"`
+	ObservedAt            time.Time                        `json:"-"`
+	AssessmentExpiresAt   time.Time                        `json:"-"`
+	StrategyType          string                           `json:"-"`
+}
+
+type AlphaDeskAssessmentLeg struct {
+	Symbol       string    `json:"symbol"`
+	Side         string    `json:"side"`
+	Quantity     int       `json:"quantity"`
+	Price        float64   `json:"price"`
+	Bid          float64   `json:"bid"`
+	Ask          float64   `json:"ask"`
+	QuoteSize    float64   `json:"quote_size"`
+	QuotedAt     time.Time `json:"quoted_at"`
+	OpenInterest *int64    `json:"open_interest,omitempty"`
+	Delta        *float64  `json:"delta,omitempty"`
+	Gamma        *float64  `json:"gamma,omitempty"`
+	Theta        *float64  `json:"theta,omitempty"`
+	Vega         *float64  `json:"vega,omitempty"`
 }
 
 type AlphaDeskAssessment struct {
@@ -240,6 +263,11 @@ type AlphaDeskAssessment struct {
 	Fingerprint           string    `json:"trade_fingerprint"`
 	HumanApprovalRequired bool      `json:"human_approval_required"`
 	ExecutionAllowed      bool      `json:"execution_allowed"`
+	Pass                  bool      `json:"pass"`
+	FailedCheckCodes      []string  `json:"failed_check_codes,omitempty"`
+	PolicyVersion         string    `json:"policy_version,omitempty"`
+	MarketEvidenceAt      time.Time `json:"market_evidence_at,omitempty"`
+	ObservedAt            time.Time `json:"observed_at,omitempty"`
 	QualificationStatus   string    `json:"qualification_status"`
 	Qualified             bool      `json:"qualified"`
 }

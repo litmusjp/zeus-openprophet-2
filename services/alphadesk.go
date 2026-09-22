@@ -6,16 +6,25 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
 )
+
+func derefFloat(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
 
 // AlphaDeskClient is deliberately assessment-only. It never authorizes a
 // broker order and never includes the API key in an error or response.
@@ -50,17 +59,52 @@ func ValidateAlphaDeskURL(raw string) error {
 }
 
 type AlphaDeskAssessmentRequest struct {
-	AccountID             string   `json:"account_id"`
-	SandboxID             string   `json:"sandbox_id"`
-	Symbol                string   `json:"symbol"`
-	Underlying            string   `json:"underlying"`
-	Side                  string   `json:"side"`
-	PositionIntent        string   `json:"position_intent"`
-	Quantity              float64  `json:"quantity"`
-	LimitPrice            *float64 `json:"limit_price,omitempty"`
-	TradeFingerprint      string   `json:"trade_fingerprint"`
-	MarketScannerFeatures any      `json:"market_scanner_features,omitempty"`
+	UnderlyingSymbol      string                              `json:"underlying_symbol"`
+	StrategyType          string                              `json:"strategy_type"`
+	Side                  string                              `json:"side"`
+	Quantity              int                                 `json:"quantity"`
+	LimitPrice            float64                             `json:"limit_price"`
+	Legs                  []interfaces.AlphaDeskAssessmentLeg `json:"legs"`
+	MaxLoss               float64                             `json:"max_loss"`
+	Greeks                map[string]float64                  `json:"greeks"`
+	MarketEvidenceAt      time.Time                           `json:"market_evidence_at"`
+	ObservedAt            time.Time                           `json:"observed_at"`
+	ExpiresAt             time.Time                           `json:"expires_at"`
+	MarketScannerFeatures any                                 `json:"market_scanner_features,omitempty"`
+	TradeFingerprint      string                              `json:"-"`
 }
+
+type AlphaDeskUnavailableError struct {
+	Reason string
+	Err    error
+}
+
+type AlphaDeskConfigurationError struct{ Reason string }
+
+func (e *AlphaDeskConfigurationError) Error() string { return e.Reason }
+
+func (e *AlphaDeskUnavailableError) Error() string {
+	if e == nil {
+		return "AlphaDesk evidence is unavailable"
+	}
+	return e.Reason
+}
+func (e *AlphaDeskUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+type AlphaDeskValidationError struct {
+	Status int
+	Err    error
+}
+
+func (e *AlphaDeskValidationError) Error() string {
+	return fmt.Sprintf("AlphaDesk rejected the assessment request (HTTP %d)", e.Status)
+}
+func (e *AlphaDeskValidationError) Unwrap() error { return e.Err }
 
 func OptionsTradeFingerprint(identity models.DurableIdentity, symbol, underlying, side, intent string, qty float64, limit *float64) string {
 	v := struct {
@@ -78,10 +122,10 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 		return nil, fmt.Errorf("AlphaDesk hard gate is disabled")
 	}
 	if c.URL == "" || c.APIKey == "" {
-		return nil, fmt.Errorf("AlphaDesk is not configured")
+		return nil, &AlphaDeskConfigurationError{Reason: "AlphaDesk is not configured"}
 	}
 	if err := ValidateAlphaDeskURL(c.URL); err != nil {
-		return nil, err
+		return nil, &AlphaDeskConfigurationError{Reason: err.Error()}
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -98,17 +142,26 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 		return httpReq, nil
 	})
 	if err != nil {
+		var providerErr *ProviderError
+		if errors.As(err, &providerErr) && providerErr.Status == http.StatusUnprocessableEntity {
+			return nil, &AlphaDeskValidationError{Status: providerErr.Status, Err: err}
+		}
 		return nil, fmt.Errorf("AlphaDesk assessment unavailable: %w", err)
 	}
 	var v struct {
 		AssessmentID          string    `json:"assessment_id"`
 		Decision              string    `json:"decision"`
 		Pass                  *bool     `json:"pass"`
-		SignalScore           *float64  `json:"signal_score"`
+		SignalScore           *float64  `json:"market_scanner_signal_score"`
+		LegacySignalScore     *float64  `json:"signal_score"`
 		Threshold             *float64  `json:"execution_threshold"`
 		Threshold2            *float64  `json:"threshold"`
-		Policy                any       `json:"policy"`
-		Evidence              any       `json:"evidence"`
+		Policy                any       `json:"policy_snapshot"`
+		Evidence              any       `json:"checks"`
+		FailedCheckCodes      []string  `json:"failed_check_codes"`
+		PolicyVersion         string    `json:"policy_version"`
+		MarketEvidenceAt      time.Time `json:"market_evidence_at"`
+		ObservedAt            time.Time `json:"observed_at"`
 		ExpiresAt             time.Time `json:"expires_at"`
 		HumanApprovalRequired bool      `json:"human_approval_required"`
 		ExecutionAllowed      bool      `json:"execution_allowed"`
@@ -127,7 +180,37 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 	if threshold == nil {
 		threshold = v.Threshold2
 	}
-	return &interfaces.AlphaDeskAssessment{AssessmentID: v.AssessmentID, Decision: v.Decision, SignalScore: v.SignalScore, Threshold: threshold, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed}, nil
+	if v.SignalScore == nil {
+		v.SignalScore = v.LegacySignalScore
+	}
+	if threshold == nil {
+		threshold = policyThreshold(v.Policy)
+	}
+	return &interfaces.AlphaDeskAssessment{AssessmentID: v.AssessmentID, Decision: v.Decision, Pass: v.Pass != nil && *v.Pass, SignalScore: v.SignalScore, Threshold: threshold, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed, FailedCheckCodes: v.FailedCheckCodes, PolicyVersion: v.PolicyVersion, MarketEvidenceAt: v.MarketEvidenceAt, ObservedAt: v.ObservedAt}, nil
+}
+
+func policyThreshold(policy any) *float64 {
+	b, err := json.Marshal(policy)
+	if err != nil {
+		return nil
+	}
+	var raw map[string]any
+	if json.Unmarshal(b, &raw) != nil {
+		return nil
+	}
+	for _, key := range []string{"minimum_signal_score", "execution_threshold", "threshold"} {
+		if value, ok := raw[key]; ok {
+			switch n := value.(type) {
+			case float64:
+				return &n
+			case string:
+				if parsed, err := strconv.ParseFloat(n, 64); err == nil {
+					return &parsed
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func assessmentMetadata(a *interfaces.AlphaDeskAssessment) string {
@@ -177,8 +260,14 @@ func (c *AlphaDeskClient) AssessAndValidateWithAudit(ctx context.Context, identi
 }
 
 func (c *AlphaDeskClient) assessAndValidate(ctx context.Context, identity models.DurableIdentity, order *interfaces.OptionsOrder, features any, audit func(*interfaces.AlphaDeskAssessment) error) (*interfaces.AlphaDeskAssessment, error) {
+	if order == nil {
+		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
+	}
 	fp := OptionsTradeFingerprint(identity, order.Symbol, order.Underlying, order.Side, order.PositionIntent, order.Qty, order.LimitPrice)
-	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{AccountID: identity.BrokerAccountID, SandboxID: identity.SandboxID, Symbol: order.Symbol, Underlying: order.Underlying, Side: order.Side, PositionIntent: order.PositionIntent, Quantity: order.Qty, LimitPrice: order.LimitPrice, TradeFingerprint: fp, MarketScannerFeatures: features})
+	if order == nil || len(order.AssessmentLegs) == 0 || order.AssessmentMaxLoss == nil || len(order.AssessmentGreeks) == 0 || order.MarketEvidenceAt.IsZero() || order.ObservedAt.IsZero() || order.AssessmentExpiresAt.IsZero() {
+		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
+	}
+	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, MarketScannerFeatures: features})
 	if err != nil {
 		return nil, err
 	}
@@ -194,8 +283,14 @@ func (c *AlphaDeskClient) assessAndValidate(ctx context.Context, identity models
 }
 
 func (c *AlphaDeskClient) AssessForTrade(ctx context.Context, identity models.DurableIdentity, order *interfaces.OptionsOrder, features any) (*interfaces.AlphaDeskAssessment, error) {
+	if order == nil {
+		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
+	}
 	fp := OptionsTradeFingerprint(identity, order.Symbol, order.Underlying, order.Side, order.PositionIntent, order.Qty, order.LimitPrice)
-	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{AccountID: identity.BrokerAccountID, SandboxID: identity.SandboxID, Symbol: order.Symbol, Underlying: order.Underlying, Side: order.Side, PositionIntent: order.PositionIntent, Quantity: order.Qty, LimitPrice: order.LimitPrice, TradeFingerprint: fp, MarketScannerFeatures: features})
+	if order == nil || len(order.AssessmentLegs) == 0 || order.AssessmentMaxLoss == nil || len(order.AssessmentGreeks) == 0 || order.MarketEvidenceAt.IsZero() || order.ObservedAt.IsZero() || order.AssessmentExpiresAt.IsZero() {
+		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
+	}
+	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, MarketScannerFeatures: features})
 	if err != nil {
 		return nil, err
 	}

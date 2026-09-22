@@ -1,7 +1,9 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -191,6 +193,78 @@ type placeOrderRecorder struct {
 	placeErr error
 }
 
+type closedSessionTradingService struct {
+	*reconciliationTradingService
+	nextOpen              time.Time
+	brokerSubmissionCalls int
+}
+
+func (s *closedSessionTradingService) PlaceOrder(context.Context, *interfaces.Order) (*interfaces.OrderResult, error) {
+	// The broker clock check rejects the order before the actual submission
+	// function is reached.
+	return nil, &services.MarketClosedError{NextOpen: s.nextOpen}
+}
+
+func TestClosedSessionBuyAndSellArePlannedWithAcceptedHTTPResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		side    string
+		handler func(*OrderController, *gin.Context)
+	}{
+		{name: "buy", side: "buy", handler: (*OrderController).HandleBuy},
+		{name: "sell", side: "sell", handler: (*OrderController).HandleSell},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer storage.Close()
+
+			nextOpen := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+			trading := &closedSessionTradingService{
+				reconciliationTradingService: &reconciliationTradingService{},
+				nextOpen:                     nextOpen,
+			}
+			controller := NewOrderController(trading, nil, storage)
+			clientOrderID := "equity-closed-" + tc.side
+			body := []byte(`{"symbol":"AAPL","qty":1,"type":"market","client_order_id":"` + clientOrderID + `"}`)
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/api/orders/"+tc.side, bytes.NewReader(body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+
+			tc.handler(controller, ctx)
+
+			if recorder.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusAccepted, recorder.Body.String())
+			}
+			var response interfaces.OrderResult
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("response JSON error = %v; body=%s", err, recorder.Body.String())
+			}
+			if response.Status != "planned_for_next_session" || response.ClientOrderID != clientOrderID || response.NextEligibleAt == nil || !response.NextEligibleAt.Equal(nextOpen) {
+				t.Fatalf("response = %#v, want planned status, stable client ID, and next eligible time", response)
+			}
+			expectedMessage := (&services.MarketClosedError{NextOpen: nextOpen}).Error()
+			if response.Message != expectedMessage {
+				t.Fatalf("response message = %q, want %q", response.Message, expectedMessage)
+			}
+
+			planned, err := storage.GetOrderByClientOrderID(clientOrderID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if planned == nil || planned.Status != "planned_for_next_session" || planned.ClientOrderID != clientOrderID || planned.NextEligibleAt == nil || !planned.NextEligibleAt.Equal(nextOpen) {
+				t.Fatalf("durable intent = %#v, want planned lifecycle with stable identity and next eligible time", planned)
+			}
+			if trading.brokerSubmissionCalls != 0 {
+				t.Fatalf("broker submission calls = %d, want 0", trading.brokerSubmissionCalls)
+			}
+		})
+	}
+}
+
 func (s *placeOrderRecorder) PlaceOrder(_ context.Context, o *interfaces.Order) (*interfaces.OrderResult, error) {
 	s.placed = o
 	if s.result == nil {
@@ -292,8 +366,12 @@ func TestSellRetryReloadsPlannedIntentRevision(t *testing.T) {
 
 	rec := &placeOrderRecorder{reconciliationTradingService: &reconciliationTradingService{}, placeErr: &services.MarketClosedError{NextOpen: nextOpen}}
 	oc := NewOrderController(rec, nil, storage)
-	if _, err := oc.Sell(context.Background(), SellRequest{Symbol: "AAPL", Qty: 2, Type: "market", ClientOrderID: intent.ClientOrderID}); err == nil {
-		t.Fatal("Sell() expected the closed-session error")
+	result, err := oc.Sell(context.Background(), SellRequest{Symbol: "AAPL", Qty: 2, Type: "market", ClientOrderID: intent.ClientOrderID})
+	if err != nil {
+		t.Fatalf("Sell() unexpected closed-session error: %v", err)
+	}
+	if result == nil || result.Status != "planned_for_next_session" || result.ClientOrderID != intent.ClientOrderID || result.NextEligibleAt == nil || !result.NextEligibleAt.Equal(nextOpen) {
+		t.Fatalf("Sell() result = %#v, want planned lifecycle response", result)
 	}
 	after, err := storage.GetOrderByClientOrderID(intent.ClientOrderID)
 	if err != nil {

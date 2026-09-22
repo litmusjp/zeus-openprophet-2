@@ -318,6 +318,24 @@ func (oc *OrderController) persistPlannedOrder(order *interfaces.Order, closedEr
 	return oc.storageService.SaveOrder(order)
 }
 
+func (oc *OrderController) plannedOrderResult(order *interfaces.Order, closedErr *services.MarketClosedError) *interfaces.OrderResult {
+	return &interfaces.OrderResult{
+		BrokerAccountID: order.BrokerAccountID,
+		PaperLive:       order.PaperLive,
+		TenantID:        order.TenantID,
+		SandboxID:       order.SandboxID,
+		Status:          "planned_for_next_session",
+		Message:         closedErr.Error(),
+		ClientOrderID:   order.ClientOrderID,
+		Symbol:          order.Symbol,
+		Side:            order.Side,
+		Qty:             order.Qty,
+		Type:            order.Type,
+		TimeInForce:     order.TimeInForce,
+		NextEligibleAt:  order.NextEligibleAt,
+	}
+}
+
 func (oc *OrderController) refreshOrderRevision(order *interfaces.Order) error {
 	if order == nil || strings.TrimSpace(order.ClientOrderID) == "" {
 		return fmt.Errorf("order identity is required")
@@ -401,7 +419,7 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 			if planErr := oc.persistPlannedOrder(order, closedErr); planErr != nil {
 				return nil, &services.SubmissionUncertainError{Err: fmt.Errorf("closed-session intent persistence failed: %w", planErr)}
 			}
-			return nil, err
+			return oc.plannedOrderResult(order, closedErr), nil
 		}
 		order.Status = "submit_failed"
 		if services.IsSubmissionUncertain(err) {
@@ -508,7 +526,7 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 			if planErr := oc.persistPlannedOrder(order, closedErr); planErr != nil {
 				return nil, &services.SubmissionUncertainError{Err: fmt.Errorf("closed-session intent persistence failed: %w", planErr)}
 			}
-			return nil, err
+			return oc.plannedOrderResult(order, closedErr), nil
 		}
 		order.Status = "submit_failed"
 		if services.IsSubmissionUncertain(err) {
@@ -748,7 +766,11 @@ func (oc *OrderController) HandleBuy(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, result)
+	status := http.StatusOK
+	if result != nil && result.Status == "planned_for_next_session" {
+		status = http.StatusAccepted
+	}
+	c.JSON(status, result)
 }
 
 // HandleSell handles HTTP sell requests
@@ -768,7 +790,11 @@ func (oc *OrderController) HandleSell(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, result)
+	status := http.StatusOK
+	if result != nil && result.Status == "planned_for_next_session" {
+		status = http.StatusAccepted
+	}
+	c.JSON(status, result)
 }
 
 // HandleCancelOrder handles HTTP cancel order requests

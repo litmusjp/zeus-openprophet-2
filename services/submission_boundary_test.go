@@ -22,7 +22,7 @@ func TestSubmissionBoundaryEquityAndOptions(t *testing.T) {
 		}},
 		{name: "options", place: func(s *AlpacaTradingService) (*interfaces.OrderResult, error) {
 			price := 1.0
-			return s.PlaceOptionsOrder(context.Background(), &interfaces.OptionsOrder{ClientOrderID: "options-boundary", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: &price})
+			return s.PlaceOptionsOrder(context.Background(), &interfaces.OptionsOrder{ClientOrderID: "options-boundary", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "sell", PositionIntent: "sell_to_close", Type: "limit", TimeInForce: "day", LimitPrice: &price})
 		}},
 	}
 	for _, tt := range tests {

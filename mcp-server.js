@@ -73,7 +73,14 @@ let _tradingBotUrl = TRADING_BOT_URL;
 let _lastPortCheck = 0;
 
 async function callTradingBot(endpoint, method = 'GET', data = null) {
-  try {
+  const safe = method === 'GET' || endpoint === '/options/assessment';
+  const maxAttempts = safe ? 3 : 1;
+  const started = Date.now();
+  let attempt = 0;
+  let lastError;
+  while (attempt < maxAttempts && Date.now() - started < 3000) {
+    attempt += 1;
+    try {
     // Refresh port every 30 seconds
     const now = Date.now();
     if (now - _lastPortCheck > 30000) {
@@ -83,6 +90,7 @@ async function callTradingBot(endpoint, method = 'GET', data = null) {
     const config = {
       method,
       url: `${_tradingBotUrl}/api/v1${endpoint}`,
+      timeout: Math.max(1, 3000 - (Date.now() - started)),
       headers: {
         'Content-Type': 'application/json',
         'X-OpenProphet-Sandbox-ID': OPENPROPHET_SANDBOX_ID,
@@ -100,11 +108,29 @@ async function callTradingBot(endpoint, method = 'GET', data = null) {
     if (data) {
       config.data = data;
     }
-    const response = await axios(config);
-    return response.data;
-  } catch (error) {
-    throw new Error(`Trading bot error: ${error.message}`);
+      const response = await axios(config);
+      return response.data;
+    } catch (error) {
+      lastError = error;
+      const status = error?.response?.status || 0;
+      const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
+      if (!retryable || attempt >= maxAttempts) break;
+      await new Promise(resolve => setTimeout(resolve, Math.min(100 * (2 ** (attempt - 1)), 750)));
+    }
   }
+  const status = lastError?.response?.status || 0;
+  const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
+  const detail = {
+    endpoint,
+    tool: endpoint.replace(/^\//, '').split('/')[0] || 'trading_bot',
+    status: status || null,
+    category: status ? 'upstream_http' : 'transport',
+    attempts: attempt,
+    retryable,
+  };
+  const err = new Error(`Trading bot request failed: ${JSON.stringify(detail)}`);
+  err.diagnostics = detail;
+  throw err;
 }
 
 async function autoStoreSetup(args, action) {
@@ -2372,11 +2398,12 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
+    const diagnostics = error?.diagnostics;
     return {
       content: [
         {
           type: 'text',
-          text: `Error: ${error.message}`,
+          text: diagnostics ? JSON.stringify({ error: error.message, diagnostics }) : `Error: ${error.message}`,
         },
       ],
       isError: true,

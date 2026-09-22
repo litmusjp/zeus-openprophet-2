@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -88,23 +87,18 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 	if err != nil {
 		return nil, fmt.Errorf("encode AlphaDesk assessment: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL+"/api/v1/desk/strategy-assessments", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create AlphaDesk assessment request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-AlphaDesk-API-Key", c.APIKey)
-	resp, err := c.HTTP.Do(httpReq)
+	endpoint := c.URL + "/api/v1/desk/strategy-assessments"
+	raw, _, err := DoProviderRequest(ctx, c.HTTP, endpoint, true, func(reqCtx context.Context) (*http.Request, error) {
+		httpReq, reqErr := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("X-AlphaDesk-API-Key", c.APIKey)
+		return httpReq, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("AlphaDesk assessment unavailable: %w", err)
-	}
-	defer resp.Body.Close()
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if readErr != nil {
-		return nil, fmt.Errorf("read AlphaDesk assessment: %w", readErr)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("AlphaDesk assessment unavailable (HTTP %d)", resp.StatusCode)
 	}
 	var v struct {
 		AssessmentID          string    `json:"assessment_id"`

@@ -850,25 +850,18 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 		if pageToken != "" {
 			endpoint += "&page_token=" + url.QueryEscape(pageToken)
 		}
-		req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("APCA-API-KEY-ID", s.apiKey)
-		req.Header.Set("APCA-API-SECRET-KEY", s.apiSecret)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch options chain: %w", err)
-		}
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("failed to read response: %w", readErr)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("options chain API error (HTTP %d): %s", resp.StatusCode, string(body))
+		body, _, requestErr := DoProviderRequest(ctx, &http.Client{Timeout: 30 * time.Second}, endpoint, true, func(reqCtx context.Context) (*http.Request, error) {
+			retryReq, retryErr := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+			if retryErr != nil {
+				return nil, retryErr
+			}
+			retryReq.Header.Set("APCA-API-KEY-ID", s.apiKey)
+			retryReq.Header.Set("APCA-API-SECRET-KEY", s.apiSecret)
+			retryReq.Header.Set("Accept", "application/json")
+			return retryReq, nil
+		})
+		if requestErr != nil {
+			return nil, fmt.Errorf("failed to fetch options chain: %w", requestErr)
 		}
 		var pageSnapshot alpacaOptionsSnapshot
 		if err := json.Unmarshal(body, &pageSnapshot); err != nil {

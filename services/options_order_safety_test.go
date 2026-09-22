@@ -225,6 +225,59 @@ func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
 	}
 }
 
+func TestOpeningOptionsFailsClosedWhenAlphaDeskUnavailable(t *testing.T) {
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer alpha.Close()
+
+	t.Run("enabled but unavailable blocks before broker submission", func(t *testing.T) {
+		calls := 0
+		service := &AlpacaTradingService{
+			clockReader:       fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+			logger:            logrus.New(),
+			submissionMarker:  func(string) error { return nil },
+			expectedAccountID: "acct",
+			expectedPaper:     true,
+			expectedTenantID:  "tenant",
+			expectedSandboxID: "sandbox",
+			alphaDesk:         &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+			placeOrderFn:      func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { calls++; return nil, nil },
+		}
+		_, err := service.PlaceOptionsOrder(context.Background(), &interfaces.OptionsOrder{
+			ClientOrderID: "op-no-alpha", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+			Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+		})
+		if err == nil || !strings.Contains(err.Error(), "AlphaDesk assessment unavailable") || calls != 0 {
+			t.Fatalf("err=%v broker calls=%d; enabled AlphaDesk outage did not fail closed", err, calls)
+		}
+	})
+
+	t.Run("disabled does not add a new block", func(t *testing.T) {
+		calls := 0
+		service := &AlpacaTradingService{
+			clockReader:       fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+			logger:            logrus.New(),
+			submissionMarker:  func(string) error { return nil },
+			expectedAccountID: "acct",
+			expectedPaper:     true,
+			expectedTenantID:  "tenant",
+			expectedSandboxID: "sandbox",
+			placeOrderFn: func(req alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+				calls++
+				return &alpaca.Order{ID: "disabled-alpha", ClientOrderID: req.ClientOrderID, Status: "accepted", Qty: req.Qty, Symbol: req.Symbol, Side: req.Side, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, PositionIntent: req.PositionIntent}, nil
+			},
+		}
+		_, err := service.PlaceOptionsOrder(context.Background(), &interfaces.OptionsOrder{
+			ClientOrderID: "op-disabled-alpha", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+			Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+		})
+		if err != nil || calls != 1 {
+			t.Fatalf("err=%v broker calls=%d; disabled AlphaDesk added a new block", err, calls)
+		}
+	})
+}
+
 func TestOrderResultDistinguishesAcknowledgementFromFill(t *testing.T) {
 	accepted := orderResultFromAlpacaOrder(nil, &alpaca.Order{
 		ID:     "broker-accepted",

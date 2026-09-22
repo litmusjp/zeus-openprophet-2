@@ -1330,20 +1330,35 @@ func (oc *OrderController) AssessOptionsStrategy(c *gin.Context) {
 		AssessOptionsStrategy(context.Context, *interfaces.OptionsOrder, any) (*interfaces.AlphaDeskAssessment, error)
 	})
 	if !ok {
+		oc.logger.WithFields(oc.auditIdentityFields()).Warn("AlphaDesk assessment unavailable")
 		c.JSON(503, gin.H{"error": "AlphaDesk assessment is unavailable"})
 		return
 	}
 	order := &interfaces.OptionsOrder{Symbol: req.Symbol, Underlying: req.Underlying, Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice}
 	a, err := assessor.AssessOptionsStrategy(c.Request.Context(), order, req.MarketScannerFeatures)
 	if err != nil {
+		oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("AlphaDesk assessment failed")
 		c.JSON(502, gin.H{"error": err.Error()})
 		return
 	}
 	if a == nil {
+		oc.logger.WithFields(oc.auditIdentityFields()).Warn("AlphaDesk assessment returned no decision")
 		c.JSON(503, gin.H{"error": "AlphaDesk hard gate is disabled"})
 		return
 	}
+	oc.logger.WithFields(oc.auditIdentityFields()).WithFields(logrus.Fields{"assessment_id": a.AssessmentID, "decision": a.Decision, "fingerprint": a.Fingerprint}).Info("AlphaDesk assessment decision")
 	c.JSON(200, a)
+}
+
+func (oc *OrderController) auditIdentityFields() logrus.Fields {
+	fields := logrus.Fields{}
+	if reader, ok := oc.storageService.(durableIdentityReader); ok {
+		identity := reader.DurableIdentity()
+		fields["broker_account_id"] = identity.BrokerAccountID
+		fields["sandbox_id"] = identity.SandboxID
+		fields["paper_live"] = identity.PaperLive
+	}
+	return fields
 }
 
 // GetOptionsPosition handles GET /api/options/position/:symbol
@@ -1417,9 +1432,35 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 
 	chain, err := oc.tradingService.GetOptionsChain(ctx, symbol, expiration)
 	if err != nil {
-		oc.logger.WithError(err).Error("Failed to get options chain")
-		c.JSON(500, gin.H{"error": err.Error()})
+		oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Error("Failed to get options chain")
+		diagnostic := gin.H{"status": "unavailable", "category": "provider_unavailable", "endpoint": "options_chain", "error": "options chain is unavailable"}
+		var providerErr *services.ProviderError
+		if errors.As(err, &providerErr) {
+			diagnostic["endpoint"] = providerErr.Endpoint
+			diagnostic["upstream_status"] = providerErr.Status
+			diagnostic["attempts"] = providerErr.Attempts
+			diagnostic["retryable"] = providerErr.Retryable
+		}
+		c.JSON(503, diagnostic)
 		return
+	}
+	// An empty pre-open snapshot is not an empty trading opportunity. Consult
+	// the broker clock so callers can distinguish market-closed/unavailable
+	// from a valid post-open empty result; never fabricate contracts or fall
+	// back to equities for an options request.
+	if len(chain) == 0 {
+		if clockService, ok := oc.tradingService.(marketClockService); ok {
+			clock, clockErr := clockService.GetMarketClock(c.Request.Context())
+			if clockErr != nil {
+				oc.logger.WithError(clockErr).Warn("Options chain empty and broker clock unavailable")
+				c.JSON(503, gin.H{"status": "unavailable", "category": "market_state_unavailable", "endpoint": "options_chain", "error": "options chain availability could not be determined"})
+				return
+			}
+			if clock != nil && !clock.IsOpen {
+				c.JSON(503, gin.H{"status": "market_closed", "category": "market_closed", "endpoint": "options_chain", "next_open": clock.NextOpen, "error": "options chain is unavailable while the regular market is closed"})
+				return
+			}
+		}
 	}
 
 	// Apply filters for token efficiency
@@ -1488,6 +1529,7 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{
+		"status":     "available",
 		"symbol":     symbol,
 		"expiration": expiration.Format("2006-01-02"),
 		"total":      len(chain),

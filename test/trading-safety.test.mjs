@@ -106,6 +106,18 @@ test('ledger applies option multiplier to padded OCC symbols', () => {
   assert.equal(trades[0].assetType, 'option');
 });
 
+test('ledger reconciles two broker-confirmed XLF close fills without duplicating either leg', () => {
+  const trades = buildTradeLedger([
+    { ID: 'xlf-entry', ClientOrderID: 'xlf-entry-client', Symbol: 'XLF', Side: 'buy', Status: 'filled', FilledQty: 100, FilledAvgPrice: 40, FilledAt: '2026-09-18T13:00:00Z' },
+    { ID: 'xlf-close-43', ClientOrderID: 'xlf-close-43-client', Symbol: 'XLF', Side: 'sell', Status: 'filled', FilledQty: 43, FilledAvgPrice: 42, FilledAt: '2026-09-18T14:00:00Z' },
+    { ID: 'xlf-close-57', ClientOrderID: 'xlf-close-57-client', Symbol: 'XLF', Side: 'sell', Status: 'filled', FilledQty: 57, FilledAvgPrice: 41, FilledAt: '2026-09-18T15:00:00Z' },
+  ]);
+  assert.equal(trades.length, 2);
+  assert.deepEqual(trades.map(trade => trade.quantity).sort((a, b) => a - b), [43, 57]);
+  assert.equal(trades.reduce((sum, trade) => sum + trade.pnl, 0), 143);
+  assert.deepEqual([...new Set(trades.map(trade => trade.orderId))].sort(), ['xlf-close-43', 'xlf-close-57']);
+});
+
 test('zero maxOrderValue leaves permitted stock orders uncapped', () => {
   assert.doesNotThrow(() => checkPermissions('place_sell_order', {
     symbol: 'XLF', quantity: 10, limit_price: 100,

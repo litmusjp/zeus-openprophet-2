@@ -33,6 +33,42 @@ type optionsResultTradingService struct {
 	result *interfaces.OrderResult
 }
 
+type emptyOptionsChainTradingService struct {
+	*reconciliationTradingService
+	clock *interfaces.MarketClock
+}
+
+func (s *emptyOptionsChainTradingService) GetMarketClock(context.Context) (*interfaces.MarketClock, error) {
+	return s.clock, nil
+}
+
+func TestOptionsChainEmptyResultDistinguishesClosedFromValidEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open bool
+		want int
+	}{
+		{name: "pre-market", open: false, want: http.StatusServiceUnavailable},
+		{name: "post-open empty", open: true, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trading := &emptyOptionsChainTradingService{
+				reconciliationTradingService: &reconciliationTradingService{},
+				clock:                        &interfaces.MarketClock{IsOpen: tc.open},
+			}
+			controller := NewOrderController(trading, nil, nil)
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Params = gin.Params{{Key: "symbol", Value: "XLF"}}
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/options/chain/XLF", nil)
+			controller.GetOptionsChain(ctx)
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, tc.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func (s *optionsResultTradingService) PlaceOptionsOrder(context.Context, *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
 	result := *s.result
 	return &result, nil

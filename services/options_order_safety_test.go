@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -30,6 +31,13 @@ func readyAssessmentOrder(order *interfaces.OptionsOrder) *interfaces.OptionsOrd
 	order.AssessmentGreeks = map[string]float64{"delta": delta, "gamma": gamma, "theta": theta, "vega": vega}
 	order.MarketEvidenceAt, order.ObservedAt, order.AssessmentExpiresAt = quoted, time.Now(), time.Now().Add(time.Minute)
 	return order
+}
+
+func freshAssessmentChainProvider(context.Context, string, time.Time) ([]*interfaces.OptionContract, error) {
+	return []*interfaces.OptionContract{{
+		Symbol: "TSLA251219C00400000", Bid: 0.9, Ask: 1.1, BidSize: 10, AskSize: 10,
+		QuoteTimestamp: time.Now().Add(-time.Second), Delta: 0.5, Gamma: 0.1, Theta: -0.2, Vega: 0.3,
+	}}, nil
 }
 
 func (f fakeMarketClock) GetClock() (*alpaca.Clock, error) {
@@ -194,10 +202,11 @@ func TestRiskReducingOptionsExitDoesNotCallAlphaDesk(t *testing.T) {
 	defer alpha.Close()
 	brokerCalls := 0
 	service := &AlpacaTradingService{
-		clockReader:      fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
-		logger:           logrus.New(),
-		submissionMarker: func(string) error { return nil },
-		alphaDesk:        &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		clockReader:          fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:               logrus.New(),
+		submissionMarker:     func(string) error { return nil },
+		alphaDesk:            &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		optionsChainProvider: freshAssessmentChainProvider,
 		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
 			brokerCalls++
 			return &alpaca.Order{ID: "close-1", Status: "accepted", Qty: decimalPtr(decimal.NewFromInt(1)), Symbol: "TSLA251219C00400000", Side: alpaca.Sell, Type: alpaca.Limit, TimeInForce: alpaca.Day}, nil
@@ -220,10 +229,11 @@ func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
 	}))
 	defer alpha.Close()
 	service := &AlpacaTradingService{
-		clockReader:      fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
-		logger:           logrus.New(),
-		submissionMarker: func(string) error { return nil },
-		alphaDesk:        &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		clockReader:          fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:               logrus.New(),
+		submissionMarker:     func(string) error { return nil },
+		alphaDesk:            &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		optionsChainProvider: freshAssessmentChainProvider,
 		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
 			return &alpaca.Order{ID: "retry-1", Status: "accepted", Qty: decimalPtr(decimal.NewFromInt(1)), Symbol: "TSLA251219C00400000", Side: alpaca.Buy, Type: alpaca.Limit, TimeInForce: alpaca.Day}, nil
 		},
@@ -245,15 +255,16 @@ func TestOpeningOptionsFailsClosedWhenAlphaDeskUnavailable(t *testing.T) {
 	t.Run("enabled but unavailable blocks before broker submission", func(t *testing.T) {
 		calls := 0
 		service := &AlpacaTradingService{
-			clockReader:       fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
-			logger:            logrus.New(),
-			submissionMarker:  func(string) error { return nil },
-			expectedAccountID: "acct",
-			expectedPaper:     true,
-			expectedTenantID:  "tenant",
-			expectedSandboxID: "sandbox",
-			alphaDesk:         &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
-			placeOrderFn:      func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { calls++; return nil, nil },
+			clockReader:          fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+			logger:               logrus.New(),
+			submissionMarker:     func(string) error { return nil },
+			expectedAccountID:    "acct",
+			expectedPaper:        true,
+			expectedTenantID:     "tenant",
+			expectedSandboxID:    "sandbox",
+			alphaDesk:            &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+			optionsChainProvider: freshAssessmentChainProvider,
+			placeOrderFn:         func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { calls++; return nil, nil },
 		}
 		_, err := service.PlaceOptionsOrder(context.Background(), readyAssessmentOrder(&interfaces.OptionsOrder{
 			ClientOrderID: "op-no-alpha", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
@@ -287,6 +298,124 @@ func TestOpeningOptionsFailsClosedWhenAlphaDeskUnavailable(t *testing.T) {
 			t.Fatalf("err=%v broker calls=%d; disabled AlphaDesk added a new block", err, calls)
 		}
 	})
+}
+
+func TestOpeningOptionsRefreshesInjectedEvidenceBeforeAlphaDesk(t *testing.T) {
+	var assessedLeg interfaces.AlphaDeskAssessmentLeg
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request AlphaDeskAssessmentRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request.Legs) != 1 {
+			t.Fatalf("AlphaDesk received %d legs, want one fresh single-leg record", len(request.Legs))
+		}
+		assessedLeg = request.Legs[0]
+		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	defer alpha.Close()
+
+	brokerCalls := 0
+	service := &AlpacaTradingService{
+		clockReader:       fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:            logrus.New(),
+		submissionMarker:  func(string) error { return nil },
+		expectedAccountID: "acct",
+		expectedPaper:     true,
+		expectedTenantID:  "tenant",
+		expectedSandboxID: "sandbox",
+		alphaDesk:         &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		optionsChainProvider: func(context.Context, string, time.Time) ([]*interfaces.OptionContract, error) {
+			quoteTime := time.Now().Add(-time.Second)
+			return []*interfaces.OptionContract{{
+				Symbol: "TSLA251219C00400000", Bid: 2.10, Ask: 2.20, BidSize: 7, AskSize: 8,
+				QuoteTimestamp: quoteTime, Delta: 0.72, Gamma: 0.12, Theta: -0.31, Vega: 0.44,
+			}}, nil
+		},
+		placeOrderFn: func(req alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+			brokerCalls++
+			return &alpaca.Order{ID: "fresh-1", ClientOrderID: req.ClientOrderID, Status: "accepted", Qty: req.Qty, Symbol: req.Symbol, Side: req.Side, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, PositionIntent: req.PositionIntent}, nil
+		},
+	}
+	order := readyAssessmentOrder(&interfaces.OptionsOrder{
+		ClientOrderID: "stable-client-id", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+		Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+	})
+	order.AssessmentLegs[0].Bid = 0.01
+	order.AssessmentLegs[0].Delta = floatPtr(-0.99)
+
+	_, err := service.PlaceOptionsOrder(context.Background(), order)
+	if err != nil || brokerCalls != 1 {
+		t.Fatalf("PlaceOptionsOrder() err=%v broker calls=%d, want successful submission", err, brokerCalls)
+	}
+	if assessedLeg.Bid != 2.10 || assessedLeg.Ask != 2.20 || assessedLeg.Delta == nil || *assessedLeg.Delta != 0.72 {
+		t.Fatalf("AlphaDesk received stale/injected evidence: %#v", assessedLeg)
+	}
+	if order.ClientOrderID != "stable-client-id" {
+		t.Fatalf("client order ID changed to %q", order.ClientOrderID)
+	}
+}
+
+func TestOpeningOptionsBlocksBeforeBrokerWhenFreshEnrichmentFails(t *testing.T) {
+	alphaCalls := 0
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		alphaCalls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer alpha.Close()
+
+	brokerCalls := 0
+	service := &AlpacaTradingService{
+		clockReader:       fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:            logrus.New(),
+		submissionMarker:  func(string) error { return nil },
+		expectedAccountID: "acct",
+		expectedPaper:     true,
+		expectedTenantID:  "tenant",
+		expectedSandboxID: "sandbox",
+		alphaDesk:         &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		optionsChainProvider: func(context.Context, string, time.Time) ([]*interfaces.OptionContract, error) {
+			return nil, errors.New("broker chain unavailable")
+		},
+		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+			brokerCalls++
+			return nil, nil
+		},
+	}
+
+	_, err := service.PlaceOptionsOrder(context.Background(), readyAssessmentOrder(&interfaces.OptionsOrder{
+		ClientOrderID: "op-enrichment-fail", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+		Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+	}))
+	var unavailable *AlphaDeskUnavailableError
+	if !errors.As(err, &unavailable) || brokerCalls != 0 || alphaCalls != 0 {
+		t.Fatalf("err=%T %v broker calls=%d AlphaDesk calls=%d; want structured enrichment failure before submission", err, err, brokerCalls, alphaCalls)
+	}
+}
+
+func TestOpeningOptionsRejectsUnsupportedMultiLegEvidence(t *testing.T) {
+	brokerCalls := 0
+	service := &AlpacaTradingService{
+		clockReader:          fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:               logrus.New(),
+		submissionMarker:     func(string) error { return nil },
+		alphaDesk:            &AlphaDeskClient{Enabled: true},
+		optionsChainProvider: freshAssessmentChainProvider,
+		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+			brokerCalls++
+			return nil, nil
+		},
+	}
+	order := readyAssessmentOrder(&interfaces.OptionsOrder{
+		ClientOrderID: "op-multileg", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+		Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+	})
+	order.AssessmentLegs = append(order.AssessmentLegs, order.AssessmentLegs[0])
+	_, err := service.PlaceOptionsOrder(context.Background(), order)
+	var unavailable *AlphaDeskUnavailableError
+	if !errors.As(err, &unavailable) || !strings.Contains(err.Error(), "multi-leg") || brokerCalls != 0 {
+		t.Fatalf("err=%v broker calls=%d; want structured multi-leg unavailable before submission", err, brokerCalls)
+	}
 }
 
 func TestOrderResultDistinguishesAcknowledgementFromFill(t *testing.T) {

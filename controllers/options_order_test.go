@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,24 @@ type optionsResultTradingService struct {
 type emptyOptionsChainTradingService struct {
 	*reconciliationTradingService
 	clock *interfaces.MarketClock
+}
+
+type recordingOptionsTradingService struct {
+	*reconciliationTradingService
+	identity    *interfaces.OptionsOrder
+	result      *interfaces.OrderResult
+	auditCalled bool
+}
+
+func (s *recordingOptionsTradingService) PlaceOptionsOrder(_ context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
+	s.identity = order
+	assessment := &interfaces.AlphaDeskAssessment{AssessmentID: "assessment-controller-boundary", Decision: "PASS", Pass: true, Qualified: true}
+	s.auditCalled = true
+	if err := order.AssessmentAuditSink(assessment); err != nil {
+		return nil, err
+	}
+	result := *s.result
+	return &result, nil
 }
 
 func (s *emptyOptionsChainTradingService) GetMarketClock(context.Context) (*interfaces.MarketClock, error) {
@@ -117,6 +136,58 @@ func TestPlaceOptionsOrderValidatesProviderResultAgainstServerIdentity(t *testin
 				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, testCase.wantStatus, recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestPlaceOptionsOrderPassesStableIdentityFieldsAndAuditSinkToService(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	defer storage.Close()
+	identity := storage.DurableIdentity()
+	limit := 1.25
+	maxLoss := 42.0
+	observedAt := time.Date(2026, 9, 23, 13, 0, 0, 0, time.UTC)
+	trading := &recordingOptionsTradingService{
+		reconciliationTradingService: &reconciliationTradingService{},
+		result: &interfaces.OrderResult{
+			OrderID: "broker-boundary-1", Status: "accepted", ClientOrderID: "opt-boundary-1",
+			Symbol: "TSLA251219C00400000", Side: "buy", Qty: 2, Type: "limit", TimeInForce: "day", LimitPrice: &limit,
+			PositionIntent: "buy_to_open", Purpose: "entry", BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive,
+			TenantID: identity.TenantID, SandboxID: identity.SandboxID,
+		},
+	}
+	controller := NewOrderController(trading, nil, storage)
+	body := `{"client_order_id":"opt-boundary-1","symbol":"TSLA251219C00400000","underlying":"TSLA","qty":2,"side":"buy","position_intent":"buy_to_open","type":"limit","time_in_force":"day","limit_price":1.25,"strategy_type":"vertical","max_loss":42,"observed_at":"2026-09-23T13:00:00Z"}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/options/order", bytes.NewBufferString(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	controller.PlaceOptionsOrder(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	passed := trading.identity
+	if passed == nil {
+		t.Fatal("service did not receive an options order")
+	}
+	if !trading.auditCalled {
+		t.Fatal("service did not invoke the assessment audit sink")
+	}
+	if passed.ClientOrderID != "opt-boundary-1" || passed.Symbol != "TSLA251219C00400000" || passed.Underlying != "TSLA" || passed.Qty != 2 || passed.Side != "buy" || passed.PositionIntent != "buy_to_open" || passed.Type != "limit" || passed.TimeInForce != "day" || passed.LimitPrice == nil || *passed.LimitPrice != limit || passed.StrategyType != "vertical" || passed.AssessmentMaxLoss == nil || *passed.AssessmentMaxLoss != maxLoss || !passed.ObservedAt.Equal(observedAt) {
+		t.Fatalf("service received incomplete options order: %#v", passed)
+	}
+	if passed.AssessmentAuditSink == nil {
+		t.Fatal("service did not receive the assessment audit sink")
+	}
+	durable, err := storage.GetOrderByClientOrderID("opt-boundary-1")
+	if err != nil {
+		t.Fatalf("GetOrderByClientOrderID() error = %v", err)
+	}
+	if durable == nil || !strings.Contains(durable.Metadata, "assessment-controller-boundary") {
+		t.Fatalf("durable intent metadata = %#v, want assessment audit", durable)
 	}
 }
 

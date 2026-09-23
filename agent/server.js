@@ -1625,7 +1625,7 @@ app.get('/api/heartbeat/phases', (req, res) => {
   res.json({ phases: getPhaseTimeRanges() });
 });
 
-app.put('/api/heartbeat/phases', async (req, res) => {
+app.put('/api/heartbeat/phases', operatorAuthMiddleware, async (req, res) => {
   try {
     const { phase, start, end } = req.body || {};
     if (!phase) throw new Error('Phase is required');

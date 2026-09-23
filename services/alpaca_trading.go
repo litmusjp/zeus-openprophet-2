@@ -44,6 +44,7 @@ type AlpacaTradingService struct {
 	submissionMarker        func(string) error
 	managedSubmissionMarker func(string, string, string) error
 	alphaDesk               *AlphaDeskClient
+	optionsChainProvider    func(context.Context, string, time.Time) ([]*interfaces.OptionContract, error)
 }
 
 func (s *AlpacaTradingService) SetAlphaDeskClient(client *AlphaDeskClient) { s.alphaDesk = client }
@@ -63,6 +64,9 @@ func (s *AlpacaTradingService) AssessOptionsStrategy(ctx context.Context, order 
 }
 
 func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, order *interfaces.OptionsOrder) error {
+	if len(order.AssessmentLegs) > 1 {
+		return &AlphaDeskUnavailableError{Reason: "multi-leg option evidence is unavailable; only single-leg orders are supported"}
+	}
 	if order.LimitPrice == nil || *order.LimitPrice <= 0 || order.Qty < 1 || order.Qty > 10 || math.Trunc(order.Qty) != order.Qty {
 		return &AlphaDeskUnavailableError{Reason: "valid limit price and integer quantity are required for market evidence"}
 	}
@@ -818,6 +822,9 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	// This is the authorization boundary: fetch and validate fresh server-side
 	// evidence after all local checks and immediately before broker submission.
 	if strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil && s.alphaDesk.Enabled {
+		if err := s.enrichOptionsAssessment(ctx, order); err != nil {
+			return nil, err
+		}
 		assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, order.AssessmentAuditSink)
 		if err != nil {
 			return nil, err
@@ -891,6 +898,9 @@ type alpacaOptionsSnapshot struct {
 
 // GetOptionsChain retrieves the options chain for an underlying symbol
 func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying string, expiration time.Time) ([]*interfaces.OptionContract, error) {
+	if s.optionsChainProvider != nil {
+		return s.optionsChainProvider(ctx, underlying, expiration)
+	}
 	s.logger.WithFields(logrus.Fields{
 		"underlying": underlying,
 		"expiration": expiration,

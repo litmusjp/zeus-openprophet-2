@@ -84,7 +84,7 @@ export function checkPermissions(toolName, args = {}, perms = {}, now = new Date
   }
   // Require confirmation
   if (requireConfirmation) {
-    throw new Error('Order requires operator confirmation (requireConfirmation is enabled). Tell the operator what you want to do and wait for them to disable this setting or approve via the dashboard.');
+    throw new Error('Order requires operator approval (requireConfirmation is enabled). Stop and report that operator approval is required.');
   }
   // Max order value
   if (maxOrderValue > 0) {

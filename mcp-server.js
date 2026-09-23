@@ -11,6 +11,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { checkPermissions } from './permissions.js';
 import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
+import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
 
 // Configuration
 const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
@@ -1211,7 +1212,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'update_heartbeat_phase',
-        description: 'Update the time range for a heartbeat phase. Use get_heartbeat_phases to see current ranges.',
+        description: 'Operator-only raw phase-range update. Rejected when heartbeat intervals are forced; agents may read phases but must not mutate them.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1299,7 +1300,7 @@ const AGENT_URL = EXECUTION_START_ENABLED ? (process.env.AGENT_URL || 'http://lo
 // Match the agent API's server-owned fallback while retaining fail-closed
 // behavior when neither credential is configured.
 const AGENT_AUTH_TOKEN = EXECUTION_START_ENABLED ? (process.env.AGENT_AUTH_TOKEN || process.env.TRADING_BOT_TOKEN || '') : '';
-const OPERATOR_TOKEN = EXECUTION_START_ENABLED ? (process.env.OPERATOR_TOKEN || process.env.TRADING_BOT_OPERATOR_TOKEN || '') : '';
+const OPERATOR_TOKEN = EXECUTION_START_ENABLED ? (process.env.OPERATOR_TOKEN || '') : '';
 const AGENT_QUERY = { sandboxId: OPENPROPHET_SANDBOX_ID };
 const agentAxios = EXECUTION_START_ENABLED ? axios.create({
   headers: AGENT_AUTH_TOKEN ? {
@@ -2386,11 +2387,25 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
 
       case 'update_heartbeat_phase': {
         const { phase, start, end } = args;
-        await agentAxios.put(`${AGENT_URL}/api/heartbeat/phases`, {
-          phase,
-          start,
-          end,
+        const authorization = await authorizeAndUpdateHeartbeatPhase({
+          role: OPENPROPHET_ROLE,
+          operatorToken: OPERATOR_TOKEN,
+          getHeartbeatIntervalsForced: async () => {
+            const resp = await agentAxios.get(`${AGENT_URL}/api/sandboxes/${OPENPROPHET_SANDBOX_ID}/config`);
+            return resp.data?.sandbox?.heartbeat?.forceHeartbeatIntervals === true;
+          },
+          update: () => agentAxios.put(`${AGENT_URL}/api/heartbeat/phases`, {
+            phase,
+            start,
+            end,
+          }),
         });
+        if (!authorization.ok) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify(authorization) }],
+            isError: true,
+          };
+        }
         return {
           content: [{ type: 'text', text: `Updated phase "${phase}" time range. Changes take effect immediately.` }],
         };

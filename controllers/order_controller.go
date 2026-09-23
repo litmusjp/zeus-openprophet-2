@@ -1281,8 +1281,18 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	if req.TimeInForce == "" {
 		req.TimeInForce = "day"
 	}
+	clientOrderID := strings.TrimSpace(req.ClientOrderID)
+	if clientOrderID == "" {
+		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", "client_order_id is required; retries must reuse the original identity"))
+		return
+	}
+	if clientOrderID != req.ClientOrderID {
+		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", "client_order_id must not contain leading or trailing whitespace"))
+		return
+	}
 
 	order := &interfaces.OptionsOrder{
+		ClientOrderID:         clientOrderID,
 		Symbol:                req.Symbol,
 		Underlying:            req.Underlying,
 		Qty:                   req.Qty,
@@ -1292,23 +1302,21 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		TimeInForce:           req.TimeInForce,
 		LimitPrice:            req.LimitPrice,
 		MarketScannerFeatures: req.MarketScannerFeatures,
+		StrategyType:          req.StrategyType,
+		AssessmentLegs:        req.AssessmentLegs,
+		AssessmentMaxLoss:     req.MaxLoss,
+		AssessmentGreeks:      req.Greeks,
+		MarketEvidenceAt:      req.MarketEvidenceAt,
+		ObservedAt:            req.ObservedAt,
+		AssessmentExpiresAt:   req.ExpiresAt,
 	}
 	if err := services.ValidateOptionsOrder(order); err != nil {
 		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", err.Error()))
 		return
 	}
 
-	clientOrderID := strings.TrimSpace(req.ClientOrderID)
-	if clientOrderID == "" {
-		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", "client_order_id is required; retries must reuse the original identity"))
-		return
-	}
 	var existing *interfaces.Order
 	var err error
-	if strings.TrimSpace(clientOrderID) != clientOrderID {
-		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", "client_order_id must not contain leading or trailing whitespace"))
-		return
-	}
 	existing, err = oc.findLocalOrderByClientID(clientOrderID)
 	if err != nil {
 		oc.logger.WithError(err).Error("Failed to load existing options intent")
@@ -1340,8 +1348,6 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			return
 		}
 	}
-	order.ClientOrderID = clientOrderID
-
 	intent := &interfaces.Order{
 		ClientOrderID:  clientOrderID,
 		Symbol:         req.Symbol,
@@ -1362,12 +1368,14 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		}(),
 		SubmittedAt: time.Now(),
 	}
+	var auditMetadata string
 	order.AssessmentAuditSink = func(a *interfaces.AlphaDeskAssessment) error {
 		metadata, marshalErr := json.Marshal(a)
 		if marshalErr != nil {
 			return marshalErr
 		}
 		intent.Metadata = string(metadata)
+		auditMetadata = intent.Metadata
 		return oc.storageService.SaveOrder(intent)
 	}
 	if existing != nil {
@@ -1397,6 +1405,9 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	defer cancel()
 
 	result, err := oc.tradingService.PlaceOptionsOrder(ctx, order)
+	if intent.Metadata == "" {
+		intent.Metadata = auditMetadata
+	}
 	if refreshErr := oc.refreshOrderRevision(intent); refreshErr != nil {
 		c.JSON(500, oc.optionsResponseWithIdentity(intent, nil, "submission_uncertain", fmt.Sprintf("options order state could not be reloaded after submission attempt: %v", refreshErr)))
 		return
@@ -1484,6 +1495,9 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	result.ClientOrderID = clientOrderID
 	result = oc.optionsResponseWithIdentity(intent, result, result.Status, result.Message)
 	applyOrderResult(intent, result)
+	if auditMetadata != "" {
+		intent.Metadata = auditMetadata
+	}
 	if err := oc.storageService.SaveOrder(intent); err != nil {
 		intent.Status = "submission_uncertain"
 		oc.logger.WithError(err).Error("Failed to persist options order after broker submission")

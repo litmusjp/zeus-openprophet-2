@@ -462,6 +462,7 @@ func (s *LocalStorage) GetOrderByClientOrderID(clientOrderID string) (*interface
 		ExpiresAt:           dbOrder.ExpiresAt,
 		Revision:            dbOrder.Revision,
 		SubmissionAttempted: dbOrder.SubmissionAttempted,
+		Metadata:            dbOrder.Metadata,
 	}, nil
 }
 

@@ -232,10 +232,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_orders',
-        description: 'Get all orders (open, filled, cancelled)',
+        description: 'Get orders with an optional status filter. Defaults to all so planned intents and unresolved states remain visible.',
         inputSchema: {
           type: 'object',
-          properties: {},
+          properties: {
+            status: {
+              type: 'string',
+              description: 'Filter by existing order status; defaults to all.',
+              enum: ['all', 'active', 'planned_for_next_session', 'accepted', 'new', 'pending_new', 'open', 'filled', 'partially_filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done_for_day', 'replaced', 'submit_failed', 'submission_uncertain', 'risk_blocked', 'rejected_before_submission', 'planned_intent_not_broker_visible', 'market_closed', 'unavailable'],
+            },
+          },
         },
       },
       {
@@ -326,7 +332,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_managed_position',
-        description: 'Open a managed position with exactly one executable protection leg: one stop loss OR one take profit OR one supported partial-exit leg. Durable OCO is unavailable; stop loss and take profit must never be sent concurrently. Positive filled quantity is required for execution confirmation.',
+        description: 'Open a managed position with exactly one executable protection leg: one stop loss OR one take profit OR one supported partial-exit leg. A trailing stop is a modifier on the required stop-loss leg, not a second executable leg; it requires a positive trailing_percent. Durable OCO is unavailable; stop loss and take profit must never be sent concurrently. Positive filled quantity is required for execution confirmation.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -379,11 +385,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             trailing_stop: {
               type: 'boolean',
-              description: 'Enable trailing stop loss',
+              description: 'Enable trailing stop as a modifier on the required stop-loss leg',
             },
             trailing_percent: {
               type: 'number',
               description: 'Trailing stop percentage',
+              minimum: 0,
+              exclusiveMinimum: 0,
             },
             partial_exit: {
               type: 'object',
@@ -424,11 +432,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           oneOf: [
-            { required: ['stop_loss_price'], not: { anyOf: [{ required: ['take_profit_price'] }, { required: ['take_profit_percent'] }, { required: ['partial_exit'] }] } },
-            { required: ['stop_loss_percent'], not: { anyOf: [{ required: ['take_profit_price'] }, { required: ['take_profit_percent'] }, { required: ['partial_exit'] }] } },
-            { required: ['take_profit_price'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['partial_exit'] }] } },
-            { required: ['take_profit_percent'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['partial_exit'] }] } },
-            { required: ['partial_exit'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['take_profit_price'] }, { required: ['take_profit_percent'] }] } },
+            { required: ['stop_loss_price'], not: { anyOf: [{ required: ['stop_loss_percent'] }, { required: ['take_profit_price'] }, { required: ['take_profit_percent'] }, { required: ['partial_exit'] }] } },
+            { required: ['stop_loss_percent'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['take_profit_price'] }, { required: ['take_profit_percent'] }, { required: ['partial_exit'] }] } },
+            { required: ['take_profit_price'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['take_profit_percent'] }, { required: ['partial_exit'] }, { required: ['trailing_stop'] }] } },
+            { required: ['take_profit_percent'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['take_profit_price'] }, { required: ['partial_exit'] }, { required: ['trailing_stop'] }] } },
+            { required: ['partial_exit'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['take_profit_price'] }, { required: ['take_profit_percent'] }, { required: ['trailing_stop'] }] } },
+          ],
+          allOf: [
+            { if: { properties: { trailing_stop: { const: true } }, required: ['trailing_stop'] }, then: { required: ['trailing_percent'] } },
           ],
           required: ['client_order_id', 'symbol', 'side', 'allocation_dollars'],
         },
@@ -1358,7 +1369,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_orders': {
-        const data = await callTradingBot('/orders?status=all');
+        const status = args?.status || 'all';
+        const data = await callTradingBot(`/orders?status=${encodeURIComponent(status)}`);
         const rawOrders = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : []);
         const orders = rawOrders.map((order) => ({
           ...order,

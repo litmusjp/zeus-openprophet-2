@@ -40,3 +40,32 @@ test('MCP managed-position contract documents exactly one protection leg', () =>
   assert.match(mcp, /market_closed/);
   assert.match(mcp, /planned_for_next_session/);
 });
+
+test('MCP managed-position schema treats trailing stop as a stop-loss modifier', () => {
+  const start = mcp.indexOf("name: 'place_managed_position'");
+  const end = mcp.indexOf("name: 'get_managed_positions'", start);
+  const block = mcp.slice(start, end);
+  assert.match(block, /description: 'Enable trailing stop as a modifier on the required stop-loss leg'/);
+  assert.match(block, /trailing_percent:[\s\S]*?minimum: 0/);
+  assert.match(block, /trailing_percent:[\s\S]*?exclusiveMinimum: 0/);
+  assert.doesNotMatch(block, /trailing_percent:[\s\S]*?exclusiveMinimum: true/);
+  assert.match(block, /oneOf:[\s\S]*?stop_loss_price/);
+  assert.match(block, /allOf:[\s\S]*?trailing_stop/);
+});
+
+test('MCP get_orders accepts safe status filters and defaults to all', () => {
+  const schemaStart = mcp.indexOf("name: 'get_orders'");
+  const schemaEnd = mcp.indexOf("name: 'place_buy_order'", schemaStart);
+  const schema = mcp.slice(schemaStart, schemaEnd);
+  assert.match(schema, /status/);
+  for (const status of ['all', 'active', 'planned_for_next_session']) {
+    assert.match(schema, new RegExp(`'${status}'`));
+  }
+  const handlerStart = mcp.indexOf("case 'get_orders'");
+  const handlerEnd = mcp.indexOf("case 'place_buy_order'", handlerStart);
+  const handler = mcp.slice(handlerStart, handlerEnd);
+  assert.match(handler, /args\??\.status/);
+  assert.match(handler, /encodeURIComponent/);
+  assert.match(handler, /status \|\| 'all'/);
+  assert.match(handler, /`\/orders\?status=\$\{encodeURIComponent\(status\)\}`/);
+});

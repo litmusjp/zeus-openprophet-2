@@ -1028,6 +1028,19 @@ func orderMatchesStatus(order *interfaces.Order, status string) bool {
 	return status == "" || strings.EqualFold(status, "all") || (order != nil && strings.EqualFold(order.Status, status))
 }
 
+func brokerOrderHistoryStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "open":
+		return "open"
+	case "closed":
+		return "closed"
+	case "all":
+		return "all"
+	default:
+		return "all"
+	}
+}
+
 func (oc *OrderController) listVisibleOrders(ctx context.Context, status string) ([]*interfaces.Order, bool, error) {
 	if oc.tradingService == nil {
 		return nil, false, fmt.Errorf("broker order history is unavailable in inert mode")
@@ -1036,7 +1049,7 @@ func (oc *OrderController) listVisibleOrders(ctx context.Context, status string)
 	if err != nil {
 		return nil, false, err
 	}
-	brokerOrders, brokerErr := oc.tradingService.ListOrders(ctx, status)
+	brokerOrders, brokerErr := oc.tradingService.ListOrders(ctx, brokerOrderHistoryStatus(status))
 	brokerAvailable := brokerErr == nil
 	if brokerErr != nil {
 		// Planned intents remain useful when the broker is temporarily unavailable.

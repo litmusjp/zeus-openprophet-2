@@ -9,6 +9,56 @@ import (
 	"time"
 )
 
+func TestManagedPositionTrailingStopContract(t *testing.T) {
+	stopPrice := 95.0
+	stopPercent := 5.0
+	takePrice := 110.0
+	partial := PartialExitConfig{Enabled: true, Percent: 50, TargetPercent: 10}
+
+	tests := []struct {
+		name string
+		req  PlaceManagedPositionRequest
+		want string
+	}{
+		{name: "stop price with trailing", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), StopLossPrice: &stopPrice, TrailingStop: true, TrailingPercent: 2}, want: "ok"},
+		{name: "stop percent with trailing", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), StopLossPercent: &stopPercent, TrailingStop: true, TrailingPercent: 2}, want: "ok"},
+		{name: "trailing without stop", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), TrailingStop: true, TrailingPercent: 2}, want: "stop-loss"},
+		{name: "trailing with take profit", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), StopLossPrice: &stopPrice, TakeProfitPrice: &takePrice, TrailingStop: true, TrailingPercent: 2}, want: "exactly one"},
+		{name: "trailing with partial exit", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), StopLossPrice: &stopPrice, PartialExit: &partial, TrailingStop: true, TrailingPercent: 2}, want: "exactly one"},
+		{name: "stop loss with take profit", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), StopLossPrice: &stopPrice, TakeProfitPrice: &takePrice}, want: "exactly one"},
+		{name: "multiple stop forms", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), StopLossPrice: &stopPrice, StopLossPercent: &stopPercent}, want: "exactly one"},
+		{name: "trailing percent missing", req: PlaceManagedPositionRequest{Side: "buy", EntryStrategy: "limit", EntryPrice: ptr(100.0), StopLossPrice: &stopPrice, TrailingStop: true}, want: "trailing_percent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&PositionManager{}).validateRequest(&tt.req)
+			if tt.want == "ok" {
+				if err != nil {
+					t.Fatalf("validateRequest() = %v, want valid", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validateRequest() = %v, want error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func ptr(value float64) *float64 { return &value }
+
+func TestMarketClosedErrorIsAssetNeutral(t *testing.T) {
+	for _, caller := range []string{"equity", "options"} {
+		t.Run(caller, func(t *testing.T) {
+			message := (&MarketClosedError{NextOpen: time.Date(2026, 9, 24, 13, 30, 0, 0, time.UTC)}).Error()
+			if strings.Contains(message, "options session") || !strings.Contains(message, "regular trading session") {
+				t.Fatalf("MarketClosedError() = %q, want asset-neutral regular trading wording", message)
+			}
+		})
+	}
+}
+
 func TestManagedPositionNotFoundIsTyped(t *testing.T) {
 	pm := &PositionManager{positions: map[string]*ManagedPosition{}}
 	_, err := pm.GetManagedPosition("missing")

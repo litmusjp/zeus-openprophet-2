@@ -19,7 +19,7 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   });
 
   assert.match(prompt, /prophet_assess_options_strategy/);
-  assert.match(prompt, /before opening or increasing options exposure/);
+  assert.match(prompt, /before opening or increasing options exposure/i);
   assert.match(prompt, /exact proposed trade/);
   assert.match(prompt, /PASS\/FAIL\/unavailable result and signal score/);
   assert.match(prompt, /assessment-only and is not broker authorization/);
@@ -39,6 +39,31 @@ test('generated system prompt clarifies zero maxOrderValue semantics', async () 
   assert.match(prompt, /maxOrderValue=0 means there is no single-order dollar cap; it does not disable trading and is not an order blocker/);
   assert.match(prompt, /A positive maxOrderValue is the only time the dollar cap applies/);
   assert.match(prompt, /All other configured risk limits and permission flags still apply/);
+});
+
+test('generated system prompt contains the approved evidence and privacy clarifications', async () => {
+  const prompt = await buildSystemPrompt({
+    name: 'Test Agent',
+    description: 'Test',
+    systemPromptTemplate: 'custom',
+    customSystemPrompt: 'You are a test agent.',
+  });
+
+  assert.match(prompt, /heartbeat interval comes from heartbeat context|heartbeat context.*guardrails/i);
+  assert.match(prompt, /sandbox AlphaDesk plugin\/config.*enabled/);
+  assert.match(prompt, /broker boundary independently refreshes evidence and fails closed/);
+  assert.match(prompt, /stale MarketWatch.*informational only.*never current market evidence/i);
+  assert.match(prompt, /daily loss.*broker account.*not from a dedicated status tool/i);
+  assert.match(prompt, /find_similar_setups.*advisory.*materially relevant matches/i);
+});
+
+test('manager prompt warns about sensitive session context data', () => {
+  const server = fs.readFileSync(new URL('../agent/server.js', import.meta.url), 'utf8');
+  const start = server.indexOf('get_session_context:');
+  const end = server.indexOf('create_agent:', start);
+  const block = server.slice(start, end);
+  assert.match(block, /prior messages, tool args, and results may be returned/i);
+  assert.match(block, /never put credentials|unnecessary sensitive data/i);
 });
 
 test('Settings tool reference includes the assessment-only AlphaDesk description', () => {

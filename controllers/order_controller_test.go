@@ -23,6 +23,90 @@ type reconciliationTradingService struct {
 	err    error
 }
 
+type visibleOrdersStorage struct {
+	orders []*interfaces.Order
+}
+
+func (s *visibleOrdersStorage) SaveBars([]*interfaces.Bar) error { return nil }
+func (s *visibleOrdersStorage) GetBars(string, time.Time, time.Time) ([]*interfaces.Bar, error) {
+	return nil, nil
+}
+func (s *visibleOrdersStorage) SaveOrder(order *interfaces.Order) error {
+	s.orders = append(s.orders, order)
+	return nil
+}
+func (s *visibleOrdersStorage) GetOrder(string) (*interfaces.Order, error) { return nil, nil }
+func (s *visibleOrdersStorage) GetOrderByClientOrderID(string) (*interfaces.Order, error) {
+	return nil, nil
+}
+func (s *visibleOrdersStorage) GetOrders(string) ([]*interfaces.Order, error) { return s.orders, nil }
+func (s *visibleOrdersStorage) GetOrdersNeedingReconciliation() ([]*interfaces.Order, error) {
+	return nil, nil
+}
+func (s *visibleOrdersStorage) CleanupOldData(time.Time) error { return nil }
+
+type visibleOrdersTradingService struct {
+	*reconciliationTradingService
+	brokerOrders []*interfaces.Order
+	listErr      error
+	listStatuses []string
+}
+
+func (s *visibleOrdersTradingService) ListOrders(_ context.Context, status string) ([]*interfaces.Order, error) {
+	s.listStatuses = append(s.listStatuses, status)
+	return s.brokerOrders, s.listErr
+}
+
+func TestGetOrdersUsesSafeBrokerStatusAndPreservesCompleteness(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     string
+		brokerErr  error
+		wantStatus string
+		wantCount  int
+		wantFull   bool
+	}{
+		{name: "planned intent", status: "planned_for_next_session", wantStatus: "all", wantCount: 1, wantFull: true},
+		{name: "submit failed", status: "submit_failed", wantStatus: "all", wantCount: 1, wantFull: true},
+		{name: "broker failure", status: "planned_for_next_session", brokerErr: errors.New("broker unavailable"), wantStatus: "all", wantCount: 1, wantFull: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			local := &interfaces.Order{ClientOrderID: "local-1", Symbol: "AAPL", Status: tc.status, SubmittedAt: time.Now()}
+			storage := &visibleOrdersStorage{orders: []*interfaces.Order{local}}
+			trading := &visibleOrdersTradingService{
+				reconciliationTradingService: &reconciliationTradingService{},
+				brokerOrders:                 []*interfaces.Order{{ClientOrderID: "broker-1", Symbol: "MSFT", Status: "accepted", SubmittedAt: time.Now()}},
+				listErr:                      tc.brokerErr,
+			}
+			controller := NewOrderController(trading, nil, storage)
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status="+tc.status, nil)
+			controller.HandleGetOrders(ctx)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+			}
+			var response struct {
+				Orders   []*interfaces.Order `json:"orders"`
+				Complete bool                `json:"complete"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if len(trading.listStatuses) != 1 || trading.listStatuses[0] != tc.wantStatus {
+				t.Fatalf("broker statuses = %#v, want [%q]", trading.listStatuses, tc.wantStatus)
+			}
+			if len(response.Orders) != tc.wantCount || response.Orders[0].Status != tc.status {
+				t.Fatalf("orders = %#v, want one local %q record", response.Orders, tc.status)
+			}
+			if response.Complete != tc.wantFull {
+				t.Fatalf("complete = %v, want %v", response.Complete, tc.wantFull)
+			}
+		})
+	}
+}
+
 func TestGetAccountFailsClosedWhenBrokerServiceIsUnavailable(t *testing.T) {
 	oc := NewOrderController(nil, nil, nil)
 	if _, err := oc.GetAccount(); err == nil {

@@ -193,9 +193,9 @@ type MarketClosedError struct {
 
 func (e *MarketClosedError) Error() string {
 	if e == nil || e.NextOpen.IsZero() {
-		return "market_closed: the regular options session is closed; order was not submitted"
+		return "market_closed: the regular trading session is closed; order was not submitted"
 	}
-	return fmt.Sprintf("market_closed: the regular options session is closed; order was not submitted; next eligible session: %s", e.NextOpen.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("market_closed: the regular trading session is closed; order was not submitted; next eligible session: %s", e.NextOpen.UTC().Format(time.RFC3339))
 }
 
 // IsOCCOptionSymbol identifies the compact OCC option-symbol form used by the

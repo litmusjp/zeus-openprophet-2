@@ -2580,17 +2580,22 @@ func (pm *PositionManager) validateRequest(req *PlaceManagedPositionRequest) err
 	}
 
 	protectionLegs := 0
-	if req.StopLossPrice != nil || req.StopLossPercent != nil {
+	if req.StopLossPrice != nil {
 		protectionLegs++
 	}
-	if req.TakeProfitPrice != nil || req.TakeProfitPercent != nil {
+	if req.StopLossPercent != nil {
+		protectionLegs++
+	}
+	if req.TakeProfitPrice != nil {
+		protectionLegs++
+	}
+	if req.TakeProfitPercent != nil {
 		protectionLegs++
 	}
 	if req.TrailingStop {
 		if req.StopLossPrice == nil && req.StopLossPercent == nil {
 			return fmt.Errorf("trailing_stop requires a durable stop-loss leg")
 		}
-		protectionLegs++
 	}
 	if req.PartialExit != nil && req.PartialExit.Enabled {
 		protectionLegs++

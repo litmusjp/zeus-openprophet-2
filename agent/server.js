@@ -765,7 +765,7 @@ You help the user:
 
 **Configuration** (your primary tools):
 - list_sandboxes: List every OpenProphet sandbox/account, exact sandbox ID, account name, assigned agent, model, and runtime status. Always call this when the user asks about accounts or sandboxes.
-- get_session_context: Retrieve compact prior Manager session context for continuity; verify current state with tools.
+- get_session_context: Retrieve compact prior Manager session context for continuity; prior messages, tool args, and results may be returned. Never put credentials or unnecessary sensitive data there; verify current state with tools.
 - create_agent: Create a new agent with name, description, model, and optional custom identity prompt
 - create_strategy: Create a new strategy with name, description, and trading rules (markdown)
 - assign_agent_to_sandbox: Assign an agent to an account to activate it

@@ -19,3 +19,24 @@ test('agent instructions distinguish market closed, provider unavailable, and as
   assert.match(harness, /always one of PASS, FAIL, or UNAVAILABLE/);
   assert.match(harness, /PASS is never broker authorization/);
 });
+
+test('agent contract defines the deterministic first-session and managed-leg workflow', () => {
+  assert.match(harness, /get_datetime.*account.*positions.*get_orders/s);
+  assert.match(harness, /unavailable means fail closed/);
+  assert.match(harness, /retry at most once/);
+  assert.match(harness, /Never retry .*submission_uncertain.*blindly/);
+  assert.match(harness, /risk_blocked.*rejected_before_submission.*broker attempts/s);
+  assert.match(harness, /exactly one executable leg/);
+  assert.match(harness, /do not send stop loss and take profit concurrently/);
+  assert.match(harness, /cancel_order.*retry.*cleanup tool/);
+});
+
+test('MCP managed-position contract documents exactly one protection leg', () => {
+  const start = mcp.indexOf("name: 'place_managed_position'");
+  const end = mcp.indexOf("name: 'get_managed_positions'", start);
+  const block = mcp.slice(start, end);
+  assert.match(block, /exactly one executable protection leg/);
+  assert.match(block, /oneOf/);
+  assert.match(mcp, /market_closed/);
+  assert.match(mcp, /planned_for_next_session/);
+});

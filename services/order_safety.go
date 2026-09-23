@@ -111,6 +111,43 @@ func (e *PlannedIntentConflictError) Error() string {
 	return fmt.Sprintf("cancel conflict: planned intent %q has no broker order ID and cannot be canceled at the broker", e.ClientOrderID)
 }
 
+// LocalIntentNotBrokerVisibleError identifies a durable application record
+// that never crossed the broker submission boundary.
+type LocalIntentNotBrokerVisibleError struct{ ClientOrderID string }
+
+func (e *LocalIntentNotBrokerVisibleError) Error() string {
+	return fmt.Sprintf("local intent %q is not broker-visible and cannot be canceled at the broker", e.ClientOrderID)
+}
+
+type ExecutionBlockedError struct{}
+
+func (e *ExecutionBlockedError) Error() string {
+	return "execution is blocked pending startup/order reconciliation"
+}
+
+// PreSubmissionRejectionError is a deterministic policy/risk rejection before
+// the broker boundary. SubmissionAttempted must remain false for this error.
+type PreSubmissionRejectionError struct{ Err error }
+
+func (e *PreSubmissionRejectionError) Error() string {
+	if e == nil || e.Err == nil {
+		return "rejected_before_submission"
+	}
+	return e.Err.Error()
+}
+
+func (e *PreSubmissionRejectionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func IsPreSubmissionRejection(err error) bool {
+	var rejection *PreSubmissionRejectionError
+	return errors.As(err, &rejection)
+}
+
 func (e *SubmissionUncertainError) Error() string {
 	if e == nil || e.Err == nil {
 		return "submission_uncertain: broker submission result is unknown"

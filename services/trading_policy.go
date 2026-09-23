@@ -37,6 +37,33 @@ type BrokerRiskSnapshot struct {
 	PendingOrders []*interfaces.Order
 }
 
+// IsRiskRelevantLocalOrder excludes application records that never crossed
+// the broker submission boundary from the broker risk snapshot.
+func IsRiskRelevantLocalOrder(order *interfaces.Order) bool {
+	if order == nil {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(order.Status))
+	switch status {
+	case "filled", "canceled", "cancelled", "rejected", "expired", "done_for_day", "replaced":
+		return false
+	}
+	if status == "planned_for_next_session" && strings.TrimSpace(order.ID) == "" && !order.SubmissionAttempted {
+		if strings.EqualFold(strings.TrimSpace(order.Purpose), "entry") {
+			return positivePrice(order.LimitPrice) || positivePrice(order.StopPrice)
+		}
+		return false
+	}
+	if status == "submit_failed" && !order.SubmissionAttempted && strings.TrimSpace(order.ID) == "" {
+		return false
+	}
+	return strings.TrimSpace(order.ID) != "" || order.SubmissionAttempted
+}
+
+func positivePrice(price *float64) bool {
+	return price != nil && *price > 0
+}
+
 func boolEnv(name string, fallback bool) bool {
 	value, ok := os.LookupEnv(name)
 	if !ok || strings.TrimSpace(value) == "" {

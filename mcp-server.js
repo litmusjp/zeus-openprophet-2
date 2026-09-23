@@ -312,7 +312,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_managed_position',
-        description: 'Open a managed position with automatic stop loss, take profit, and optional partial exits. Perfect for active swing trading.',
+        description: 'Open a managed position with exactly one executable protection leg: one stop loss OR one take profit OR one supported partial-exit leg. Durable OCO is unavailable; stop loss and take profit must never be sent concurrently. Positive filled quantity is required for execution confirmation.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -409,6 +409,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Relevant market context for this setup',
             },
           },
+          oneOf: [
+            { required: ['stop_loss_price'], not: { anyOf: [{ required: ['take_profit_price'] }, { required: ['take_profit_percent'] }, { required: ['partial_exit'] }] } },
+            { required: ['stop_loss_percent'], not: { anyOf: [{ required: ['take_profit_price'] }, { required: ['take_profit_percent'] }, { required: ['partial_exit'] }] } },
+            { required: ['take_profit_price'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['partial_exit'] }] } },
+            { required: ['take_profit_percent'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['partial_exit'] }] } },
+            { required: ['partial_exit'], not: { anyOf: [{ required: ['stop_loss_price'] }, { required: ['stop_loss_percent'] }, { required: ['take_profit_price'] }, { required: ['take_profit_percent'] }] } },
+          ],
           required: ['client_order_id', 'symbol', 'side', 'allocation_dollars'],
         },
       },
@@ -456,7 +463,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'cancel_order',
-        description: 'Cancel an open order by ID',
+        description: 'Cancel a broker-visible open order by ID. Planned application intents and pre-submission failures are not broker orders; cancel_order is not a general retry or cleanup tool.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -823,7 +830,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place a regular-session options order. For opening/increasing exposure, the server obtains a fresh AlphaDesk assessment immediately before broker submission; client-supplied or previously returned assessments are not accepted or used. The broker clock is checked immediately before submission; closed-session requests are saved as planned_for_next_session and are not broker orders.',
+        description: 'Place a regular-session options order. For opening/increasing exposure, the server obtains a fresh AlphaDesk assessment immediately before broker submission; AlphaDesk UNAVAILABLE or FAIL is fail-closed. The broker clock is checked immediately before submission; market_closed means wait and is saved as planned_for_next_session, an application intent rather than a broker order; unavailable means fail closed. Accepted/new/open acknowledge only, and positive filled quantity is required for execution confirmation.',
         inputSchema: {
           type: 'object',
           properties: {

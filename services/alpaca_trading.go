@@ -258,7 +258,11 @@ func (s *AlpacaTradingService) brokerRiskSnapshot(ctx context.Context, excludeCl
 		if providerErr != nil {
 			return BrokerRiskSnapshot{}, fmt.Errorf("local reservation snapshot unavailable: %w", providerErr)
 		}
-		pendingOrders = append(pendingOrders, localOrders...)
+		for _, localOrder := range localOrders {
+			if IsRiskRelevantLocalOrder(localOrder) {
+				pendingOrders = append(pendingOrders, localOrder)
+			}
+		}
 	}
 	if excludeClientOrderID != "" {
 		filtered := pendingOrders[:0]
@@ -324,7 +328,7 @@ func (s *AlpacaTradingService) validateEquityPolicy(ctx context.Context, order *
 		return fmt.Errorf("broker risk snapshot unavailable: %w", err)
 	}
 	if _, err := s.policy.ValidateOrder(&candidate, snapshot); err != nil {
-		return fmt.Errorf("broker trading policy rejected order: %w", err)
+		return &PreSubmissionRejectionError{Err: fmt.Errorf("broker trading policy rejected order: %w", err)}
 	}
 	return nil
 }
@@ -366,7 +370,7 @@ func (s *AlpacaTradingService) validateOptionsPolicy(ctx context.Context, order 
 		return fmt.Errorf("broker risk snapshot unavailable: %w", err)
 	}
 	if _, err := s.policy.ValidateOptionsOrder(&candidate, snapshot); err != nil {
-		return fmt.Errorf("broker trading policy rejected options order: %w", err)
+		return &PreSubmissionRejectionError{Err: fmt.Errorf("broker trading policy rejected options order: %w", err)}
 	}
 	return nil
 }

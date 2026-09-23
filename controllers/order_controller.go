@@ -312,6 +312,13 @@ func (oc *OrderController) persistPlannedOrder(order *interfaces.Order, closedEr
 	}
 	nextOpen := closedErr.NextOpen
 	expires := nextOpen.Add(24 * time.Hour)
+	if order.Purpose == "entry" && order.LimitPrice == nil && order.StopPrice == nil {
+		order.Status = "rejected_before_submission"
+		if saveErr := oc.storageService.SaveOrder(order); saveErr != nil {
+			return &services.SubmissionUncertainError{Err: fmt.Errorf("unbounded market intent rejection persistence failed: %w", saveErr)}
+		}
+		return &services.PreSubmissionRejectionError{Err: fmt.Errorf("opening market intent cannot be planned without a bounded executable price")}
+	}
 	order.Status = "planned_for_next_session"
 	order.NextEligibleAt = &nextOpen
 	order.ExpiresAt = &expires
@@ -421,7 +428,11 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 			}
 			return oc.plannedOrderResult(order, closedErr), nil
 		}
-		order.Status = "submit_failed"
+		if services.IsPreSubmissionRejection(err) {
+			order.Status = "rejected_before_submission"
+		} else {
+			order.Status = "submit_failed"
+		}
 		if services.IsSubmissionUncertain(err) {
 			order.Status = "submission_uncertain"
 		}
@@ -528,7 +539,11 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 			}
 			return oc.plannedOrderResult(order, closedErr), nil
 		}
-		order.Status = "submit_failed"
+		if services.IsPreSubmissionRejection(err) {
+			order.Status = "rejected_before_submission"
+		} else {
+			order.Status = "submit_failed"
+		}
 		if services.IsSubmissionUncertain(err) {
 			order.Status = "submission_uncertain"
 		}
@@ -648,9 +663,6 @@ func (oc *OrderController) optionsResponseWithIdentity(intent *interfaces.Order,
 }
 
 func (oc *OrderController) cancelOrder(orderID string) error {
-	if oc.ExecutionBlocked() {
-		return fmt.Errorf("execution is blocked pending startup/order reconciliation")
-	}
 	identityReader, ok := oc.storageService.(durableIdentityReader)
 	if !ok {
 		return fmt.Errorf("cancel rejected: server-owned execution identity is unavailable")
@@ -692,8 +704,14 @@ func (oc *OrderController) cancelOrder(orderID string) error {
 		persistedOrder.SandboxID != currentIdentity.SandboxID {
 		return fmt.Errorf("cancel rejected: order belongs to a different execution identity")
 	}
-	if strings.EqualFold(strings.TrimSpace(persistedOrder.Status), "planned_for_next_session") && strings.TrimSpace(persistedOrder.ID) == "" {
-		return &services.PlannedIntentConflictError{ClientOrderID: persistedOrder.ClientOrderID}
+	if strings.TrimSpace(persistedOrder.ID) == "" && !persistedOrder.SubmissionAttempted {
+		if strings.EqualFold(strings.TrimSpace(persistedOrder.Status), "planned_for_next_session") {
+			return &services.PlannedIntentConflictError{ClientOrderID: persistedOrder.ClientOrderID}
+		}
+		return &services.LocalIntentNotBrokerVisibleError{ClientOrderID: persistedOrder.ClientOrderID}
+	}
+	if oc.ExecutionBlocked() {
+		return &services.ExecutionBlockedError{}
 	}
 
 	if err := oc.tradingService.CancelOrder(ctx, orderID); err != nil {
@@ -762,6 +780,11 @@ func (oc *OrderController) HandleBuy(c *gin.Context) {
 
 	result, err := oc.Buy(c.Request.Context(), req)
 	if err != nil {
+		var preSubmission *services.PreSubmissionRejectionError
+		if errors.As(err, &preSubmission) {
+			c.JSON(http.StatusConflict, gin.H{"error": "rejected_before_submission", "category": "risk_blocked", "details": preSubmission.Error(), "retryable": false})
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
@@ -786,6 +809,11 @@ func (oc *OrderController) HandleSell(c *gin.Context) {
 
 	result, err := oc.Sell(c.Request.Context(), req)
 	if err != nil {
+		var preSubmission *services.PreSubmissionRejectionError
+		if errors.As(err, &preSubmission) {
+			c.JSON(http.StatusConflict, gin.H{"error": "rejected_before_submission", "category": "risk_blocked", "details": preSubmission.Error(), "retryable": false})
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
@@ -799,9 +827,6 @@ func (oc *OrderController) HandleSell(c *gin.Context) {
 
 // HandleCancelOrder handles HTTP cancel order requests
 func (oc *OrderController) HandleCancelOrder(c *gin.Context) {
-	if oc.rejectIfExecutionBlocked(c) {
-		return
-	}
 	orderID := c.Param("id")
 	if orderID == "" {
 		c.JSON(400, gin.H{"error": "order ID required"})
@@ -812,6 +837,16 @@ func (oc *OrderController) HandleCancelOrder(c *gin.Context) {
 		var plannedConflict *services.PlannedIntentConflictError
 		if errors.As(err, &plannedConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": "planned_intent_not_broker_visible", "category": "planned_intent_conflict", "details": plannedConflict.Error(), "retryable": false})
+			return
+		}
+		var localIntent *services.LocalIntentNotBrokerVisibleError
+		if errors.As(err, &localIntent) {
+			c.JSON(http.StatusConflict, gin.H{"error": "planned_intent_not_broker_visible", "category": "local_intent_not_broker_visible", "details": localIntent.Error(), "retryable": false})
+			return
+		}
+		var blocked *services.ExecutionBlockedError
+		if errors.As(err, &blocked) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": blocked.Error()})
 			return
 		}
 		c.JSON(500, gin.H{"error": err.Error()})
@@ -1287,6 +1322,12 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	if err != nil {
 		var closedErr *services.MarketClosedError
 		if errors.As(err, &closedErr) {
+			if intent.Purpose == "entry" && intent.LimitPrice == nil {
+				intent.Status = "rejected_before_submission"
+				_ = oc.storageService.SaveOrder(intent)
+				c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(intent, nil, "risk_blocked", "opening market intent cannot be planned without a bounded executable price"))
+				return
+			}
 			intent.Status = "planned_for_next_session"
 			if !closedErr.NextOpen.IsZero() {
 				nextOpen := closedErr.NextOpen
@@ -1322,6 +1363,12 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			oc.logger.WithError(saveErr).Warn("Failed to record options order submission failure")
 		}
 		oc.logger.WithError(err).Error("Failed to place options order")
+		if services.IsPreSubmissionRejection(err) {
+			intent.Status = "rejected_before_submission"
+			_ = oc.storageService.SaveOrder(intent)
+			c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(intent, nil, "risk_blocked", err.Error()))
+			return
+		}
 		c.JSON(502, oc.optionsResponseWithIdentity(intent, nil, intent.Status, err.Error()))
 		return
 	}

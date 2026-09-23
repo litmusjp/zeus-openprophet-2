@@ -124,3 +124,82 @@ func TestCancelOrderGinBoundaryRejectsPlannedIntentWithoutBrokerCall(t *testing.
 		t.Fatalf("broker cancel calls=%d; want 0 for planned intent", trading.calls)
 	}
 }
+
+func TestCancelOrderGinBoundaryRejectsUnsubmittedFailureWithoutBrokerCall(t *testing.T) {
+	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
+	order := cancelTestOrder()
+	order.ID = ""
+	order.Status = "submit_failed"
+	order.SubmissionAttempted = false
+	trading := &cancelTestTrading{}
+	oc := cancelTestController(order, trading)
+	router := gin.New()
+	router.DELETE("/orders/:id", oc.HandleCancelOrder)
+	req := httptest.NewRequest(http.MethodDelete, "/orders/"+order.ClientOrderID, nil)
+	req.Header.Set("X-OpenProphet-Operator-Token", "operator-secret")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s; want 409", rec.Code, rec.Body.String())
+	}
+	body := managedResponse(t, rec)
+	if body["error"] != "planned_intent_not_broker_visible" || body["category"] != "local_intent_not_broker_visible" {
+		t.Fatalf("body=%v; want structured local-intent conflict", body)
+	}
+	if trading.calls != 0 {
+		t.Fatalf("broker cancel calls=%d; want 0 for unsubmitted local failure", trading.calls)
+	}
+}
+
+func TestCancelOrderGinBoundaryAllowsLocalIntentClassificationWhileExecutionBlocked(t *testing.T) {
+	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
+	order := cancelTestOrder()
+	order.ID = ""
+	order.Status = "planned_for_next_session"
+	order.SubmissionAttempted = false
+	trading := &cancelTestTrading{}
+	oc := cancelTestController(order, trading)
+	oc.SetExecutionBlocked(true)
+	router := gin.New()
+	router.DELETE("/orders/:id", oc.HandleCancelOrder)
+	req := httptest.NewRequest(http.MethodDelete, "/orders/"+order.ClientOrderID, nil)
+	req.Header.Set("X-OpenProphet-Operator-Token", "operator-secret")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s; want 409 local conflict", rec.Code, rec.Body.String())
+	}
+	body := managedResponse(t, rec)
+	if body["error"] != "planned_intent_not_broker_visible" {
+		t.Fatalf("body=%v; want local not-broker-visible result", body)
+	}
+	if trading.calls != 0 {
+		t.Fatalf("broker cancel calls=%d; want 0 for local intent", trading.calls)
+	}
+}
+
+func TestCancelOrderGinBoundaryRejectsBrokerCancellationWhileExecutionBlocked(t *testing.T) {
+	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
+	order := cancelTestOrder()
+	order.ID = "broker-visible-1"
+	order.Status = "open"
+	order.SubmissionAttempted = true
+	trading := &cancelTestTrading{}
+	oc := cancelTestController(order, trading)
+	oc.SetExecutionBlocked(true)
+	router := gin.New()
+	router.DELETE("/orders/:id", oc.HandleCancelOrder)
+	req := httptest.NewRequest(http.MethodDelete, "/orders/"+order.ID, nil)
+	req.Header.Set("X-OpenProphet-Operator-Token", "operator-secret")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s; want 503 blocked response", rec.Code, rec.Body.String())
+	}
+	if trading.calls != 0 {
+		t.Fatalf("broker cancel calls=%d; want 0 while blocked", trading.calls)
+	}
+}

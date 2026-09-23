@@ -106,6 +106,15 @@ test('ledger applies option multiplier to padded OCC symbols', () => {
   assert.equal(trades[0].assetType, 'option');
 });
 
+test('application lifecycle statuses never create trade telemetry', () => {
+  for (const status of ['planned_for_next_session', 'risk_blocked', 'rejected_before_submission', 'planned_intent_not_broker_visible']) {
+    assert.equal(tradeEventFromToolUse('prophet_place_options_order', { symbol: 'TSLA251219C00400000', quantity: 1 }, JSON.stringify({ status, filled_qty: 0 })), null, status);
+  }
+  for (const status of ['submit_failed', 'submission_uncertain']) {
+    assert.equal(tradeEventFromToolUse('prophet_place_options_order', { symbol: 'TSLA251219C00400000', quantity: 1 }, JSON.stringify({ status, filled_qty: 0 })), null, status);
+  }
+});
+
 test('ledger reconciles two broker-confirmed XLF close fills without duplicating either leg', () => {
   const trades = buildTradeLedger([
     { ID: 'xlf-entry', ClientOrderID: 'xlf-entry-client', Symbol: 'XLF', Side: 'buy', Status: 'filled', FilledQty: 100, FilledAvgPrice: 40, FilledAt: '2026-09-18T13:00:00Z' },

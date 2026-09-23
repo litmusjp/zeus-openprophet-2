@@ -11,6 +11,7 @@ import (
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/services"
+	"strings"
 	"testing"
 	"time"
 
@@ -228,7 +229,7 @@ func TestClosedSessionBuyAndSellArePlannedWithAcceptedHTTPResponse(t *testing.T)
 			}
 			controller := NewOrderController(trading, nil, storage)
 			clientOrderID := "equity-closed-" + tc.side
-			body := []byte(`{"symbol":"AAPL","qty":1,"type":"market","client_order_id":"` + clientOrderID + `"}`)
+			body := []byte(`{"symbol":"AAPL","qty":1,"type":"limit","limit_price":100,"client_order_id":"` + clientOrderID + `"}`)
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodPost, "/api/orders/"+tc.side, bytes.NewReader(body))
@@ -262,6 +263,78 @@ func TestClosedSessionBuyAndSellArePlannedWithAcceptedHTTPResponse(t *testing.T)
 				t.Fatalf("broker submission calls = %d, want 0", trading.brokerSubmissionCalls)
 			}
 		})
+	}
+}
+
+func TestClosedSessionMarketOpeningWithoutBoundedPriceIsRejectedAndNotPlanned(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	nextOpen := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	trading := &closedSessionTradingService{reconciliationTradingService: &reconciliationTradingService{}, nextOpen: nextOpen}
+	controller := NewOrderController(trading, nil, storage)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/orders/buy", strings.NewReader(`{"symbol":"AAPL","qty":1,"type":"market","client_order_id":"equity-closed-unbounded"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	controller.HandleBuy(ctx)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s; want 409", recorder.Code, recorder.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "rejected_before_submission" || body["category"] != "risk_blocked" {
+		t.Fatalf("body=%v; want structured risk rejection", body)
+	}
+	planned, err := storage.GetOrderByClientOrderID("equity-closed-unbounded")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned != nil && planned.Status == "planned_for_next_session" {
+		t.Fatalf("unbounded market intent was persisted as planned: %#v", planned)
+	}
+}
+
+func TestHandleBuyReturnsStructuredConflictForPreSubmissionPolicyRejection(t *testing.T) {
+	t.Setenv("ALPACA_ACCOUNT_ID", "test-broker-account")
+	t.Setenv("ALPACA_PAPER", "true")
+	t.Setenv("OPENPROPHET_TENANT_ID", "test-tenant")
+	t.Setenv("OPENPROPHET_SANDBOX_ID", "test-sandbox")
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	trading := &placeOrderRecorder{
+		reconciliationTradingService: &reconciliationTradingService{},
+		placeErr:                     &services.PreSubmissionRejectionError{Err: errors.New("broker trading policy rejected order: max deployed percentage exceeded")},
+	}
+	controller := NewOrderController(trading, nil, storage)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/orders/buy", strings.NewReader(`{"symbol":"AAPL","qty":1,"type":"limit","limit_price":100,"client_order_id":"policy-rejected"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	controller.HandleBuy(ctx)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s; want 409", recorder.Code, recorder.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "rejected_before_submission" || body["category"] != "risk_blocked" {
+		t.Fatalf("body=%v; want structured pre-submission risk rejection", body)
+	}
+	saved, err := storage.GetOrderByClientOrderID("policy-rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved == nil || saved.SubmissionAttempted || saved.ID != "" || saved.Status != "rejected_before_submission" {
+		t.Fatalf("saved order=%#v; want non-attempted failure with empty broker ID", saved)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/services"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +56,13 @@ func main() {
 
 	logger.Info("Starting Prophet Trader Bot...")
 	executionEnabled := executionModeEnabled(cfg.ExecutionMode)
+	os.Setenv("OPENPROPHET_EXECUTION_ENABLED", strconv.FormatBool(executionEnabled))
+	os.Setenv("OPENPROPHET_BROKER_READY", "false")
+	os.Setenv("OPENPROPHET_RECONCILE_SKIPPED", "0")
+	os.Setenv("OPENPROPHET_MANAGED_SKIPPED", "0")
+	os.Setenv("OPENPROPHET_RECONCILIATION_COMPLETE", "false")
+	os.Setenv("OPENPROPHET_EXECUTION_BLOCKED", "true")
+	logger.WithField("execution_enabled", executionEnabled).Info("Execution gate initialized")
 	if !executionEnabled {
 		logger.Warn("Execution mode is inert; broker trading service will not be initialized")
 		return
@@ -113,7 +121,7 @@ func main() {
 			// Never aggregate unverified sibling databases across accounts or tenants.
 			pending := make([]*interfaces.Order, 0, len(all))
 			for _, order := range all {
-				if order == nil || order.Purpose != "entry" {
+				if order == nil || order.Purpose != "entry" || !services.IsRiskRelevantLocalOrder(order) {
 					continue
 				}
 				switch strings.ToLower(order.Status) {
@@ -165,6 +173,7 @@ func main() {
 				"portfolio_value": account.PortfolioValue,
 			}).Info("Successfully connected to Alpaca")
 			brokerReady = true
+			os.Setenv("OPENPROPHET_BROKER_READY", "true")
 		}
 	} else {
 		logger.Warn("Trading service unavailable - API credentials may be invalid")
@@ -176,14 +185,21 @@ func main() {
 	}
 	reconcileSkipped := 1
 	managedSkipped := 1
+	os.Setenv("OPENPROPHET_RECONCILE_SKIPPED", strconv.Itoa(reconcileSkipped))
+	os.Setenv("OPENPROPHET_MANAGED_SKIPPED", strconv.Itoa(managedSkipped))
 	if brokerReady {
 		reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		reconciled, skipped := orderController.ReconcileOpenOrders(reconcileCtx)
 		reconcileCancel()
 		reconcileSkipped = skipped
+		os.Setenv("OPENPROPHET_RECONCILE_SKIPPED", strconv.Itoa(reconcileSkipped))
 		logger.WithFields(logrus.Fields{
 			"reconciled": reconciled,
 			"skipped":    skipped,
+		}).WithFields(logrus.Fields{
+			"execution_enabled": executionEnabled,
+			"broker_ready":      brokerReady,
+			"reconcile_skipped": reconcileSkipped,
 		}).Info("Startup order reconciliation complete")
 		if skipped > 0 {
 			logger.Error("Trading execution remains blocked because persisted order state is unresolved")
@@ -204,14 +220,32 @@ func main() {
 		managedSkipped = positionManager.ReconcilePersistedPositions(managedCtx)
 		managedCancel()
 	}
+	os.Setenv("OPENPROPHET_MANAGED_SKIPPED", strconv.Itoa(managedSkipped))
 	if executionEnabled && brokerReady && reconcileSkipped == 0 && managedSkipped == 0 {
 		os.Setenv("OPENPROPHET_RECONCILIATION_COMPLETE", "true")
+		os.Setenv("OPENPROPHET_EXECUTION_BLOCKED", "false")
 		orderController.SetExecutionBlocked(false)
 		tradingService.SetExecutionBlocked(false)
 		positionManager.SetExecutionBlocked(false)
 	} else {
-		logger.WithFields(logrus.Fields{"order_skipped": reconcileSkipped, "managed_skipped": managedSkipped}).Error("Trading execution remains blocked after startup reconciliation")
+		os.Setenv("OPENPROPHET_EXECUTION_BLOCKED", "true")
+		logger.WithFields(logrus.Fields{
+			"execution_enabled":       executionEnabled,
+			"broker_ready":            brokerReady,
+			"reconcile_skipped":       reconcileSkipped,
+			"managed_skipped":         managedSkipped,
+			"reconciliation_complete": false,
+			"execution_blocked":       true,
+		}).Error("Trading execution remains blocked after startup reconciliation")
 	}
+	logger.WithFields(logrus.Fields{
+		"execution_enabled":       executionEnabled,
+		"broker_ready":            brokerReady,
+		"reconcile_skipped":       reconcileSkipped,
+		"managed_skipped":         managedSkipped,
+		"reconciliation_complete": os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true",
+		"execution_blocked":       os.Getenv("OPENPROPHET_EXECUTION_BLOCKED") == "true",
+	}).Info("Execution gate diagnostic")
 	positionController := controllers.NewPositionManagementController(positionManager)
 
 	// Create activity logger
@@ -313,6 +347,11 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 			}
 		}
 		reconciliationComplete := os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true"
+		executionEnabledDiagnostic := os.Getenv("OPENPROPHET_EXECUTION_ENABLED") == "true"
+		brokerReadyDiagnostic := os.Getenv("OPENPROPHET_BROKER_READY") == "true"
+		reconcileSkippedDiagnostic, _ := strconv.Atoi(os.Getenv("OPENPROPHET_RECONCILE_SKIPPED"))
+		managedSkippedDiagnostic, _ := strconv.Atoi(os.Getenv("OPENPROPHET_MANAGED_SKIPPED"))
+		executionBlockedDiagnostic := os.Getenv("OPENPROPHET_EXECUTION_BLOCKED") != "false"
 		identityComplete := os.Getenv("OPENPROPHET_SANDBOX_ID") != "" && os.Getenv("OPENPROPHET_ACCOUNT_ID") != "" && os.Getenv("ALPACA_ACCOUNT_ID") != "" && os.Getenv("OPENPROPHET_PROCESS_NONCE") != ""
 		ready := brokerAvailable && identityComplete && reconciliationComplete && !orderController.ExecutionBlocked() && !positionManager.ExecutionBlocked()
 		status := "healthy"
@@ -330,6 +369,11 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 			"broker_account_id":       os.Getenv("ALPACA_ACCOUNT_ID"),
 			"paper":                   config.AppConfig.AlpacaPaper,
 			"reconciliation_complete": os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true",
+			"execution_enabled":       executionEnabledDiagnostic,
+			"broker_ready":            brokerReadyDiagnostic,
+			"reconcile_skipped":       reconcileSkippedDiagnostic,
+			"managed_skipped":         managedSkippedDiagnostic,
+			"execution_blocked":       executionBlockedDiagnostic,
 			"process_nonce":           os.Getenv("OPENPROPHET_PROCESS_NONCE"),
 		})
 	})

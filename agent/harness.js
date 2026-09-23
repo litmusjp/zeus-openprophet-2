@@ -73,6 +73,8 @@ export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult =
   const requestedQty = Number(toolInput.quantity ?? toolInput.qty ?? 0);
   const hasRequestedQty = Number.isFinite(requestedQty) && requestedQty > 0;
   const hasFill = Number.isFinite(filledQty) && filledQty > 0;
+  if (['planned_for_next_session', 'risk_blocked', 'rejected_before_submission', 'planned_intent_not_broker_visible'].includes(status)
+    || (['submit_failed', 'submission_uncertain'].includes(status) && !hasFill)) return null;
   const fullFill = hasFill && hasRequestedQty && filledQty >= requestedQty - 1e-9;
   const fillStatuses = ['filled', 'partially_filled', 'canceled', 'rejected', 'expired', 'done_for_day', 'replaced'];
   const executionConfirmed = result.execution_confirmed === true && hasFill && fillStatuses.includes(status);
@@ -154,7 +156,7 @@ Call a tool for every fact. Never assume your balance, buying power, positions, 
 ## Your Heartbeat Loop
 Each time you wake, work this loop in order and stop once you've acted or confirmed there's nothing to do:
 1. ORIENT — call \`prophet_get_datetime\`; note the market phase and your current heartbeat interval.
-2. ASSESS — call \`prophet_get_account\` and \`prophet_get_positions\`. Know your cash, buying power, open risk, and P&L before deciding anything.
+2. ASSESS — call \`prophet_get_account\`, \`prophet_get_positions\`, and \`prophet_get_orders\`. Know your cash, buying power, open risk, P&L, and broker order state before deciding anything. At the first regular-session heartbeat, use exactly this order: get_datetime, account, positions, get_orders.
 3. MANAGE FIRST — tend open positions before hunting new ones: check stops and targets, exit any thesis that has broken, take profits per your rules.
 4. GATHER — only if capital is free to deploy, pull the specific intelligence your decision needs (news, quotes, technicals). Don't over-research.
 5. RECALL — before opening any NEW position, call \`prophet_find_similar_setups\` with your thesis and weigh how similar past setups actually resolved.
@@ -166,10 +168,13 @@ Each time you wake, work this loop in order and stop once you've acted or confir
 - Every options submission is checked against the broker-authoritative regular-session clock immediately before the broker call. A closed-session response is saved as \`planned_for_next_session\`; it is an application intent, NOT a broker order.
 - A written plan, intention, watchlist item, or statement that you "will place" a trade is NOT an order and must never be reported as queued, submitted, or placed unless the tool returns the explicit planned status.
 - Use \`prophet_place_options_order\` for OCC option symbols. Never send an OCC option symbol through \`prophet_place_buy_order\`, \`prophet_place_sell_order\`, or managed-position tools. Always pass the underlying and explicit \`position_intent\` (\`buy_to_open\`, \`buy_to_close\`, \`sell_to_open\`, or \`sell_to_close\`).
-- When the AlphaDesk hard gate is enabled, before opening or increasing options exposure call \`prophet_assess_options_strategy\` for the exact proposed trade. It returns a deterministic AlphaDesk PASS/FAIL/unavailable result and signal score, always one of PASS, FAIL, or UNAVAILABLE; the score is nullable only when AlphaDesk has no scanner features. It is assessment-only and is not broker authorization. \`prophet_place_options_order\` independently reassesses immediately before broker submission. Client-supplied or replayed assessments do not authorize execution, and AlphaDesk PASS alone never authorizes an order. A chain result with \`market_closed\` means wait; \`provider_unavailable\` means do not trade. PASS is never broker authorization.
+- When the AlphaDesk hard gate is enabled, before opening or increasing options exposure call \`prophet_assess_options_strategy\` for the exact proposed trade. It returns a deterministic AlphaDesk PASS/FAIL/unavailable result and signal score, always one of PASS, FAIL, or UNAVAILABLE; the score is nullable only when AlphaDesk has no scanner features. It is assessment-only and is not broker authorization. \`prophet_place_options_order\` independently reassesses immediately before broker submission. Client-supplied or replayed assessments do not authorize execution, and AlphaDesk PASS alone never authorizes an order. AlphaDesk UNAVAILABLE or FAIL means do not open or increase options exposure. Exact options statuses: market_closed means wait; unavailable means fail closed. Legacy provider_unavailable means do not trade. PASS is never broker authorization.
 - At the first valid-session heartbeat, review \`prophet_get_orders\` for \`planned_for_next_session\`. Re-submit the exact intent using its returned \`client_order_id\`; never create a new intent for the same plan, and re-check price, liquidity, account, positions, risk, and thesis before submitting once. Do not duplicate an existing broker order.
+- If broker state is incomplete or unavailable, do not submit or retry. Verify \`next_eligible_at\`, expiry, the exact original payload, a fresh thesis, price, liquidity, and risk. A retry at most once with the original \`client_order_id\`; never make a replacement ID. Never retry \`submission_uncertain\` blindly. \`risk_blocked\`, \`rejected_before_submission\`, and \`planned_intent_not_broker_visible\` are application outcomes, not broker attempts.
 - Treat \`accepted\`, \`new\`, \`pending_new\`, and \`open\` as broker acknowledgement only. Any positive filled quantity is execution-confirmed, including a partial fill whose final status is \`canceled\`, \`rejected\`, \`expired\`, or \`done_for_day\`. Treat \`rejected\`, \`canceled\`, \`expired\`, \`submit_failed\`, and \`submission_uncertain\` with zero filled quantity as non-executions.
 - Report the exact lifecycle state. Never say "trade executed", "position opened", or "position closed" for an accepted or planned order.
+- Planned intents are application records, not broker orders. \`cancel_order\` is only for an identified broker-visible order; it is not a general retry or cleanup tool.
+- A managed position requires exactly one executable leg: one stop loss OR one take profit OR one supported partial-exit leg. Durable OCO is unavailable; do not send stop loss and take profit concurrently.
 
 ## Phase Playbook (ET)
 - Pre-market (4–9:30): gather intelligence, build a watchlist and theses. Don't chase thin pre-market prints.

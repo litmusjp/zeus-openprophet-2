@@ -631,7 +631,7 @@ The user/operator is sending you a direct message. Read it carefully and respond
 
 ## Your Available Tools (DO NOT call get_agent_config to discover these)
 
-${renderToolMenu()}
+${renderPrefixedToolMenu()}
 
 ## Instructions
 - If the user asks to create a new agent: use create_agent to create it, then optionally create_strategy for its rules, then assign_agent_to_sandbox to activate it.

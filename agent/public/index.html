@@ -1191,6 +1191,7 @@
 let config = { accounts: [], agents: [], strategies: [], models: [] };
 let historyState = { sandboxes: [], chatSessions: [], chatMessages: [], selectedChatId: null, loaded: false };
 let selectedSandboxId = null;
+let promptPreviewRequestId = 0;
 let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases: {}, permissions: {}, slack: {}, alphadesk: {} };
 const authToken = new URLSearchParams(window.location.search).get('token') || '';
 let autoScroll = true;
@@ -2971,10 +2972,13 @@ async function saveAgentPrompt(agentId) {
 }
 
 async function previewAgentPrompt(agentId) {
+  const sid = getEffectiveSandboxId();
+  const requestId = ++promptPreviewRequestId;
+  if (!sid || sid === '_manager') return;
   try {
-    const sid = getEffectiveSandboxId();
     const r = await fetch('/api/agent/prompt-preview?sandboxId=' + encodeURIComponent(sid || ''));
     const d = await r.json();
+    if (requestId !== promptPreviewRequestId || getEffectiveSandboxId() !== sid || d.sandboxId !== sid || d.agentId !== agentId) return;
     const textarea = document.getElementById('agent-prompt-text-' + agentId);
     if (textarea && !textarea.value) {
       textarea.value = d.prompt || '';
@@ -2987,6 +2991,7 @@ async function previewAgentPrompt(agentId) {
       + '<div class="modal-actions" style="margin-top:12px"><button class="btn sm" onclick="closeModal()">Close</button></div>';
     document.getElementById('modal-overlay').classList.add('visible');
   } catch (e) {
+    if (requestId !== promptPreviewRequestId || getEffectiveSandboxId() !== sid) return;
     alert('Error loading prompt: ' + e.message);
   }
 }
@@ -3885,16 +3890,20 @@ async function testSlack() {
 
 async function renderPromptPreview() {
   const el = document.getElementById('prompt-preview');
+  const sid = getEffectiveSandboxId();
+  const requestId = ++promptPreviewRequestId;
+  if (!sid || sid === '_manager') return;
   try {
-    const sid = getEffectiveSandboxId();
     const r = await fetch('/api/agent/prompt-preview' + (sid ? '?sandboxId=' + encodeURIComponent(sid) : ''));
     const d = await r.json();
+    if (requestId !== promptPreviewRequestId || getEffectiveSandboxId() !== sid || d.sandboxId !== sid) return;
     if (d.prompt) {
       el.textContent = d.prompt;
     } else {
       el.textContent = 'No prompt available.';
     }
   } catch {
+    if (requestId !== promptPreviewRequestId || getEffectiveSandboxId() !== sid) return;
     el.textContent = 'Failed to load prompt preview.';
   }
 }

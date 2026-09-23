@@ -1337,13 +1337,14 @@ app.get('/api/config', (req, res) => {
 // System prompt preview
 app.get('/api/agent/prompt-preview', async (req, res) => {
   try {
-    const sandboxId = req.query.sandboxId || getActiveSandbox()?.id;
-    const agentConfig = sandboxId ? getResolvedAgentForSandbox(sandboxId) : getActiveAgent();
+    const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : getActiveSandbox()?.id;
+    if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
+    const agentConfig = getResolvedAgentForSandbox(sandboxId);
     const prompt = await buildSystemPrompt(agentConfig, {
       getStrategyById,
       heartbeatIntervalsForced: Boolean(getSandbox(sandboxId)?.heartbeat?.forceHeartbeatIntervals),
     });
-    res.json({ prompt, agentName: agentConfig.name, sandboxId });
+    res.json({ prompt, agentId: agentConfig.id, agentName: agentConfig.name, sandboxId });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

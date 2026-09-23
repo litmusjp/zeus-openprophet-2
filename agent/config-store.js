@@ -102,6 +102,9 @@ const DEFAULT_PLUGINS = {
 };
 
 const DEFAULT_AGENT_OVERRIDES = {
+  // Identifies which selected agent owns sandbox-level identity/rule overrides.
+  // Null marks legacy overrides as ambiguous; they must not override an agent.
+  agentId: null,
   name: null,
   description: null,
   systemPromptTemplate: null,
@@ -1132,6 +1135,7 @@ export function getResolvedAgentForSandbox(sandboxId) {
 
   const baseAgent = getAgentById(sandbox.agent.activeAgentId) || null;
   const overrides = sandbox.agent?.overrides || {};
+  const overridesBelongToSelectedAgent = overrides.agentId === sandbox.agent.activeAgentId;
   const resolved = {
     ...(baseAgent || {}),
     id: sandbox.agent.activeAgentId,
@@ -1145,12 +1149,16 @@ export function getResolvedAgentForSandbox(sandboxId) {
     customStrategyRules: overrides.customStrategyRules ?? null,
   };
 
-  if (overrides.name !== null) resolved.name = overrides.name;
-  if (overrides.description !== null) resolved.description = overrides.description;
-  if (overrides.systemPromptTemplate !== null) resolved.systemPromptTemplate = overrides.systemPromptTemplate;
-  if (overrides.customSystemPrompt !== null) resolved.customSystemPrompt = overrides.customSystemPrompt;
-  if (Object.prototype.hasOwnProperty.call(overrides, 'strategyId') && overrides.strategyId !== undefined) {
+  if (overridesBelongToSelectedAgent && overrides.name !== null) resolved.name = overrides.name;
+  if (overridesBelongToSelectedAgent && overrides.description !== null) resolved.description = overrides.description;
+  if (overridesBelongToSelectedAgent && overrides.systemPromptTemplate !== null) resolved.systemPromptTemplate = overrides.systemPromptTemplate;
+  if (overridesBelongToSelectedAgent && overrides.customSystemPrompt !== null) resolved.customSystemPrompt = overrides.customSystemPrompt;
+  if (overridesBelongToSelectedAgent && Object.prototype.hasOwnProperty.call(overrides, 'strategyId') && overrides.strategyId !== undefined) {
     resolved.strategyId = overrides.strategyId;
+  }
+
+  if (!overridesBelongToSelectedAgent) {
+    resolved.customStrategyRules = null;
   }
 
   return resolved;
@@ -1160,13 +1168,19 @@ export async function updateSandboxAgentOverrides(sandboxId, overrides) {
   const sandbox = getSandbox(sandboxId);
   if (!sandbox) throw new Error('Sandbox not found');
 
+  const overrideKeys = ['name', 'description', 'systemPromptTemplate', 'customSystemPrompt', 'strategyId', 'customStrategyRules'];
+  const scopesAgentOverride = overrideKeys.some(key => Object.prototype.hasOwnProperty.call(overrides, key));
+  const scopedOverrides = scopesAgentOverride
+    ? { ...overrides, agentId: sandbox.agent.activeAgentId }
+    : overrides;
+
   _config.sandboxes[sandboxId] = mergeSandbox({
     ...sandbox,
     agent: {
       ...sandbox.agent,
       overrides: {
         ...(sandbox.agent?.overrides || {}),
-        ...overrides,
+        ...scopedOverrides,
         heartbeatOverrides: {
           ...(sandbox.agent?.overrides?.heartbeatOverrides || {}),
           ...(overrides.heartbeatOverrides || {}),
@@ -1198,9 +1212,13 @@ export async function updateSandboxAgentSelection(sandboxId, updates) {
     },
   };
   if (agentChanged) {
-    mergedOverrides.customStrategyRules = null;
-    mergedOverrides.customSystemPrompt = null;
-    mergedOverrides.systemPromptTemplate = null;
+    mergedOverrides = {
+      ...mergedOverrides,
+      agentId: nextActiveAgentId,
+      customStrategyRules: null,
+      customSystemPrompt: null,
+      systemPromptTemplate: null,
+    };
   }
 
   _config.sandboxes[sandboxId] = mergeSandbox({

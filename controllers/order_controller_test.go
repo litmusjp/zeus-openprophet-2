@@ -18,6 +18,43 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type unavailableAssessmentTradingService struct {
+	interfaces.TradingService
+}
+
+func (s *unavailableAssessmentTradingService) AssessOptionsStrategy(context.Context, *interfaces.OptionsOrder, any) (*interfaces.AlphaDeskAssessment, error) {
+	return nil, &services.AlphaDeskUnavailableError{Reason: "provider unavailable in test"}
+}
+
+func TestAssessOptionsStrategyUnavailableResponseOmitsFabricatedAssessmentFields(t *testing.T) {
+	controller := NewOrderController(&unavailableAssessmentTradingService{}, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/options/assessment", bytes.NewBufferString(`{"symbol":"AAPL","underlying":"AAPL","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","time_in_force":"day","limit_price":1.25}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	controller.AssessOptionsStrategy(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["decision"] != "UNAVAILABLE" || response["qualification_status"] != "unavailable" {
+		t.Fatalf("response = %#v, want typed unavailable decision", response)
+	}
+	for _, field := range []string{"assessment_id", "trade_fingerprint", "expires_at", "market_evidence_at", "observed_at"} {
+		if _, ok := response[field]; ok {
+			t.Fatalf("response fabricated unavailable field %q: %#v", field, response[field])
+		}
+	}
+	if pass, ok := response["pass"]; ok && pass != nil {
+		t.Fatalf("pass = %#v, want null or omitted", pass)
+	}
+}
+
 type reconciliationTradingService struct {
 	orders map[string]*interfaces.Order
 	err    error

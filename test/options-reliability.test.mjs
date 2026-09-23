@@ -13,6 +13,24 @@ test('MCP exposes structured options-chain availability instead of converting ma
   assert.match(mcp, /status === 503 && error\?\.response\?\.data\?\.category/);
 });
 
+test('MCP returns managed market_closed diagnostics before success-only handling', () => {
+  const start = mcp.indexOf("case 'place_managed_position'");
+  const end = mcp.indexOf("case 'get_managed_positions'", start);
+  const handler = mcp.slice(start, end);
+  assert.match(handler, /callTradingBot\('\/positions\/managed', 'POST', requestData\)/);
+  assert.match(mcp, /diagnostics\?\.category === 'market_closed' && diagnostics\?\.status === 'market_closed'[\s\S]*?structuredContent: diagnostics,[\s\S]*?\n\s*};[\s\S]*?\n\s*}/);
+  assert.ok(handler.indexOf('autoStoreSetup(') < handler.indexOf('return orderResponse(data, args)'));
+  const marketClosed = mcp.slice(mcp.indexOf("if (diagnostics?.category === 'market_closed'"), mcp.indexOf("return {\n      content: [", mcp.indexOf("if (diagnostics?.category === 'market_closed'")));
+  assert.match(marketClosed, /return \{/);
+  assert.match(marketClosed, /structuredContent: diagnostics/);
+  assert.doesNotMatch(marketClosed, /orderResponse|autoStoreSetup/);
+});
+
+test('MCP transport diagnostics retain a sanitized underlying error', () => {
+  assert.match(mcp, /const transportError = String\(lastError\?\.code \|\| lastError\?\.message \|\| 'request failed'\)/);
+  assert.match(mcp, /error: transportError/);
+});
+
 test('agent instructions distinguish market closed, provider unavailable, and assessment authorization', () => {
   assert.match(harness, /market_closed.*means wait/);
   assert.match(harness, /provider_unavailable.*means do not trade/);

@@ -1541,9 +1541,14 @@ func (oc *OrderController) AssessOptionsStrategy(c *gin.Context) {
 	if err != nil {
 		var unavailable *services.AlphaDeskUnavailableError
 		if errors.As(err, &unavailable) {
-			assessment := &interfaces.AlphaDeskAssessment{Decision: "UNAVAILABLE", QualificationStatus: "unavailable", Fingerprint: ""}
 			oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("AlphaDesk assessment unavailable")
-			c.JSON(200, assessment)
+			c.JSON(http.StatusOK, gin.H{
+				"decision":             "UNAVAILABLE",
+				"qualification_status": "unavailable",
+				"pass":                 nil,
+				"qualified":            false,
+				"execution_allowed":    false,
+			})
 			return
 		}
 		var validation *services.AlphaDeskValidationError

@@ -99,6 +99,50 @@ func TestManagedPositionGinBoundaryClassifiesMarketDataUnavailable(t *testing.T)
 	}
 }
 
+func TestManagedPositionGinBoundaryClassifiesMarketClosed(t *testing.T) {
+	t.Setenv("ALPACA_ACCOUNT_ID", "test-broker-account")
+	t.Setenv("ALPACA_PAPER", "true")
+	t.Setenv("OPENPROPHET_TENANT_ID", "test-tenant")
+	t.Setenv("OPENPROPHET_SANDBOX_ID", "test-sandbox")
+	nextOpen := time.Date(2026, 9, 24, 13, 30, 0, 0, time.UTC)
+	trading := &closedSessionTradingService{nextOpen: nextOpen}
+	storage, err := database.NewLocalStorage(t.TempDir() + "/managed-closed.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	pm := services.NewPositionManager(trading, &managedQuoteData{quote: &interfaces.Quote{Symbol: "AAPL", AskPrice: 100, BidPrice: 100}}, storage)
+	rec := managedPositionRequest(t, pm, `{"client_order_id":"managed-market-closed","symbol":"AAPL","side":"buy","allocation_dollars":1000,"entry_strategy":"limit","entry_price":100,"stop_loss_price":90}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s; want structured market_closed", rec.Code, rec.Body.String())
+	}
+	body := managedResponse(t, rec)
+	if body["category"] != "market_closed" || body["status"] != "market_closed" || body["client_order_id"] != "managed-market-closed" || body["next_eligible_at"] == nil {
+		t.Fatalf("body=%v; want auditable market_closed response with next eligible time", body)
+	}
+	if trading.brokerSubmissionCalls != 0 {
+		t.Fatalf("broker submissions=%d; want 0", trading.brokerSubmissionCalls)
+	}
+	order, err := storage.GetOrderByClientOrderID("managed-market-closed")
+	if err != nil || order == nil || order.Status != "market_closed" || order.ClientOrderID != "managed-market-closed" {
+		t.Fatalf("persisted order=%#v err=%v; want market_closed audit with stable client ID", order, err)
+	}
+	projection, err := storage.GetManagedOrder("managed-market-closed")
+	if err != nil || projection == nil || projection.Lifecycle != "market_closed" || projection.ClientOrderID != "managed-market-closed" {
+		t.Fatalf("persisted projection=%#v err=%v; want terminal market_closed projection", projection, err)
+	}
+	positions, err := storage.GetAllManagedPositions("")
+	if err != nil || len(positions) != 1 || positions[0].Status != "CANCELLED" || positions[0].EntryClientOrderID != "managed-market-closed" {
+		t.Fatalf("persisted positions=%#v err=%v; want terminalized audited position", positions, err)
+	}
+	if positions[0].RemainingQty != 0 || positions[0].EntryRemainingQty != 0 || positions[0].Quantity == 0 || positions[0].EntryPrice == 0 {
+		t.Fatalf("persisted position=%#v; want zero remaining quantities with audit fields preserved", positions[0])
+	}
+	if skipped := pm.ReconcilePersistedPositions(context.Background()); skipped != 0 {
+		t.Fatalf("reconciliation skipped=%d; terminal position must not be treated as pending", skipped)
+	}
+}
+
 func TestCloseManagedPositionMissingIDReturnsStructured404(t *testing.T) {
 	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
 	t.Setenv("ALPACA_ACCOUNT_ID", "test-broker-account")

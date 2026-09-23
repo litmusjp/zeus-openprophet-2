@@ -129,6 +129,8 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
   }
   const status = lastError?.response?.status || 0;
   const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
+  const transportError = String(lastError?.code || lastError?.message || 'request failed')
+    .replace(/https?:\/\/[^\s]+/g, '<trading_bot>');
   const detail = {
     endpoint,
     tool: endpoint.replace(/^\//, '').split('/')[0] || 'trading_bot',
@@ -136,6 +138,7 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
     category: status ? 'upstream_http' : 'transport',
     attempts: attempt,
     retryable,
+    error: transportError,
   };
   const responseDetail = lastError?.response?.data;
   if (responseDetail && typeof responseDetail === 'object' && !Array.isArray(responseDetail)) {
@@ -2489,6 +2492,12 @@ Worst Trade: ${stats.worst_result_pct.toFixed(1)}% ($${stats.worst_result_dollar
     }
   } catch (error) {
     const diagnostics = error?.diagnostics;
+    if (diagnostics?.category === 'market_closed' && diagnostics?.status === 'market_closed') {
+      return {
+        content: [{ type: 'text', text: JSON.stringify(diagnostics, null, 2) }],
+        structuredContent: diagnostics,
+      };
+    }
     return {
       content: [
         {

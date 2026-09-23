@@ -314,7 +314,7 @@ func (pm *PositionManager) clearExecutionBlockIfSafe() {
 		return
 	}
 	for _, position := range pm.positions {
-		if position == nil || position.Status == "CLOSED" || position.Status == "STOPPED_OUT" {
+		if position == nil || position.Status == "CLOSED" || position.Status == "STOPPED_OUT" || position.Status == "CANCELLED" {
 			continue
 		}
 		if position.Status != "ACTIVE" || !hasExactlyOneExecutableProtectionLeg(position) {
@@ -573,7 +573,16 @@ func (pm *PositionManager) PlaceManagedPosition(ctx context.Context, req *PlaceM
 
 	// Place entry order
 	if err := pm.placeEntryOrder(ctx, position); err != nil {
-		_ = pm.savePositionToDB(position)
+		var marketClosed *MarketClosedError
+		if errors.As(err, &marketClosed) {
+			position.Status = "CANCELLED"
+			position.RemainingQty = 0
+			position.EntryRemainingQty = 0
+			position.UpdatedAt = time.Now()
+			if saveErr := pm.savePositionToDB(position); saveErr != nil {
+				return nil, &SubmissionUncertainError{Err: fmt.Errorf("market-closed managed intent terminalization failed: %w", saveErr)}
+			}
+		}
 		return nil, fmt.Errorf("failed to place entry order: %w", err)
 	}
 
@@ -700,10 +709,24 @@ func (pm *PositionManager) placeEntryOrder(ctx context.Context, position *Manage
 		if IsSubmissionUncertain(err) {
 			order.Status = "submission_uncertain"
 		}
-		if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
-			pm.logger.WithError(saveErr).Warn("Failed to record managed position entry submission failure")
+		var marketClosed *MarketClosedError
+		if errors.As(err, &marketClosed) {
+			order.Status = "market_closed"
+			if marketClosed.NextOpen.IsZero() {
+				order.NextEligibleAt = nil
+			} else {
+				nextOpen := marketClosed.NextOpen
+				order.NextEligibleAt = &nextOpen
+			}
 		}
-		_ = pm.saveManagedOrderProjection(position.ID, "entry", order, order.Status)
+		if saveErr := pm.storageService.SaveOrder(order); saveErr != nil {
+			pm.logger.WithError(saveErr).Error("Failed to record managed position entry submission failure")
+			return &SubmissionUncertainError{Err: fmt.Errorf("managed entry failure persistence is unresolved: %w", saveErr)}
+		}
+		if projectionErr := pm.saveManagedOrderProjection(position.ID, "entry", order, order.Status); projectionErr != nil {
+			pm.logger.WithError(projectionErr).Error("Failed to persist managed entry failure projection")
+			return &SubmissionUncertainError{Err: fmt.Errorf("managed entry failure projection is unresolved: %w", projectionErr)}
+		}
 		return err
 	}
 
@@ -2719,7 +2742,7 @@ func (pm *PositionManager) loadPositionsFromDB() error {
 	loaded := 0
 	for _, dbPos := range dbPositions {
 		// Skip closed positions
-		if dbPos.Status == "CLOSED" || dbPos.Status == "STOPPED_OUT" {
+		if dbPos.Status == "CLOSED" || dbPos.Status == "STOPPED_OUT" || dbPos.Status == "CANCELLED" {
 			continue
 		}
 

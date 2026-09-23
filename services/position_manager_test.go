@@ -372,6 +372,45 @@ func newTestPositionManagerAt(t *testing.T, rec *exitOrderRecorder, dbPath strin
 	return NewPositionManager(rec, nil, storage), storage
 }
 
+func TestCancelledManagedPositionLoadsAndClearsStartupBlock(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cancelled-position.db")
+	storage, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := storage.DurableIdentity()
+	position := &models.DBManagedPosition{DurableIdentity: identity, PositionID: "cancelled-market-closed", Symbol: "AAPL", Side: "buy", Quantity: 10, RemainingQty: 0, EntryRemainingQty: 0, EntryClientOrderID: "stable-market-closed-id", Status: "CANCELLED"}
+	if err := storage.SaveManagedPosition(position); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := &exitOrderRecorder{}
+	reopened, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	fresh := NewPositionManager(rec, nil, reopened)
+	fresh.SetExecutionBlocked(true)
+	fresh.clearExecutionBlockIfSafe()
+	if fresh.ExecutionBlocked() {
+		t.Fatal("fresh manager remains execution-blocked by persisted CANCELLED position")
+	}
+	if skipped := fresh.ReconcilePersistedPositions(context.Background()); skipped != 0 || rec.calls != 0 {
+		t.Fatalf("reconcile skipped=%d submissions=%d; want no pending work and no submissions", skipped, rec.calls)
+	}
+	if fresh.initializationErr != nil {
+		t.Fatalf("fresh manager initialization error=%v; terminal cancellation must load cleanly", fresh.initializationErr)
+	}
+	persisted, err := reopened.GetAllManagedPositions("")
+	if err != nil || len(persisted) != 1 || persisted[0].Status != "CANCELLED" || persisted[0].EntryClientOrderID != "stable-market-closed-id" || persisted[0].RemainingQty != 0 || persisted[0].EntryRemainingQty != 0 {
+		t.Fatalf("persisted cancelled audit=%#v err=%v; want preserved identity and zero remaining quantities", persisted, err)
+	}
+}
+
 func TestSaveManagedPositionUpdatesByPositionID(t *testing.T) {
 	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "managed.db"))
 	if err != nil {

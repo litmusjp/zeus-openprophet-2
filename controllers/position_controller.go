@@ -48,6 +48,15 @@ func (pmc *PositionManagementController) HandlePlaceManagedPosition(c *gin.Conte
 			c.JSON(http.StatusConflict, gin.H{"error": "managed_submission_uncertain", "category": "submission_uncertain", "details": err.Error(), "retryable": false})
 			return
 		}
+		var marketClosed *services.MarketClosedError
+		if errors.As(err, &marketClosed) {
+			body := gin.H{"status": "market_closed", "error": "market_closed", "category": "market_closed", "client_order_id": req.ClientOrderID, "details": marketClosed.Error(), "retryable": false}
+			if !marketClosed.NextOpen.IsZero() {
+				body["next_eligible_at"] = marketClosed.NextOpen
+			}
+			c.JSON(http.StatusConflict, body)
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "managed_position_failed", "category": "internal_error", "details": err.Error(), "retryable": false,
 		})

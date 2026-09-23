@@ -12,6 +12,7 @@ import path from 'path';
 import { checkPermissions } from './permissions.js';
 import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
 import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
+import { readNewsSummaryFile } from './news_summary.js';
 
 // Configuration
 const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
@@ -1730,7 +1731,11 @@ ${allNews.map((article, i) =>
         // Sanitize filename — prevent path traversal
         const safeName = path.basename(args.filename);
         const filepath = path.join(SUMMARIES_DIR, safeName);
-        const content = await fs.readFile(filepath, 'utf-8');
+        const summaryFile = await readNewsSummaryFile(fs, filepath, safeName);
+        if (!summaryFile.found) {
+          return { content: [{ type: 'text', text: JSON.stringify(summaryFile.result) }] };
+        }
+        const content = summaryFile.content;
         return {
           content: [
             {

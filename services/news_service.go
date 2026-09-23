@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -56,7 +57,8 @@ type RSSFeed struct {
 
 // NewsService handles fetching news from various sources
 type NewsService struct {
-	httpClient *http.Client
+	httpClient   *http.Client
+	searchSymbol func(string) ([]NewsItem, error)
 }
 
 // NewNewsService creates a new news service
@@ -106,6 +108,74 @@ func (ns *NewsService) GetGoogleNewsSearch(query string) ([]NewsItem, error) {
 	return ns.fetchRSSFeed(urlString)
 }
 
+// NormalizeNewsSymbols canonicalizes a comma-separated symbol list for search.
+func NormalizeNewsSymbols(raw string) []string {
+	seen := make(map[string]struct{})
+	var symbols []string
+	for _, part := range strings.Split(raw, ",") {
+		symbol := strings.ToUpper(strings.TrimSpace(part))
+		if symbol == "" {
+			continue
+		}
+		if _, ok := seen[symbol]; ok {
+			continue
+		}
+		seen[symbol] = struct{}{}
+		symbols = append(symbols, symbol)
+	}
+	return symbols
+}
+
+// GetGoogleNewsSearchBySymbols searches each symbol independently and removes
+// duplicate stories returned by overlapping provider results.
+func (ns *NewsService) GetGoogleNewsSearchBySymbols(raw string) ([]NewsItem, []string, error) {
+	symbols := NormalizeNewsSymbols(raw)
+	items := make([]NewsItem, 0)
+	seen := make(map[string]struct{})
+	for _, symbol := range symbols {
+		search := ns.GetGoogleNewsSearch
+		if ns.searchSymbol != nil {
+			search = ns.searchSymbol
+		}
+		results, err := search(symbol)
+		if err != nil {
+			return nil, symbols, err
+		}
+		for _, item := range results {
+			identities := newsItemIdentities(item)
+			duplicate := false
+			for identity := range identities {
+				if _, ok := seen[identity]; ok {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate || len(identities) == 0 {
+				continue
+			}
+			for identity := range identities {
+				seen[identity] = struct{}{}
+			}
+			items = append(items, item)
+		}
+	}
+	return items, symbols, nil
+}
+
+func newsItemIdentities(item NewsItem) map[string]struct{} {
+	identities := make(map[string]struct{})
+	for _, identity := range []string{
+		strings.TrimSpace(item.GUID),
+		strings.TrimSpace(item.Link),
+		strings.ToLower(strings.Join(strings.Fields(item.Title), " ")),
+	} {
+		if identity != "" {
+			identities[identity] = struct{}{}
+		}
+	}
+	return identities
+}
+
 // GetMarketWatchTopStories fetches top stories from MarketWatch
 func (ns *NewsService) GetMarketWatchTopStories() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_topstories"
@@ -147,7 +217,29 @@ func (ns *NewsService) GetMarketWatchBulletins() ([]NewsItem, error) {
 // GetMarketWatchMarketPulse fetches market pulse updates from MarketWatch
 func (ns *NewsService) GetMarketWatchMarketPulse() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_marketpulse"
-	return ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeed(url)
+	if err != nil {
+		return nil, err
+	}
+	return markMarketPulseFreshness(items, time.Now()), nil
+}
+
+// MarketPulse is an intraday feed. Two hours bounds how long an item may be
+// presented as current while retaining older items as informational data.
+func markMarketPulseFreshness(items []NewsItem, now time.Time) []NewsItem {
+	const maxAge = 2 * time.Hour
+	for i := range items {
+		fresh := !items[i].PublishedAt.IsZero() && !items[i].PublishedAt.After(now.Add(5*time.Minute)) && now.Sub(items[i].PublishedAt) <= maxAge
+		items[i].Stale = !fresh
+		if fresh {
+			items[i].Status = "current"
+			items[i].StaleReason = ""
+		} else {
+			items[i].Status = "stale"
+			items[i].StaleReason = "published_at_outside_marketpulse_window"
+		}
+	}
+	return items
 }
 
 // GetAllMarketWatchNews aggregates all MarketWatch feeds

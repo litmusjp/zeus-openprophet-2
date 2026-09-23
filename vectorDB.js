@@ -181,6 +181,14 @@ export async function findSimilarTrades(queryText, limit = 5, filters = {}) {
       JOIN trade_embeddings te ON tv.trade_id = te.id
       WHERE tv.embedding MATCH vec_f32(?)
         AND k = ?
+        AND (
+          (LOWER(COALESCE(te.provenance, '')) IN ('explicit_store_trade_setup', 'manual', 'manual_setup')
+            AND LOWER(COALESCE(te.status, 'manual')) NOT IN ('test', 'validation', 'unconfirmed', 'rejected', 'failed', 'submit_failed', 'submission_uncertain', 'planned_for_next_session'))
+          OR
+          (LOWER(COALESCE(te.provenance, '')) = 'broker_confirmed_fill'
+            AND LOWER(COALESCE(te.action, '')) IN ('buy', 'buy_to_open')
+            AND LOWER(COALESCE(te.status, '')) IN ('filled', 'partially_filled', 'canceled', 'rejected', 'expired', 'done_for_day', 'replaced'))
+        )
         ${whereClause}
       ORDER BY tv.distance
     `);
@@ -205,6 +213,17 @@ export async function findSimilarTrades(queryText, limit = 5, filters = {}) {
     console.error('Error finding similar trades:', error.message);
     throw error;
   }
+}
+
+// Pure eligibility contract used by tests and kept in sync with the SQL gate.
+export function isEligibleTradeRecord({ provenance, status, action } = {}) {
+  const p = String(provenance || '').trim().toLowerCase();
+  const s = String(status || (p === 'explicit_store_trade_setup' ? 'manual' : '')).trim().toLowerCase();
+  const a = String(action || '').trim().toLowerCase();
+  if (p !== 'broker_confirmed_fill' && ['test', 'validation', 'unconfirmed', 'rejected', 'failed', 'submit_failed', 'submission_uncertain', 'planned_for_next_session'].includes(s)) return false;
+  if (['explicit_store_trade_setup', 'manual', 'manual_setup'].includes(p)) return true;
+  return p === 'broker_confirmed_fill' && ['buy', 'buy_to_open'].includes(a)
+    && ['filled', 'partially_filled', 'canceled', 'rejected', 'expired', 'done_for_day', 'replaced'].includes(s);
 }
 
 /**
@@ -300,6 +319,7 @@ export default {
   getEmbedding,
   storeTrade,
   findSimilarTrades,
+  isEligibleTradeRecord,
   getTradeStats,
   clearAllEmbeddings,
   getEmbeddingCount,

@@ -32,7 +32,7 @@ func (nc *NewsController) HandleGetNews(c *gin.Context) {
 	news, err := nc.newsService.GetLatestNews(limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to fetch news",
+			"error":   "Failed to fetch news",
 			"details": err.Error(),
 		})
 		return
@@ -54,7 +54,7 @@ func (nc *NewsController) HandleGetNewsByTopic(c *gin.Context) {
 	news, err := nc.newsService.GetGoogleNewsByTopic(topic)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to fetch topic news",
+			"error":   "Failed to fetch topic news",
 			"details": err.Error(),
 		})
 		return
@@ -106,7 +106,7 @@ func (nc *NewsController) HandleSearchNews(c *gin.Context) {
 	news, err := nc.newsService.GetGoogleNewsSearch(query)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to search news",
+			"error":   "Failed to search news",
 			"details": err.Error(),
 		})
 		return
@@ -128,12 +128,13 @@ func (nc *NewsController) HandleSearchNews(c *gin.Context) {
 // GET /api/v1/news/market?symbols=TSLA,NVDA,AAPL
 func (nc *NewsController) HandleGetMarketNews(c *gin.Context) {
 	symbols := c.Query("symbols")
-	if symbols == "" {
+	normalizedSymbols := services.NormalizeNewsSymbols(symbols)
+	if len(normalizedSymbols) == 0 {
 		// Default to general market news
 		news, err := nc.newsService.GetGoogleNewsByTopic("BUSINESS")
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to fetch market news",
+				"error":   "Failed to fetch market news",
 				"details": err.Error(),
 			})
 			return
@@ -147,17 +148,17 @@ func (nc *NewsController) HandleGetMarketNews(c *gin.Context) {
 	}
 
 	// Search for specific symbols
-	news, err := nc.newsService.GetGoogleNewsSearch(symbols)
+	news, normalizedSymbols, err := nc.newsService.GetGoogleNewsSearchBySymbols(symbols)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to fetch symbol news",
+			"error":   "Failed to fetch symbol news",
 			"details": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"symbols": symbols,
+		"symbols": normalizedSymbols,
 		"count":   len(news),
 		"news":    news,
 	})

@@ -116,27 +116,48 @@ func (sas *StockAnalysisService) AnalyzeStock(ctx context.Context, symbol string
 	if err != nil {
 		return nil, fmt.Errorf("failed to get quote: %w", err)
 	}
-	analysis.CurrentPrice = quote.BidPrice
-
-	// Get latest bar for volume
-	bar, err := sas.dataService.GetLatestBar(ctx, symbol)
-	if err == nil {
-		analysis.Technical.Price = bar.Close
-		analysis.Technical.Volume = bar.Volume
-	} else {
-		analysis.Technical.Price = quote.BidPrice
-	}
-
 	// Get historical data for technical analysis (30 days)
 	endTime := time.Now()
 	startTime := endTime.AddDate(0, 0, -30)
 
 	bars, err := sas.dataService.GetHistoricalBars(ctx, symbol, startTime, endTime, "1Day")
-	if err == nil && len(bars) > 0 {
-		analysis.Technical = sas.calculateTechnicalIndicators(bars)
-	} else {
-		// Minimal analysis without historical data
-		analysis.Technical.Price = quote.BidPrice
+	// All price-bearing analysis fields use one reference price. Daily
+	// historical data is primary because the technical indicators are daily
+	// calculations. Fall back to the latest bar only when no valid historical
+	// daily close is available, then to the quote bid.
+	validBars := make([]*interfaces.Bar, 0, len(bars))
+	if err == nil {
+		for _, bar := range bars {
+			if validAnalysisBar(bar) {
+				validBars = append(validBars, bar)
+			}
+		}
+	}
+	referencePrice := 0.0
+	if err == nil && len(validBars) > 0 {
+		analysis.Technical = sas.calculateTechnicalIndicators(validBars)
+	}
+	if len(validBars) > 0 {
+		referencePrice = validBars[len(validBars)-1].Close
+	}
+	if referencePrice == 0 {
+		bar, barErr := sas.dataService.GetLatestBar(ctx, symbol)
+		if barErr == nil && bar != nil && validAnalysisPrice(bar.Close) {
+			referencePrice = bar.Close
+		}
+	}
+	if referencePrice == 0 {
+		if validAnalysisPrice(quote.BidPrice) {
+			referencePrice = quote.BidPrice
+		}
+	}
+	if referencePrice == 0 {
+		return nil, fmt.Errorf("no valid reference price available for %s", symbol)
+	}
+	analysis.CurrentPrice = referencePrice
+	analysis.Technical.Price = referencePrice
+	if err != nil || len(validBars) == 0 {
+		// Minimal analysis without historical data.
 		analysis.Technical.Trend = "UNKNOWN"
 		analysis.Technical.PriceStrength = "UNKNOWN"
 	}
@@ -147,7 +168,10 @@ func (sas *StockAnalysisService) AnalyzeStock(ctx context.Context, symbol string
 	// Get recent news (summarize to save tokens)
 	newsSummary := ""
 	catalysts := []string{}
-	news, err := sas.newsService.GetGoogleNewsSearch(symbol)
+	var news []NewsItem
+	if sas.newsService != nil {
+		news, err = sas.newsService.GetGoogleNewsSearch(symbol)
+	}
 	if err == nil && len(news) > 0 {
 		// Get top 3 most recent headlines only
 		limit := 3
@@ -169,11 +193,28 @@ func (sas *StockAnalysisService) AnalyzeStock(ctx context.Context, symbol string
 	return analysis, nil
 }
 
+func validAnalysisPrice(price float64) bool {
+	return price > 0 && !math.IsNaN(price) && !math.IsInf(price, 0)
+}
+
+func validAnalysisBar(bar *interfaces.Bar) bool {
+	return bar != nil && validAnalysisPrice(bar.Close) && validAnalysisPrice(bar.High) &&
+		validAnalysisPrice(bar.Low) && bar.High >= bar.Low && bar.Close >= bar.Low &&
+		bar.Close <= bar.High && bar.Volume >= 0
+}
+
 // calculateTechnicalIndicators calculates technical indicators from historical bars
 func (sas *StockAnalysisService) calculateTechnicalIndicators(bars []*interfaces.Bar) TechnicalAnalysis {
-	if len(bars) == 0 {
+	validBars := make([]*interfaces.Bar, 0, len(bars))
+	for _, bar := range bars {
+		if validAnalysisBar(bar) {
+			validBars = append(validBars, bar)
+		}
+	}
+	if len(validBars) == 0 {
 		return TechnicalAnalysis{}
 	}
+	bars = validBars
 
 	latest := bars[len(bars)-1]
 	tech := TechnicalAnalysis{

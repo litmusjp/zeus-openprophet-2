@@ -16,6 +16,30 @@ type EconomicFeedsService struct {
 	httpClient *http.Client
 }
 
+type FeedAvailabilityError struct {
+	Category string
+	Endpoint string
+	Cause    error
+}
+
+func (e *FeedAvailabilityError) Error() string { return "economic feed is unavailable" }
+func (e *FeedAvailabilityError) Unwrap() error { return e.Cause }
+
+func classifyFeedError(body io.Reader, endpoint string) error {
+	if body == nil {
+		return &FeedAvailabilityError{Category: "transport", Endpoint: endpoint}
+	}
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return &FeedAvailabilityError{Category: "transport", Endpoint: endpoint, Cause: err}
+	}
+	var value map[string]interface{}
+	if err := json.Unmarshal(b, &value); err != nil {
+		return &FeedAvailabilityError{Category: "malformed", Endpoint: endpoint, Cause: err}
+	}
+	return &FeedAvailabilityError{Category: "upstream", Endpoint: endpoint}
+}
+
 // NewEconomicFeedsService creates a new economic feeds service
 func NewEconomicFeedsService() *EconomicFeedsService {
 	return &EconomicFeedsService{
@@ -685,27 +709,31 @@ func (s *EconomicFeedsService) fetchJSONWithTimeout(apiURL string, timeout time.
 		client = &http.Client{Timeout: timeout}
 	}
 
-	resp, err := client.Get(apiURL)
-	if err != nil {
-		return nil, err
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := client.Get(apiURL)
+		if err != nil {
+			last = &FeedAvailabilityError{Category: "transport", Endpoint: apiURL, Cause: err}
+		} else {
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				last = &FeedAvailabilityError{Category: "transport", Endpoint: apiURL, Cause: readErr}
+			} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				last = &FeedAvailabilityError{Category: "upstream", Endpoint: apiURL, Cause: fmt.Errorf("HTTP %d", resp.StatusCode)}
+			} else {
+				var result map[string]interface{}
+				if err := json.Unmarshal(body, &result); err != nil {
+					return nil, &FeedAvailabilityError{Category: "malformed", Endpoint: apiURL, Cause: err}
+				}
+				return result, nil
+			}
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(50*(1<<attempt)) * time.Millisecond)
+		}
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, apiURL)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-
-	return result, nil
+	return nil, last
 }
 
 func getString(m map[string]interface{}, key string) string {

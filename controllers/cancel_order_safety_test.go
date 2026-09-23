@@ -3,6 +3,8 @@ package controllers
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
@@ -10,6 +12,7 @@ import (
 	"prophet-trader/services"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
@@ -190,6 +193,55 @@ func TestCancelOrderRejectsUntrustedCancellationFillEvidence(t *testing.T) {
 			}
 			if storage.order.FilledQty != 0 || storage.order.Status != "accepted" {
 				t.Fatalf("order mutated by rejected evidence: %#v", storage.order)
+			}
+		})
+	}
+}
+
+func TestWithdrawPlannedIntentIsLocalAndNeverCallsBroker(t *testing.T) {
+	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
+	trading := &cancelTestTrading{}
+	order := cancelTestOrder()
+	order.ID = ""
+	order.Status = "planned_for_next_session"
+	storage := &cancelTestStorage{identity: models.DurableIdentity{BrokerAccountID: "test-broker-account", PaperLive: "paper", TenantID: "test-tenant", SandboxID: "test-sandbox"}, order: order}
+	oc := NewOrderController(trading, nil, storage)
+	router := gin.New()
+	router.DELETE("/orders/planned-intents/:client_order_id", oc.HandleWithdrawPlannedIntent)
+	req := httptest.NewRequest(http.MethodDelete, "/orders/planned-intents/"+order.ClientOrderID, nil)
+	req.Header.Set("X-OpenProphet-Operator-Token", "operator-secret")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || storage.order.Status != "withdrawn" {
+		t.Fatalf("withdrawal status=%d body=%s order=%#v", rec.Code, rec.Body.String(), storage.order)
+	}
+	if trading.calls != 0 {
+		t.Fatalf("broker calls=%d, want 0", trading.calls)
+	}
+}
+
+func TestWithdrawPlannedIntentReturnsStructuredNotFoundAndConflict(t *testing.T) {
+	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
+	for name, order := range map[string]*interfaces.Order{
+		"not found": nil,
+		"conflict":  func() *interfaces.Order { o := cancelTestOrder(); return o }(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			trading := &cancelTestTrading{}
+			storage := &cancelTestStorage{identity: models.DurableIdentity{BrokerAccountID: "test-broker-account", PaperLive: "paper", TenantID: "test-tenant", SandboxID: "test-sandbox"}, order: order}
+			oc := NewOrderController(trading, nil, storage)
+			router := gin.New()
+			router.DELETE("/orders/planned-intents/:client_order_id", oc.HandleWithdrawPlannedIntent)
+			req := httptest.NewRequest(http.MethodDelete, "/orders/planned-intents/op-order-1", nil)
+			req.Header.Set("X-OpenProphet-Operator-Token", "operator-secret")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			want := http.StatusNotFound
+			if name == "conflict" {
+				want = http.StatusConflict
+			}
+			if rec.Code != want || trading.calls != 0 {
+				t.Fatalf("status=%d body=%s broker_calls=%d want status=%d and no broker calls", rec.Code, rec.Body.String(), trading.calls, want)
 			}
 		})
 	}

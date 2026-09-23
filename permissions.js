@@ -2,7 +2,7 @@
 // enforcePermissions() in mcp-server.js fetches `perms` from the agent server, then delegates
 // the actual policy decision here so it can be unit-tested without a running server.
 
-export const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position', 'cancel_order'];
+export const ORDER_TOOLS = ['place_buy_order', 'place_sell_order', 'place_options_order', 'place_managed_position', 'close_managed_position', 'cancel_order', 'withdraw_planned_intent'];
 
 export function isOptionSymbol(symbol = '') {
   return /^[A-Z0-9. ]{1,6}\d{6}[CP]\d{8}$/.test(String(symbol).trim().toUpperCase());

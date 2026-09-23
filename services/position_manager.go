@@ -136,6 +136,13 @@ type ManagedPosition struct {
 	Tags      []string   `json:"tags,omitempty"`
 }
 
+// ManagedPositionNotFoundError identifies a missing account-scoped managed position.
+type ManagedPositionNotFoundError struct{ PositionID string }
+
+func (e *ManagedPositionNotFoundError) Error() string {
+	return fmt.Sprintf("managed position not found: %s", e.PositionID)
+}
+
 type PositionCloseCapability interface {
 	positionCloseIdentity() models.DurableIdentity
 }
@@ -2157,7 +2164,7 @@ func (pm *PositionManager) GetManagedPosition(positionID string) (*ManagedPositi
 
 	position, exists := pm.positions[positionID]
 	if !exists {
-		return nil, fmt.Errorf("position not found: %s", positionID)
+		return nil, &ManagedPositionNotFoundError{PositionID: positionID}
 	}
 
 	return position, nil
@@ -2214,7 +2221,7 @@ func (pm *PositionManager) closeManagedPosition(ctx context.Context, positionID 
 	position, exists := pm.positions[positionID]
 	if !exists {
 		pm.mu.Unlock()
-		return fmt.Errorf("position not found: %s", positionID)
+		return &ManagedPositionNotFoundError{PositionID: positionID}
 	}
 	identity := capability.positionCloseIdentity()
 	if !managedIdentityComplete(identity) || !managedIdentityComplete(position.DurableIdentity) || !managedIdentityMatches(identity, position.DurableIdentity) || !managedIdentityMatches(position.DurableIdentity, pm.storageService.DurableIdentity()) {

@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"prophet-trader/interfaces"
 	"prophet-trader/services"
@@ -109,6 +110,15 @@ func (ic *IntelligenceController) HandleGetCleanedNews(c *gin.Context) {
 	// Clean the news using Gemini
 	cleanedNews, err := ic.geminiService.CleanNewsForTrading(allNews)
 	if err != nil {
+		var providerErr *services.ProviderAvailabilityError
+		if errors.As(err, &providerErr) {
+			category := providerErr.Category
+			if category == "" {
+				category = "provider_unavailable"
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": category, "category": category, "status": "unavailable", "retryable": true})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to clean news",
 			"details": err.Error(),
@@ -153,6 +163,15 @@ func (ic *IntelligenceController) HandleGetQuickMarketIntelligence(c *gin.Contex
 	// Clean the news
 	cleanedNews, err := ic.geminiService.CleanNewsForTrading(allNews)
 	if err != nil {
+		var providerErr *services.ProviderAvailabilityError
+		if errors.As(err, &providerErr) {
+			category := providerErr.Category
+			if category == "" {
+				category = "provider_unavailable"
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": category, "category": category, "status": "unavailable", "retryable": true})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to generate intelligence",
 			"details": err.Error(),

@@ -99,6 +99,33 @@ func TestManagedPositionGinBoundaryClassifiesMarketDataUnavailable(t *testing.T)
 	}
 }
 
+func TestCloseManagedPositionMissingIDReturnsStructured404(t *testing.T) {
+	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
+	t.Setenv("ALPACA_ACCOUNT_ID", "test-broker-account")
+	t.Setenv("ALPACA_PAPER", "true")
+	t.Setenv("OPENPROPHET_TENANT_ID", "test-tenant")
+	t.Setenv("OPENPROPHET_SANDBOX_ID", "test-sandbox")
+	storage, err := database.NewLocalStorage(t.TempDir() + "/managed-close-missing.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	pm := services.NewPositionManager(&reconciliationTradingService{}, &managedQuoteData{}, storage)
+	router := gin.New()
+	router.DELETE("/positions/managed/:id", NewPositionManagementController(pm).HandleCloseManagedPosition)
+	req := httptest.NewRequest(http.MethodDelete, "/positions/managed/missing", nil)
+	req.Header.Set("X-OpenProphet-Operator-Token", "operator-secret")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s; want 404", rec.Code, rec.Body.String())
+	}
+	body := managedResponse(t, rec)
+	if body["category"] != "not_found" || body["error"] != "managed_position_not_found" {
+		t.Fatalf("body=%v; want structured 404", body)
+	}
+}
+
 func TestCancelOrderGinBoundaryRejectsPlannedIntentWithoutBrokerCall(t *testing.T) {
 	t.Setenv("TRADING_BOT_OPERATOR_TOKEN", "operator-secret")
 	order := cancelTestOrder()

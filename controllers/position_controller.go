@@ -113,6 +113,11 @@ func (pmc *PositionManagementController) HandleCloseManagedPosition(c *gin.Conte
 		return
 	}
 	if err := pmc.positionManager.CloseManagedPositionWithCapability(c.Request.Context(), positionID, capability); err != nil {
+		var notFound *services.ManagedPositionNotFoundError
+		if errors.As(err, &notFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "managed_position_not_found", "category": "not_found", "position_id": notFound.PositionID, "retryable": false})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to close position",
 			"details": err.Error(),

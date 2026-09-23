@@ -9,7 +9,6 @@ import {
 import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
-import { storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } from './vectorDB.js';
 import { checkPermissions } from './permissions.js';
 import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
 
@@ -38,10 +37,16 @@ function unavailableBrokerClient() {
 
 // Resolve mode before any provider credential, provider construction, or data-directory side effect.
 let model = null;
+let storeTrade;
+let findSimilarTrades;
+let getTradeStats;
+let getEmbeddingCount;
 if (EXECUTION_START_ENABLED) {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+
+  ({ storeTrade, findSimilarTrades, getTradeStats, getEmbeddingCount } = await import('./vectorDB.js'));
 }
 
 // Ensure directories exist
@@ -113,7 +118,7 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
     } catch (error) {
       lastError = error;
       const status = error?.response?.status || 0;
-      if (options.returnAvailability && status === 503 && error?.response?.data?.category) return error.response.data;
+      if (options.returnAvailability && status === 503 && error?.response?.data?.category) return { ...error.response.data, http_status: 503 };
       if (options.returnValidation && status === 422 && error?.response?.data) return error.response.data;
       const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
       if (!retryable || attempt >= maxAttempts) break;
@@ -140,8 +145,14 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
   throw err;
 }
 
+// Automatic memory is only for broker-confirmed fills; explicit store_trade_setup remains available.
 async function autoStoreSetup(args, action) {
-  if (typeof args.thesis !== 'string' || !args.thesis.trim()) return;
+	if (typeof args.thesis !== 'string' || !args.thesis.trim()) return;
+	if (args.opening_entry !== true && args.position_intent && !isOpeningIntent(args.position_intent)) return;
+	const status = String(args.execution_status || args.status || '').toLowerCase();
+	const filledQty = Number(args.filled_qty ?? args.FilledQty ?? 0);
+	const confirmed = args.execution_confirmed === true && filledQty > 0 && ['filled', 'partially_filled', 'canceled', 'rejected', 'expired', 'done_for_day', 'replaced'].includes(status);
+	if (!confirmed || ['planned_for_next_session', 'submit_failed', 'rejected_before_submission', 'submission_uncertain', 'test', 'validation'].includes(status)) return;
 
   try {
     const now = new Date();
@@ -158,6 +169,8 @@ async function autoStoreSetup(args, action) {
       date: dateStr,
       reasoning: args.thesis,
       market_context: args.market_context || '',
+	      provenance: 'broker_confirmed_fill',
+	      status,
     };
 
     await storeTrade(trade);
@@ -890,6 +903,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'withdraw_planned_intent',
+        description: 'Withdraw a durable local planned-for-next-session intent by its stable client order ID. This never calls the broker and is separate from cancel_order.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            client_order_id: {
+              type: 'string',
+              description: 'Stable client order ID of the local planned intent to withdraw',
+            },
+          },
+          required: ['client_order_id'],
+        },
+      },
+      {
         name: 'assess_options_strategy',
         description: 'Request deterministic AlphaDesk assessment for the exact proposed options trade. Assessment-only and not broker authorization.',
         inputSchema: {
@@ -1363,7 +1390,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(args.limit_price && { limit_price: args.limit_price })
         };
         const data = await callTradingBot('/orders/buy', 'POST', requestData);
-        void autoStoreSetup(args, 'buy');
+	        void autoStoreSetup({ ...args, ...data }, 'buy');
         return orderResponse(data, args);
       }
 
@@ -1385,7 +1412,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'place_managed_position': {
         const { thesis, market_context, ...requestData } = args;
         const data = await callTradingBot('/positions/managed', 'POST', requestData);
-        void autoStoreSetup(args, args.side || 'buy');
+        void autoStoreSetup({ ...args, ...data, opening_entry: true }, args.side || 'buy');
         return orderResponse(data, args);
       }
 
@@ -1622,7 +1649,15 @@ ${newsText}
 
 Provide a well-structured analysis that a trader could use to make informed decisions.`;
 
-        const result = await model.generateContent(prompt);
+        if (!process.env.GEMINI_API_KEY) {
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'unavailable', category: 'configuration_required', error: 'AI provider configuration is required', retryable: false }) }], isError: true };
+        }
+        let result;
+        try {
+          result = await model.generateContent(prompt);
+        } catch {
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'unavailable', category: 'provider_unavailable', error: 'AI provider is unavailable', retryable: true }) }], isError: true };
+        }
         const summary = result.response.text();
 
         // Save summary to file
@@ -1755,34 +1790,34 @@ ${allNews.map((article, i) =>
 
       // ── Economic Intelligence Feeds ──────────────────────────────────────
       case 'get_treasury_data': {
-        const data = await callTradingBot('/feeds/treasury');
+        const data = await callTradingBot('/feeds/treasury', 'GET', null, { returnAvailability: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
       case 'get_global_events': {
         let endpoint = '/feeds/gdelt';
         if (args.query) endpoint += `?q=${encodeURIComponent(args.query)}`;
-        const data = await callTradingBot(endpoint);
+        const data = await callTradingBot(endpoint, 'GET', null, { returnAvailability: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
       case 'get_economic_indicators': {
-        const data = await callTradingBot('/feeds/bls');
+        const data = await callTradingBot('/feeds/bls', 'GET', null, { returnAvailability: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
       case 'get_market_snapshot': {
-        const data = await callTradingBot('/feeds/yfinance');
+        const data = await callTradingBot('/feeds/yfinance', 'GET', null, { returnAvailability: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
       case 'get_defense_contracts': {
-        const data = await callTradingBot('/feeds/usaspending');
+        const data = await callTradingBot('/feeds/usaspending', 'GET', null, { returnAvailability: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
       case 'get_global_trade_flows': {
-        const data = await callTradingBot('/feeds/comtrade');
+        const data = await callTradingBot('/feeds/comtrade', 'GET', null, { returnAvailability: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'get_quick_market_intelligence': {
-        const data = await callTradingBot('/intelligence/quick-market');
+        const data = await callTradingBot('/intelligence/quick-market', 'GET', null, { returnAvailability: true });
         return {
           content: [
             {
@@ -1894,8 +1929,17 @@ ${allNews.map((article, i) =>
           ...(args.market_scanner_features && { market_scanner_features: args.market_scanner_features })
         };
         const data = await callTradingBot('/options/order', 'POST', requestData);
-        if (isOpeningIntent(args.position_intent)) void autoStoreSetup(args, args.side || 'buy');
+        if (isOpeningIntent(args.position_intent)) void autoStoreSetup({ ...args, ...data }, args.side || 'buy');
         return orderResponse(data, args);
+      }
+
+      case 'withdraw_planned_intent': {
+        const clientOrderID = String(args.client_order_id || '').trim();
+        if (!clientOrderID) {
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'validation_error', error: 'client_order_id is required' }) }] };
+        }
+        const data = await callTradingBot(`/orders/planned-intents/${encodeURIComponent(clientOrderID)}`, 'DELETE');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'assess_options_strategy': {

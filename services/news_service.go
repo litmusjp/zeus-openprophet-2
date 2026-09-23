@@ -18,6 +18,10 @@ type NewsItem struct {
 	Source      string    `xml:"source" json:"source,omitempty"`
 	GUID        string    `xml:"guid" json:"guid,omitempty"`
 	PublishedAt time.Time `json:"published_at,omitempty"`
+	Realtime    bool      `json:"realtime,omitempty"`
+	Stale       bool      `json:"stale,omitempty"`
+	Status      string    `json:"status,omitempty"`
+	StaleReason string    `json:"stale_reason,omitempty"`
 }
 
 // NewsItemCompact represents a compact news article with only essential fields
@@ -38,10 +42,10 @@ func (n *NewsItem) ToCompact() NewsItemCompact {
 
 // NewsChannel represents the RSS channel
 type NewsChannel struct {
-	Title       string      `xml:"title"`
-	Link        string      `xml:"link"`
-	Description string      `xml:"description"`
-	Items       []NewsItem  `xml:"item"`
+	Title       string     `xml:"title"`
+	Link        string     `xml:"link"`
+	Description string     `xml:"description"`
+	Items       []NewsItem `xml:"item"`
 }
 
 // RSSFeed represents the root RSS structure
@@ -111,7 +115,27 @@ func (ns *NewsService) GetMarketWatchTopStories() ([]NewsItem, error) {
 // GetMarketWatchRealtimeHeadlines fetches real-time headlines from MarketWatch
 func (ns *NewsService) GetMarketWatchRealtimeHeadlines() ([]NewsItem, error) {
 	url := "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"
-	return ns.fetchRSSFeed(url)
+	items, err := ns.fetchRSSFeed(url)
+	if err != nil {
+		return nil, err
+	}
+	return markMarketWatchRealtimeStale(items, time.Now()), nil
+}
+
+func markMarketWatchRealtimeStale(items []NewsItem, now time.Time) []NewsItem {
+	const maxAge = 30 * time.Minute
+	for i := range items {
+		items[i].Realtime = true
+		if items[i].PublishedAt.IsZero() || now.Sub(items[i].PublishedAt) > maxAge || items[i].PublishedAt.After(now.Add(5*time.Minute)) {
+			items[i].Realtime = false
+			items[i].Stale = true
+			items[i].Status = "stale"
+			items[i].StaleReason = "published_at_outside_realtime_window"
+		} else {
+			items[i].Status = "current"
+		}
+	}
+	return items
 }
 
 // GetMarketWatchBulletins fetches breaking news bulletins from MarketWatch
@@ -182,6 +206,13 @@ func (ns *NewsService) fetchRSSFeed(url string) ([]NewsItem, error) {
 				feed.Channel.Items[i].PublishedAt = t
 			} else if t, err := time.Parse(time.RFC1123Z, feed.Channel.Items[i].PubDate); err == nil {
 				feed.Channel.Items[i].PublishedAt = t
+			} else {
+				for _, layout := range []string{time.RFC3339, time.RFC822, time.RFC822Z, "Mon, 02 Jan 2006 15:04:05 MST"} {
+					if t, parseErr := time.Parse(layout, feed.Channel.Items[i].PubDate); parseErr == nil {
+						feed.Channel.Items[i].PublishedAt = t
+						break
+					}
+				}
 			}
 		}
 	}
@@ -226,8 +257,8 @@ func (ns *NewsService) FilterNewsByKeywords(items []NewsItem, keywords []string)
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr ||
 		len(s) > len(substr) && (s[:len(substr)] == substr ||
-		s[len(s)-len(substr):] == substr ||
-		findSubstring(s, substr)))
+			s[len(s)-len(substr):] == substr ||
+			findSubstring(s, substr)))
 }
 
 func findSubstring(s, substr string) bool {

@@ -1,11 +1,21 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"prophet-trader/services"
 
 	"github.com/gin-gonic/gin"
 )
+
+func feedErrorResponse(ctx *gin.Context, err error, label string) {
+	var availability *services.FeedAvailabilityError
+	if errors.As(err, &availability) {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "provider_unavailable", "category": availability.Category, "status": "unavailable", "endpoint": availability.Endpoint, "retryable": true})
+		return
+	}
+	ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch " + label + " data", "category": "internal_error", "retryable": false})
+}
 
 // EconomicFeedsController handles economic intelligence feed requests
 type EconomicFeedsController struct {
@@ -24,10 +34,7 @@ func NewEconomicFeedsController(feedsService *services.EconomicFeedsService) *Ec
 func (c *EconomicFeedsController) HandleGetTreasury(ctx *gin.Context) {
 	data, err := c.feedsService.GetTreasuryBriefing()
 	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch Treasury data",
-			"details": err.Error(),
-		})
+		feedErrorResponse(ctx, err, "Treasury")
 		return
 	}
 	ctx.JSON(http.StatusOK, data)
@@ -39,10 +46,7 @@ func (c *EconomicFeedsController) HandleGetGDELT(ctx *gin.Context) {
 	query := ctx.DefaultQuery("q", "")
 	data, err := c.feedsService.GetGDELTBriefing(query)
 	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch GDELT data",
-			"details": err.Error(),
-		})
+		feedErrorResponse(ctx, err, "GDELT")
 		return
 	}
 	ctx.JSON(http.StatusOK, data)
@@ -53,10 +57,7 @@ func (c *EconomicFeedsController) HandleGetGDELT(ctx *gin.Context) {
 func (c *EconomicFeedsController) HandleGetBLS(ctx *gin.Context) {
 	data, err := c.feedsService.GetBLSBriefing()
 	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch BLS data",
-			"details": err.Error(),
-		})
+		feedErrorResponse(ctx, err, "BLS")
 		return
 	}
 	ctx.JSON(http.StatusOK, data)
@@ -67,10 +68,7 @@ func (c *EconomicFeedsController) HandleGetBLS(ctx *gin.Context) {
 func (c *EconomicFeedsController) HandleGetYFinance(ctx *gin.Context) {
 	data, err := c.feedsService.GetYFinanceBriefing()
 	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch Yahoo Finance data",
-			"details": err.Error(),
-		})
+		feedErrorResponse(ctx, err, "Yahoo Finance")
 		return
 	}
 	ctx.JSON(http.StatusOK, data)
@@ -81,10 +79,7 @@ func (c *EconomicFeedsController) HandleGetYFinance(ctx *gin.Context) {
 func (c *EconomicFeedsController) HandleGetUSASpending(ctx *gin.Context) {
 	data, err := c.feedsService.GetUSASpendingBriefing()
 	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch USAspending data",
-			"details": err.Error(),
-		})
+		feedErrorResponse(ctx, err, "USAspending")
 		return
 	}
 	ctx.JSON(http.StatusOK, data)
@@ -95,10 +90,7 @@ func (c *EconomicFeedsController) HandleGetUSASpending(ctx *gin.Context) {
 func (c *EconomicFeedsController) HandleGetComtrade(ctx *gin.Context) {
 	data, err := c.feedsService.GetComtradeBriefing()
 	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch Comtrade data",
-			"details": err.Error(),
-		})
+		feedErrorResponse(ctx, err, "Comtrade")
 		return
 	}
 	ctx.JSON(http.StatusOK, data)

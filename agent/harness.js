@@ -4,7 +4,7 @@ import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
-import { renderToolMenu } from './tool-catalog.js';
+import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 
 // Default max tool rounds; overridden by permissions config at runtime
@@ -147,11 +147,11 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
   // Layer 3: System Instructions (tools, heartbeat, operational)
   const systemInstructions = `## Available Tools
 
-${renderToolMenu()}
+${renderPrefixedToolMenu()}
 
 OpenCode registers the OpenProphet MCP server as \`prophet\`. Call these tools with their exact registered names using the \`prophet_\` prefix (for example, \`prophet_get_datetime\`, \`prophet_get_account\`, and \`prophet_get_positions\`). Do not emit the unprefixed logical names as text.
 
-Call a tool for every fact. Never assume your balance, buying power, positions, prices, or the news from memory — if you haven't checked it this heartbeat, you don't know it.
+Use current-state tools for facts that can change and fetch only relevant facts needed for the decision; do not call a tool for every sentence or repeat unchanged context within one heartbeat. Native OpenCode tools \`websearch\` and \`webfetch\` are separate from the \`prophet_\` MCP tools and may be used for non-broker research.
 
 ## Your Heartbeat Loop
 Each time you wake, work this loop in order and stop once you've acted or confirmed there's nothing to do:
@@ -170,10 +170,11 @@ Each time you wake, work this loop in order and stop once you've acted or confir
 - Use \`prophet_place_options_order\` for OCC option symbols. Never send an OCC option symbol through \`prophet_place_buy_order\`, \`prophet_place_sell_order\`, or managed-position tools. Always pass the underlying and explicit \`position_intent\` (\`buy_to_open\`, \`buy_to_close\`, \`sell_to_open\`, or \`sell_to_close\`).
 - When the AlphaDesk hard gate is enabled, before opening or increasing options exposure call \`prophet_assess_options_strategy\` for the exact proposed trade. It returns a deterministic AlphaDesk PASS/FAIL/unavailable result and signal score, always one of PASS, FAIL, or UNAVAILABLE; the score is nullable only when AlphaDesk has no scanner features. It is assessment-only and is not broker authorization. \`prophet_place_options_order\` independently reassesses immediately before broker submission. Client-supplied or replayed assessments do not authorize execution, and AlphaDesk PASS alone never authorizes an order. AlphaDesk UNAVAILABLE or FAIL means do not open or increase options exposure. Exact options statuses: market_closed means wait; unavailable means fail closed. Legacy provider_unavailable means do not trade. PASS is never broker authorization.
 - At the first valid-session heartbeat, review \`prophet_get_orders\` for \`planned_for_next_session\`. Re-submit the exact intent using its returned \`client_order_id\`; never create a new intent for the same plan, and re-check price, liquidity, account, positions, risk, and thesis before submitting once. Do not duplicate an existing broker order.
-- If broker state is incomplete or unavailable, do not submit or retry. Verify \`next_eligible_at\`, expiry, the exact original payload, a fresh thesis, price, liquidity, and risk. A retry at most once with the original \`client_order_id\`; never make a replacement ID. Never retry \`submission_uncertain\` blindly. \`risk_blocked\`, \`rejected_before_submission\`, and \`planned_intent_not_broker_visible\` are application outcomes, not broker attempts.
+- If broker state is incomplete or unavailable, do not submit or retry. Verify \`next_eligible_at\`, expiry, the exact original payload, a fresh thesis, price, liquidity, and risk. A retry at most once with the original \`client_order_id\`, before its explicit expiry; never make a replacement ID. Never retry \`submission_uncertain\` blindly. \`market_closed\` means wait for the eligible session; \`provider_unavailable\` means fail closed and do not trade. \`risk_blocked\`, \`rejected_before_submission\`, and \`planned_intent_not_broker_visible\` are application outcomes, not broker attempts.
 - Treat \`accepted\`, \`new\`, \`pending_new\`, and \`open\` as broker acknowledgement only. Any positive filled quantity is execution-confirmed, including a partial fill whose final status is \`canceled\`, \`rejected\`, \`expired\`, or \`done_for_day\`. Treat \`rejected\`, \`canceled\`, \`expired\`, \`submit_failed\`, and \`submission_uncertain\` with zero filled quantity as non-executions.
 - Report the exact lifecycle state. Never say "trade executed", "position opened", or "position closed" for an accepted or planned order.
 - Planned intents are application records, not broker orders. \`cancel_order\` is only for an identified broker-visible order; it is not a general retry or cleanup tool.
+- Use \`prophet_withdraw_planned_intent\` with the stable \`client_order_id\` to withdraw a durable \`planned_for_next_session\` application intent locally. It never calls the broker. Use \`prophet_cancel_order\` only for a broker-visible order ID.
 - A managed position requires exactly one executable leg: one stop loss OR one take profit OR one supported partial-exit leg. Durable OCO is unavailable; do not send stop loss and take profit concurrently.
 
 ## Phase Playbook (ET)
@@ -183,7 +184,7 @@ Each time you wake, work this loop in order and stop once you've acted or confir
 - Market close (3–4): decide what to hold overnight vs. flatten, and act before the bell.
 - After hours (4–8) / Closed: review, log, and plan. No impulsive after-hours trades.
 ${heartbeatIntervalsForced
-    ? '- HEARTBEAT GUARDRAIL: The operator has forced the configured heartbeat intervals. Do not call apply_heartbeat_profile or set_heartbeat; the server will reject attempts to change cadence.'
+    ? '- HEARTBEAT GUARDRAIL: The operator has forced the configured heartbeat intervals. Heartbeat mutation tools are operator-controlled and forbidden; Do not call apply_heartbeat_profile or set_heartbeat (or update_heartbeat_phase).'
     : 'Tune cadence with apply_heartbeat_profile or set_heartbeat (seconds). Settings are the required baseline. Do not change them just for preference: after two completed market sessions, only call set_heartbeat if the configured interval is materially impairing your work, and include a specific explanation of the problem and evidence. Use force=true only for an urgent, strongly justified market condition.'}
 
 ## Risk Discipline (non-negotiable)

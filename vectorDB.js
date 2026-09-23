@@ -45,6 +45,8 @@ function getDb() {
         date TEXT,
         reasoning TEXT,
         market_context TEXT,
+        provenance TEXT,
+        status TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -53,6 +55,8 @@ function getDb() {
         embedding FLOAT[384]
       );
     `);
+	try { _db.exec('ALTER TABLE trade_embeddings ADD COLUMN provenance TEXT'); } catch {}
+	try { _db.exec('ALTER TABLE trade_embeddings ADD COLUMN status TEXT'); } catch {}
   }
   return _db;
 }
@@ -98,8 +102,8 @@ export async function storeTrade(trade) {
     const insertTrade = getDb().prepare(`
       INSERT OR REPLACE INTO trade_embeddings (
         id, decision_file, symbol, action, strategy,
-        result_pct, result_dollars, date, reasoning, market_context
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        result_pct, result_dollars, date, reasoning, market_context, provenance, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insertTrade.run(
       trade.id,
@@ -112,6 +116,7 @@ export async function storeTrade(trade) {
       trade.date,
       trade.reasoning,
       trade.market_context
+		, trade.provenance || 'explicit_store_trade_setup', trade.status || 'manual'
     );
 
     // Store embedding vector
@@ -169,6 +174,8 @@ export async function findSimilarTrades(queryText, limit = 5, filters = {}) {
         te.date,
         te.reasoning,
         te.market_context,
+        te.provenance,
+        te.status,
         tv.distance
       FROM trade_vectors tv
       JOIN trade_embeddings te ON tv.trade_id = te.id
@@ -190,6 +197,8 @@ export async function findSimilarTrades(queryText, limit = 5, filters = {}) {
       date: r.date,
       reasoning: r.reasoning,
       market_context: r.market_context,
+      provenance: r.provenance,
+      status: r.status,
       similarity: Math.max(0, 1 - (r.distance / 2)), // Cosine distance 0-2 → similarity 0-1
     }));
   } catch (error) {

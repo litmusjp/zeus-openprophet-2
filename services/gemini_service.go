@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,18 @@ type GeminiService struct {
 	apiKey     string
 	httpClient *http.Client
 	model      string
+}
+
+type ProviderAvailabilityError struct {
+	Category              string
+	ConfigurationRequired bool
+}
+
+func (e *ProviderAvailabilityError) Error() string {
+	if e.ConfigurationRequired {
+		return "AI provider configuration is required"
+	}
+	return "AI provider is unavailable"
 }
 
 // GeminiRequest represents a request to Gemini API
@@ -75,6 +88,9 @@ func NewGeminiService(apiKey string) *GeminiService {
 // CleanNewsForTrading takes raw news items and creates a token-efficient summary
 // optimized for trading decisions
 func (gs *GeminiService) CleanNewsForTrading(newsItems []NewsItem) (*CleanedNews, error) {
+	if strings.TrimSpace(gs.apiKey) == "" {
+		return nil, &ProviderAvailabilityError{Category: "configuration_required", ConfigurationRequired: true}
+	}
 	if len(newsItems) == 0 {
 		return nil, fmt.Errorf("no news items provided")
 	}
@@ -120,7 +136,11 @@ Keep it BRIEF and DENSE. Maximum 200 tokens total.`, len(newsItems), newsText.St
 	// Call Gemini
 	response, err := gs.generateContent(prompt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate content: %w", err)
+		var availability *ProviderAvailabilityError
+		if errors.As(err, &availability) {
+			return nil, err
+		}
+		return nil, &ProviderAvailabilityError{Category: "provider_unavailable"}
 	}
 
 	// Parse the JSON response

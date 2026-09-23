@@ -613,6 +613,35 @@ func (oc *OrderController) CancelOrderWithCapability(orderID, capability string)
 	return oc.cancelOrder(orderID)
 }
 
+// WithdrawPlannedIntentWithCapability changes only the durable local intent.
+// It deliberately never consults or calls the broker.
+func (oc *OrderController) WithdrawPlannedIntentWithCapability(clientOrderID, capability string) (*interfaces.Order, error) {
+	configured := strings.TrimSpace(configuredOperatorToken())
+	provided := strings.TrimSpace(capability)
+	if configured == "" || provided == "" || subtle.ConstantTimeCompare([]byte(configured), []byte(provided)) != 1 {
+		return nil, fmt.Errorf("planned intent withdrawal rejected: operator authorization is required")
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return nil, fmt.Errorf("client_order_id is required")
+	}
+	order, err := oc.storageService.GetOrderByClientOrderID(clientOrderID)
+	if err != nil {
+		return nil, fmt.Errorf("planned intent lookup failed: %w", err)
+	}
+	if order == nil {
+		return nil, &services.PlannedIntentNotFoundError{ClientOrderID: clientOrderID}
+	}
+	if order.Status != "planned_for_next_session" || strings.TrimSpace(order.ID) != "" || order.SubmissionAttempted {
+		return nil, &services.PlannedIntentWithdrawalConflictError{ClientOrderID: clientOrderID, Status: order.Status}
+	}
+	order.Status = "withdrawn"
+	if err := oc.storageService.SaveOrder(order); err != nil {
+		return nil, fmt.Errorf("planned intent withdrawal persistence failed: %w", err)
+	}
+	return order, nil
+}
+
 func configuredOperatorToken() string {
 	// Keep the controller independently safe when called without the HTTP
 	// router; the router remains responsible for transport identity checks.
@@ -854,6 +883,39 @@ func (oc *OrderController) HandleCancelOrder(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"message": "Order canceled successfully"})
+}
+
+// HandleWithdrawPlannedIntent withdraws a local planned intent without a broker call.
+func (oc *OrderController) HandleWithdrawPlannedIntent(c *gin.Context) {
+	clientOrderID := c.Param("client_order_id")
+	if clientOrderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "validation_error", "error": "client_order_id is required"})
+		return
+	}
+	order, err := oc.WithdrawPlannedIntentWithCapability(clientOrderID, c.GetHeader("X-OpenProphet-Operator-Token"))
+	if err != nil {
+		var notFound *services.PlannedIntentNotFoundError
+		if errors.As(err, &notFound) {
+			c.JSON(http.StatusNotFound, gin.H{"status": "not_found", "error": "planned_intent_not_found", "client_order_id": clientOrderID})
+			return
+		}
+		var conflict *services.PlannedIntentWithdrawalConflictError
+		if errors.As(err, &conflict) {
+			c.JSON(http.StatusConflict, gin.H{"status": "conflict", "error": "planned_intent_withdrawal_conflict", "client_order_id": clientOrderID, "details": conflict.Error()})
+			return
+		}
+		if strings.Contains(err.Error(), "authorization") {
+			c.JSON(http.StatusForbidden, gin.H{"status": "forbidden", "error": err.Error()})
+			return
+		}
+		if strings.Contains(err.Error(), "client_order_id is required") {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "validation_error", "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "withdrawn", "client_order_id": order.ClientOrderID, "order": order})
 }
 
 // HandleGetPositions handles HTTP get positions requests
@@ -1183,6 +1245,22 @@ func (oc *OrderController) findLocalOrderByClientID(clientOrderID string) (*inte
 	return oc.storageService.GetOrderByClientOrderID(clientOrderID)
 }
 
+// plannedIntentState checks eligibility before expiry. At the exact eligible
+// boundary the intent remains eligible; an intent is stale only once its
+// explicit expiry has been reached after eligibility has been considered.
+func (oc *OrderController) plannedIntentState(order *interfaces.Order, now time.Time) (eligible bool, expired bool) {
+	if order == nil || order.Status != "planned_for_next_session" {
+		return false, false
+	}
+	if order.NextEligibleAt != nil && now.Before(*order.NextEligibleAt) {
+		return false, false
+	}
+	if order.ExpiresAt != nil && !now.Before(*order.ExpiresAt) {
+		return false, true
+	}
+	return true, false
+}
+
 // PlaceOptionsOrder handles POST /api/options/order
 func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	if oc.rejectIfExecutionBlocked(c) {
@@ -1247,13 +1325,17 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			return
 		}
 		now := time.Now()
-		if existing.NextEligibleAt == nil || now.Before(*existing.NextEligibleAt) {
+		eligible, expired := oc.plannedIntentState(existing, now)
+		if !eligible && !expired {
 			c.JSON(409, oc.optionsResponseWithIdentity(existing, &interfaces.OrderResult{NextEligibleAt: existing.NextEligibleAt}, "planned_for_next_session", "planned options intent is not yet eligible for submission"))
 			return
 		}
-		if existing.ExpiresAt != nil && !now.Before(*existing.ExpiresAt) {
+		if expired {
 			existing.Status = "expired"
-			_ = oc.storageService.SaveOrder(existing)
+			if saveErr := oc.storageService.SaveOrder(existing); saveErr != nil {
+				c.JSON(500, oc.optionsResponseWithIdentity(existing, nil, "submission_uncertain", fmt.Sprintf("stale planned intent could not be marked expired: %v", saveErr)))
+				return
+			}
 			c.JSON(409, oc.optionsResponseWithIdentity(existing, nil, "expired", "planned options intent has expired"))
 			return
 		}

@@ -119,6 +119,24 @@ func (e *LocalIntentNotBrokerVisibleError) Error() string {
 	return fmt.Sprintf("local intent %q is not broker-visible and cannot be canceled at the broker", e.ClientOrderID)
 }
 
+// PlannedIntentNotFoundError is returned when a local planned intent does not exist.
+type PlannedIntentNotFoundError struct{ ClientOrderID string }
+
+func (e *PlannedIntentNotFoundError) Error() string {
+	return fmt.Sprintf("planned intent %q was not found", e.ClientOrderID)
+}
+
+// PlannedIntentWithdrawalConflictError prevents withdrawing an intent that is no
+// longer a local, unsubmitted planned record.
+type PlannedIntentWithdrawalConflictError struct {
+	ClientOrderID string
+	Status        string
+}
+
+func (e *PlannedIntentWithdrawalConflictError) Error() string {
+	return fmt.Sprintf("planned intent %q cannot be withdrawn from status %q", e.ClientOrderID, e.Status)
+}
+
 type ExecutionBlockedError struct{}
 
 func (e *ExecutionBlockedError) Error() string {

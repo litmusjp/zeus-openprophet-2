@@ -226,3 +226,19 @@ func TestPlaceOptionsOrderPersistsPlannedIntentWhenMarketClosed(t *testing.T) {
 		t.Fatalf("planned order = %#v, want durable unsubmitted option intent", plannedOrders)
 	}
 }
+
+func TestPlannedIntentEligibilityWinsAtExactSessionOpen(t *testing.T) {
+	now := time.Date(2026, 9, 21, 13, 30, 0, 0, time.UTC)
+	expires := now.Add(time.Hour)
+	order := &interfaces.Order{Status: "planned_for_next_session", NextEligibleAt: &now, ExpiresAt: &expires}
+	controller := &OrderController{}
+	eligible, expired := controller.plannedIntentState(order, now)
+	if !eligible || expired {
+		t.Fatalf("at next eligible boundary: eligible=%v expired=%v; want eligible=true expired=false", eligible, expired)
+	}
+	stale := now.Add(2 * time.Hour)
+	eligible, expired = controller.plannedIntentState(order, stale)
+	if eligible || !expired {
+		t.Fatalf("after explicit expiry: eligible=%v expired=%v; want eligible=false expired=true", eligible, expired)
+	}
+}

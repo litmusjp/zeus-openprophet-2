@@ -246,6 +246,38 @@ func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
 	}
 }
 
+func TestOpeningOptionsBlocksWhenAlphaDeskDisallowsExecution(t *testing.T) {
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"pass":true,"decision":"PASS","assessment_id":"blocked","market_scanner_signal_score":0.9,"policy_snapshot":{"minimum_signal_score":"0.8"},"expires_at":"2099-01-01T00:00:00Z","paper_only":true,"human_approval_required":false,"execution_allowed":false}`))
+	}))
+	defer alpha.Close()
+
+	brokerCalls := 0
+	service := &AlpacaTradingService{
+		clockReader:          fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
+		logger:               logrus.New(),
+		submissionMarker:     func(string) error { return nil },
+		expectedAccountID:    "acct",
+		expectedPaper:        true,
+		expectedTenantID:     "tenant",
+		expectedSandboxID:    "sandbox",
+		alphaDesk:            &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		optionsChainProvider: freshAssessmentChainProvider,
+		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+			brokerCalls++
+			return nil, nil
+		},
+	}
+
+	_, err := service.PlaceOptionsOrder(context.Background(), readyAssessmentOrder(&interfaces.OptionsOrder{
+		ClientOrderID: "op-alpha-denied", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+		Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+	}))
+	if err == nil || brokerCalls != 0 {
+		t.Fatalf("PlaceOptionsOrder() err=%v broker calls=%d, want AlphaDesk denial and zero broker calls", err, brokerCalls)
+	}
+}
+
 func TestOpeningOptionsFailsClosedWhenAlphaDeskUnavailable(t *testing.T) {
 	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

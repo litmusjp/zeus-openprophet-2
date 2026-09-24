@@ -79,7 +79,7 @@ func TestAlphaDeskMissingEvidenceIsStructuredUnavailable(t *testing.T) {
 }
 
 func testAssessment(fp, decision string, score, threshold float64, expiry time.Time) *interfaces.AlphaDeskAssessment {
-	return &interfaces.AlphaDeskAssessment{AssessmentID: "a-1", Decision: decision, SignalScore: &score, Threshold: &threshold, ExpiresAt: expiry, Fingerprint: fp}
+	return &interfaces.AlphaDeskAssessment{AssessmentID: "a-1", Decision: decision, SignalScore: &score, Threshold: &threshold, ExpiresAt: expiry, Fingerprint: fp, ExecutionAllowed: true}
 }
 
 func TestValidateAlphaDeskAssessment(t *testing.T) {
@@ -92,6 +92,16 @@ func TestValidateAlphaDeskAssessment(t *testing.T) {
 		want       bool
 	}{
 		{"PASS", testAssessment(fp, "PASS", .8, .7, now.Add(time.Minute)), true},
+		{"PASS with execution disallowed", func() *interfaces.AlphaDeskAssessment {
+			a := testAssessment(fp, "PASS", .8, .7, now.Add(time.Minute))
+			a.ExecutionAllowed = false
+			return a
+		}(), false},
+		{"PASS with human approval required", func() *interfaces.AlphaDeskAssessment {
+			a := testAssessment(fp, "PASS", .8, .7, now.Add(time.Minute))
+			a.HumanApprovalRequired = true
+			return a
+		}(), false},
 		{"FAIL", testAssessment(fp, "FAIL", .8, .7, now.Add(time.Minute)), false},
 		{"missing score", func() *interfaces.AlphaDeskAssessment {
 			a := testAssessment(fp, "PASS", .8, .7, now.Add(time.Minute))

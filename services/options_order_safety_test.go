@@ -225,7 +225,7 @@ func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
 	alphaCalls := 0
 	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		alphaCalls++
-		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z","execution_allowed":true,"human_approval_required":false}`))
 	}))
 	defer alpha.Close()
 	service := &AlpacaTradingService{
@@ -311,7 +311,7 @@ func TestOpeningOptionsRefreshesInjectedEvidenceBeforeAlphaDesk(t *testing.T) {
 			t.Fatalf("AlphaDesk received %d legs, want one fresh single-leg record", len(request.Legs))
 		}
 		assessedLeg = request.Legs[0]
-		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z","execution_allowed":true,"human_approval_required":false}`))
 	}))
 	defer alpha.Close()
 

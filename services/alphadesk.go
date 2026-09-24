@@ -252,6 +252,12 @@ func ValidateAlphaDeskAssessment(a *interfaces.AlphaDeskAssessment, expectedFing
 	if a.Decision != "PASS" {
 		return fmt.Errorf("AlphaDesk assessment decision is not PASS")
 	}
+	if !a.ExecutionAllowed {
+		return fmt.Errorf("AlphaDesk assessment does not allow execution")
+	}
+	if a.HumanApprovalRequired {
+		return fmt.Errorf("AlphaDesk assessment requires human approval")
+	}
 	if a.SignalScore == nil || a.Threshold == nil {
 		return fmt.Errorf("AlphaDesk assessment lacks a reliable score or execution threshold")
 	}

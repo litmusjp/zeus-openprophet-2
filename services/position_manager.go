@@ -175,6 +175,18 @@ func managedIdentityMatches(left, right models.DurableIdentity) bool {
 	return left.BrokerAccountID == right.BrokerAccountID && left.PaperLive == right.PaperLive && left.TenantID == right.TenantID && left.SandboxID == right.SandboxID
 }
 
+// isTerminalManagedPositionStatus identifies position states that require no
+// broker reconciliation. Unknown states remain non-terminal so they fail
+// closed during startup.
+func isTerminalManagedPositionStatus(status string) bool {
+	switch status {
+	case "CLOSED", "STOPPED_OUT", "CANCELLED":
+		return true
+	default:
+		return false
+	}
+}
+
 // PartialExitConfig defines partial profit taking strategy
 type PartialExitConfig struct {
 	Enabled       bool    `json:"enabled"`
@@ -314,7 +326,7 @@ func (pm *PositionManager) clearExecutionBlockIfSafe() {
 		return
 	}
 	for _, position := range pm.positions {
-		if position == nil || position.Status == "CLOSED" || position.Status == "STOPPED_OUT" || position.Status == "CANCELLED" {
+		if position == nil || isTerminalManagedPositionStatus(position.Status) {
 			continue
 		}
 		if position.Status != "ACTIVE" || !hasExactlyOneExecutableProtectionLeg(position) {
@@ -772,7 +784,7 @@ func (pm *PositionManager) ReconcilePersistedPositions(ctx context.Context) int 
 
 	skipped := 0
 	for _, position := range positions {
-		if position.Status == "CLOSED" || position.Status == "CANCELLED" {
+		if isTerminalManagedPositionStatus(position.Status) {
 			continue
 		}
 		valid := true
@@ -917,7 +929,7 @@ func (pm *PositionManager) endPositionOperation(positionID string) {
 }
 
 func (pm *PositionManager) processPosition(ctx context.Context, position *ManagedPosition) {
-	if position.Status == "CLOSED" || position.Status == "STOPPED_OUT" {
+	if isTerminalManagedPositionStatus(position.Status) {
 		return
 	}
 	if position.Status == "CLOSING" {
@@ -2731,9 +2743,9 @@ func (pm *PositionManager) Stop() {
 	pm.cancel()
 }
 
-// loadPositionsFromDB loads all active positions from database on startup
+// loadPositionsFromDB loads all non-terminal positions from database on startup
 func (pm *PositionManager) loadPositionsFromDB() error {
-	// Load all non-closed positions
+	// Load all non-terminal positions
 	dbPositions, err := pm.storageService.GetAllManagedPositions("")
 	if err != nil {
 		return err
@@ -2741,8 +2753,8 @@ func (pm *PositionManager) loadPositionsFromDB() error {
 
 	loaded := 0
 	for _, dbPos := range dbPositions {
-		// Skip closed positions
-		if dbPos.Status == "CLOSED" || dbPos.Status == "STOPPED_OUT" || dbPos.Status == "CANCELLED" {
+		// Terminal positions remain persisted for audit but are not managed in memory.
+		if isTerminalManagedPositionStatus(dbPos.Status) {
 			continue
 		}
 

@@ -411,6 +411,71 @@ func TestCancelledManagedPositionLoadsAndClearsStartupBlock(t *testing.T) {
 	}
 }
 
+func TestStoppedOutManagedPositionDoesNotBlockStartupReconciliation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "stopped-out-position.db")
+	storage, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := storage.DurableIdentity()
+	persisted := &models.DBManagedPosition{
+		DurableIdentity:    identity,
+		PositionID:         "stopped-out-position",
+		Symbol:             "AAPL",
+		Side:               "buy",
+		Quantity:           10,
+		RemainingQty:       0,
+		EntryRemainingQty:  0,
+		EntryClientOrderID: "stopped-out-entry",
+		Status:             "STOPPED_OUT",
+	}
+	if err := storage.SaveManagedPosition(persisted); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	rec := &exitOrderRecorder{}
+	fresh := NewPositionManager(rec, nil, reopened)
+	// Model a restart reconciliation candidate loaded from persisted state.
+	fresh.positions[persisted.PositionID] = fresh.dbToManagedPosition(persisted)
+	fresh.SetExecutionBlocked(true)
+	if skipped := fresh.ReconcilePersistedPositions(context.Background()); skipped != 0 {
+		t.Fatalf("reconcile skipped=%d; stopped-out position is terminal", skipped)
+	}
+	fresh.clearExecutionBlockIfSafe()
+	if fresh.ExecutionBlocked() {
+		t.Fatal("fresh manager remains execution-blocked by persisted STOPPED_OUT position")
+	}
+	if rec.calls != 0 {
+		t.Fatalf("broker calls=%d; terminal position must not be reconciled", rec.calls)
+	}
+	persistedRows, err := reopened.GetAllManagedPositions("")
+	if err != nil || len(persistedRows) != 1 || persistedRows[0].Status != "STOPPED_OUT" {
+		t.Fatalf("persisted stopped-out audit=%#v err=%v; want unchanged terminal record", persistedRows, err)
+	}
+}
+
+func TestUnknownManagedPositionStatusRemainsBlocked(t *testing.T) {
+	pm, storage := newTestPositionManager(t, &exitOrderRecorder{})
+	defer storage.Close()
+	pm.positions["unknown-status"] = &ManagedPosition{ID: "unknown-status", Status: "UNKNOWN"}
+	pm.SetExecutionBlocked(true)
+	if skipped := pm.ReconcilePersistedPositions(context.Background()); skipped != 1 {
+		t.Fatalf("reconcile skipped=%d; unknown status must fail closed", skipped)
+	}
+	pm.clearExecutionBlockIfSafe()
+	if !pm.ExecutionBlocked() {
+		t.Fatal("unknown managed position status incorrectly cleared execution block")
+	}
+}
+
 func TestSaveManagedPositionUpdatesByPositionID(t *testing.T) {
 	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "managed.db"))
 	if err != nil {

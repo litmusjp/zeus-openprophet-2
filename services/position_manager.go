@@ -179,8 +179,8 @@ func managedIdentityMatches(left, right models.DurableIdentity) bool {
 // broker reconciliation. Unknown states remain non-terminal so they fail
 // closed during startup.
 func isTerminalManagedPositionStatus(status string) bool {
-	switch status {
-	case "CLOSED", "STOPPED_OUT", "CANCELLED":
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "CLOSED", "STOPPED_OUT", "CANCELLED", "CANCELED":
 		return true
 	default:
 		return false

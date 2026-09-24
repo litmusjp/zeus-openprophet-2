@@ -462,6 +462,55 @@ func TestStoppedOutManagedPositionDoesNotBlockStartupReconciliation(t *testing.T
 	}
 }
 
+func TestLegacyCanceledManagedPositionLoadsAndClearsStartupBlock(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-canceled-position.db")
+	storage, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := storage.DurableIdentity()
+	persisted := &models.DBManagedPosition{
+		DurableIdentity:       identity,
+		PositionID:            "legacy-canceled-position",
+		Symbol:                "AAPL",
+		Side:                  "buy",
+		Quantity:              10,
+		RemainingQty:          0,
+		EntryRemainingQty:     0,
+		EntryOrderID:          "legacy-entry-broker-id",
+		EntryClientOrderID:    "legacy-entry-client-id",
+		ExitOrderID:           "legacy-exit-broker-id",
+		ExitClientOrderID:     "legacy-exit-client-id",
+		StopLossOrderID:       "legacy-stop-broker-id",
+		StopLossClientOrderID: "legacy-stop-client-id",
+		Status:                " canceled ",
+	}
+	if err := storage.SaveManagedPosition(persisted); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	fresh := NewPositionManager(&exitOrderRecorder{}, nil, reopened)
+	fresh.SetExecutionBlocked(true)
+	if skipped := fresh.ReconcilePersistedPositions(context.Background()); skipped != 0 {
+		t.Fatalf("reconcile skipped=%d; legacy terminal position must not be reconciled", skipped)
+	}
+	fresh.clearExecutionBlockIfSafe()
+	if fresh.ExecutionBlocked() {
+		t.Fatal("fresh manager remains execution-blocked by legacy terminal position")
+	}
+	if fresh.initializationErr != nil {
+		t.Fatalf("fresh manager initialization error=%v; legacy terminal position must load cleanly", fresh.initializationErr)
+	}
+}
+
 func TestUnknownManagedPositionStatusRemainsBlocked(t *testing.T) {
 	pm, storage := newTestPositionManager(t, &exitOrderRecorder{})
 	defer storage.Close()
@@ -473,6 +522,44 @@ func TestUnknownManagedPositionStatusRemainsBlocked(t *testing.T) {
 	pm.clearExecutionBlockIfSafe()
 	if !pm.ExecutionBlocked() {
 		t.Fatal("unknown managed position status incorrectly cleared execution block")
+	}
+}
+
+func TestUnresolvedPersistedClosingPositionRemainsBlocked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "unresolved-closing-position.db")
+	storage, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := storage.DurableIdentity()
+	persisted := &models.DBManagedPosition{
+		DurableIdentity: identity,
+		PositionID:      "unresolved-closing-position",
+		Symbol:          "AAPL",
+		Side:            "buy",
+		Quantity:        10,
+		Status:          "CLOSING",
+	}
+	if err := storage.SaveManagedPosition(persisted); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	fresh := NewPositionManager(&exitOrderRecorder{}, nil, reopened)
+	fresh.SetExecutionBlocked(true)
+	if skipped := fresh.ReconcilePersistedPositions(context.Background()); skipped != 1 {
+		t.Fatalf("reconcile skipped=%d; unresolved persisted position must remain blocked", skipped)
+	}
+	fresh.clearExecutionBlockIfSafe()
+	if !fresh.ExecutionBlocked() {
+		t.Fatal("unresolved persisted position incorrectly cleared execution block")
 	}
 }
 

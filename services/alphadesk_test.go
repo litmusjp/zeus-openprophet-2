@@ -58,6 +58,17 @@ func TestAlphaDesk422IsValidationNotGatewayFailure(t *testing.T) {
 	}
 }
 
+func TestAlphaDesk400IsProviderValidationNotUnavailable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadRequest) }))
+	defer ts.Close()
+	c := &AlphaDeskClient{Enabled: true, URL: ts.URL, APIKey: "secret", HTTP: ts.Client(), Now: time.Now}
+	_, err := c.Assess(context.Background(), readyAlphaRequest())
+	var validation *AlphaDeskValidationError
+	if !errors.As(err, &validation) || validation.Status != http.StatusBadRequest {
+		t.Fatalf("err=%T %v, want typed 400 validation", err, err)
+	}
+}
+
 func TestAlphaDeskMissingEvidenceIsStructuredUnavailable(t *testing.T) {
 	c := &AlphaDeskClient{Enabled: true, URL: "http://localhost:1", APIKey: "secret", HTTP: http.DefaultClient, Now: time.Now}
 	_, err := c.AssessForTrade(context.Background(), models.DurableIdentity{}, &interfaces.OptionsOrder{Underlying: "AAPL"}, nil)

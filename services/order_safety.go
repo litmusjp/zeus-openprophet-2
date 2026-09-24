@@ -205,6 +205,14 @@ func IsOCCOptionSymbol(symbol string) bool {
 	return ok
 }
 
+// OCCOptionUnderlying returns the underlying root encoded in an OCC option
+// symbol. It is used when validating multi-leg requests so distinct legs
+// cannot silently introduce a different underlying.
+func OCCOptionUnderlying(symbol string) (string, bool) {
+	root, _, _, _, ok := parseOCCOptionSymbol(symbol)
+	return root, ok
+}
+
 func optionRoot(symbol string) string {
 	root, _, _, _, ok := parseOCCOptionSymbol(symbol)
 	if !ok {

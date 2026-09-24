@@ -1239,6 +1239,98 @@ type OptionsOrderRequest struct {
 	ExpiresAt             time.Time                           `json:"expires_at,omitempty"`
 }
 
+type optionsAssessmentValidationError struct {
+	Fields map[string]string
+}
+
+func (e *optionsAssessmentValidationError) Error() string {
+	if e == nil || len(e.Fields) == 0 {
+		return "invalid options assessment request"
+	}
+	return "invalid options assessment request"
+}
+
+func validateOptionsAssessmentRequest(req OptionsOrderRequest) error {
+	fields := map[string]string{}
+	if strings.TrimSpace(req.Symbol) == "" {
+		fields["symbol"] = "is required and must be an exact OCC option contract symbol"
+	}
+	if strings.TrimSpace(req.Underlying) == "" {
+		fields["underlying"] = "is required"
+	}
+	if req.Type == "" {
+		fields["order_type"] = "is required"
+	}
+	if req.TimeInForce == "" {
+		fields["time_in_force"] = "is required; options assessments use day"
+	}
+	order := &interfaces.OptionsOrder{Symbol: strings.TrimSpace(req.Symbol), Underlying: strings.TrimSpace(req.Underlying), Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice}
+	if err := services.ValidateOptionsOrder(order); err != nil {
+		if strings.Contains(err.Error(), "symbol") {
+			fields["symbol"] = "must be an exact OCC option contract symbol"
+		} else if strings.Contains(err.Error(), "underlying") {
+			fields["underlying"] = err.Error()
+		} else if strings.Contains(err.Error(), "quantity") {
+			fields["quantity"] = err.Error()
+		} else if strings.Contains(err.Error(), "side") {
+			fields["side"] = err.Error()
+		} else if strings.Contains(err.Error(), "position_intent") {
+			fields["position_intent"] = err.Error()
+		} else if strings.Contains(err.Error(), "type") {
+			fields["order_type"] = err.Error()
+		} else if strings.Contains(err.Error(), "time_in_force") {
+			fields["time_in_force"] = err.Error()
+		} else {
+			fields["request"] = err.Error()
+		}
+	}
+	if req.Type == "limit" && req.LimitPrice == nil {
+		fields["limit_price"] = "is required for limit assessments"
+	}
+	if len(req.AssessmentLegs) == 0 {
+		fields["legs"] = "exact broker-derived assessment legs are required"
+	}
+	if req.MaxLoss == nil {
+		fields["max_loss"] = "broker-derived maximum loss is required"
+	}
+	if len(req.Greeks) == 0 {
+		fields["greeks"] = "broker-derived Greeks are required"
+	}
+	if req.MarketEvidenceAt.IsZero() {
+		fields["market_evidence_at"] = "broker quote evidence timestamp is required"
+	}
+	if req.ObservedAt.IsZero() {
+		fields["observed_at"] = "observation timestamp is required"
+	}
+	if req.ExpiresAt.IsZero() {
+		fields["expires_at"] = "evidence expiry timestamp is required"
+	}
+	for i, leg := range req.AssessmentLegs {
+		key := fmt.Sprintf("legs[%d]", i)
+		legUnderlying, validLegSymbol := services.OCCOptionUnderlying(leg.Symbol)
+		if !validLegSymbol {
+			fields[key+".symbol"] = "must be a valid OCC option symbol"
+		} else if !strings.EqualFold(legUnderlying, strings.TrimSpace(req.Underlying)) {
+			fields[key+".symbol"] = "must use the requested underlying"
+		} else if i == 0 && strings.TrimSpace(leg.Symbol) != strings.TrimSpace(req.Symbol) {
+			fields[key+".symbol"] = "must exactly match the primary OCC option symbol"
+		}
+		if leg.Side != "buy" && leg.Side != "sell" {
+			fields[key+".side"] = "must be buy or sell"
+		}
+		if leg.Quantity != int(req.Qty) || leg.Quantity <= 0 {
+			fields[key+".quantity"] = "must match the requested whole-contract quantity"
+		}
+		if leg.QuotedAt.IsZero() || leg.Bid < 0 || leg.Ask <= 0 || leg.QuoteSize <= 0 {
+			fields[key+".quote"] = "must contain fresh broker quote evidence"
+		}
+	}
+	if len(fields) > 0 {
+		return &optionsAssessmentValidationError{Fields: fields}
+	}
+	return nil
+}
+
 func optionalFloatEqual(a, b *float64) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -1525,7 +1617,16 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 func (oc *OrderController) AssessOptionsStrategy(c *gin.Context) {
 	var req OptionsOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "invalid options assessment request"})
+		c.JSON(http.StatusBadRequest, gin.H{"status": "invalid_request", "category": "local_validation", "fields": gin.H{"request": err.Error()}})
+		return
+	}
+	if err := validateOptionsAssessmentRequest(req); err != nil {
+		var validation *optionsAssessmentValidationError
+		if errors.As(err, &validation) {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "invalid_request", "category": "local_validation", "fields": validation.Fields})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"status": "invalid_request", "category": "local_validation", "fields": gin.H{"request": err.Error()}})
 		return
 	}
 	assessor, ok := oc.tradingService.(interface {
@@ -1539,6 +1640,12 @@ func (oc *OrderController) AssessOptionsStrategy(c *gin.Context) {
 	order := &interfaces.OptionsOrder{Symbol: req.Symbol, Underlying: req.Underlying, Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, StrategyType: req.StrategyType, AssessmentLegs: req.AssessmentLegs, AssessmentMaxLoss: req.MaxLoss, AssessmentGreeks: req.Greeks, MarketEvidenceAt: req.MarketEvidenceAt, ObservedAt: req.ObservedAt, AssessmentExpiresAt: req.ExpiresAt}
 	a, err := assessor.AssessOptionsStrategy(c.Request.Context(), order, req.MarketScannerFeatures)
 	if err != nil {
+		var providerUnavailable *services.AlphaDeskProviderUnavailableError
+		if errors.As(err, &providerUnavailable) {
+			oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("AlphaDesk provider unavailable")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "category": "provider_unavailable", "error": "AlphaDesk assessment is unavailable"})
+			return
+		}
 		var unavailable *services.AlphaDeskUnavailableError
 		if errors.As(err, &unavailable) {
 			assessment := &interfaces.AlphaDeskAssessment{Decision: "UNAVAILABLE", QualificationStatus: "unavailable", Fingerprint: ""}

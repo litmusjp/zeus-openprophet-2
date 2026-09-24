@@ -931,11 +931,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'assess_options_strategy',
-        description: 'Request deterministic AlphaDesk assessment for the exact proposed options trade. Assessment-only and not broker authorization.',
+        description: 'Request deterministic AlphaDesk assessment for the exact proposed options trade. Provide the exact broker-derived option chain and quote/Greeks/max-loss evidence for every leg; client-supplied or fabricated evidence is not sufficient. Assessment-only and not broker authorization.',
         inputSchema: {
           type: 'object', properties: {
-            symbol: {type:'string'}, underlying: {type:'string'}, quantity: {type:'number'}, side: {type:'string', enum:['buy','sell']}, position_intent: {type:'string', enum:['buy_to_open','buy_to_close','sell_to_open','sell_to_close']}, order_type: {type:'string', enum:['market','limit']}, limit_price: {type:'number'}, strategy_type: {type:'string'}, legs: {type:'array'}, max_loss: {type:'number'}, greeks: {type:'object'}, market_evidence_at: {type:'string'}, observed_at: {type:'string'}, expires_at: {type:'string'}, market_scanner_features: {type:'object'},
-          }, required: ['symbol','underlying','quantity','side','position_intent','order_type'],
+            symbol: {type:'string'}, underlying: {type:'string'}, quantity: {type:'number'}, side: {type:'string', enum:['buy','sell']}, position_intent: {type:'string', enum:['buy_to_open','buy_to_close','sell_to_open','sell_to_close']}, order_type: {type:'string', enum:['market','limit']}, time_in_force: {type:'string', enum:['day']}, limit_price: {type:'number'}, strategy_type: {type:'string'}, legs: {type:'array', description:'Required exact broker-derived chain legs, including per-leg contract symbols, sides, quantities, prices, and quote evidence.'}, max_loss: {type:'number', description:'Required broker-derived maximum loss.'}, greeks: {type:'object', description:'Required broker-derived Greeks.'}, market_evidence_at: {type:'string'}, observed_at: {type:'string'}, expires_at: {type:'string'}, market_scanner_features: {type:'object'},
+          }, required: ['symbol','underlying','quantity','side','position_intent','order_type','time_in_force'],
         },
       },
       {
@@ -1961,7 +1961,7 @@ ${allNews.map((article, i) =>
       }
 
       case 'assess_options_strategy': {
-        const data = await callTradingBot('/options/assessment', 'POST', { symbol: args.symbol, underlying: args.underlying, qty: args.quantity, side: args.side, position_intent: args.position_intent, type: args.order_type, ...(args.limit_price !== undefined && {limit_price: args.limit_price}), ...(args.strategy_type && {strategy_type: args.strategy_type}), ...(args.legs && {legs: args.legs}), ...(args.max_loss !== undefined && {max_loss: args.max_loss}), ...(args.greeks && {greeks: args.greeks}), ...(args.market_evidence_at && {market_evidence_at: args.market_evidence_at}), ...(args.observed_at && {observed_at: args.observed_at}), ...(args.expires_at && {expires_at: args.expires_at}), ...(args.market_scanner_features && {market_scanner_features: args.market_scanner_features}) }, { returnValidation: true });
+        const data = await callTradingBot('/options/assessment', 'POST', { symbol: args.symbol, underlying: args.underlying, qty: args.quantity, side: args.side, position_intent: args.position_intent, type: args.order_type, time_in_force: args.time_in_force, ...(args.limit_price !== undefined && {limit_price: args.limit_price}), ...(args.strategy_type && {strategy_type: args.strategy_type}), ...(args.legs && {legs: args.legs}), ...(args.max_loss !== undefined && {max_loss: args.max_loss}), ...(args.greeks && {greeks: args.greeks}), ...(args.market_evidence_at && {market_evidence_at: args.market_evidence_at}), ...(args.observed_at && {observed_at: args.observed_at}), ...(args.expires_at && {expires_at: args.expires_at}), ...(args.market_scanner_features && {market_scanner_features: args.market_scanner_features}) }, { returnValidation: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

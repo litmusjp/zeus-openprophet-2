@@ -106,6 +106,19 @@ func (e *AlphaDeskValidationError) Error() string {
 }
 func (e *AlphaDeskValidationError) Unwrap() error { return e.Err }
 
+type AlphaDeskProviderUnavailableError struct{ Err error }
+
+func (e *AlphaDeskProviderUnavailableError) Error() string {
+	return "AlphaDesk assessment unavailable: provider is unavailable"
+}
+
+func (e *AlphaDeskProviderUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 func OptionsTradeFingerprint(identity models.DurableIdentity, symbol, underlying, side, intent string, qty float64, limit *float64) string {
 	v := struct {
 		Account, Paper, Tenant, Sandbox, Symbol, Underlying, Side, Intent string
@@ -143,8 +156,11 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 	})
 	if err != nil {
 		var providerErr *ProviderError
-		if errors.As(err, &providerErr) && providerErr.Status == http.StatusUnprocessableEntity {
+		if errors.As(err, &providerErr) && (providerErr.Status == http.StatusBadRequest || providerErr.Status == http.StatusUnprocessableEntity) {
 			return nil, &AlphaDeskValidationError{Status: providerErr.Status, Err: err}
+		}
+		if errors.As(err, &providerErr) && providerErr.Status == http.StatusServiceUnavailable {
+			return nil, &AlphaDeskProviderUnavailableError{Err: err}
 		}
 		return nil, fmt.Errorf("AlphaDesk assessment unavailable: %w", err)
 	}

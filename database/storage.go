@@ -653,25 +653,12 @@ func (s *LocalStorage) SaveManagedOrder(order *models.DBManagedOrder) error {
 	if !durableIdentityMatches(order.DurableIdentity, s.identity) {
 		return fmt.Errorf("managed order identity does not match storage execution context")
 	}
-	if order.RequestedQty <= 0 || math.IsNaN(order.RequestedQty) || math.IsInf(order.RequestedQty, 0) {
-		return fmt.Errorf("managed order requested quantity must be finite and positive")
-	}
-	if strings.TrimSpace(order.Role) == "" || strings.TrimSpace(order.Purpose) == "" {
-		return fmt.Errorf("managed order role and purpose are required")
-	}
-	if order.Role != order.Purpose && !(order.Role == "protection" && order.Purpose == "protection") {
-		return fmt.Errorf("managed order role and purpose do not agree")
-	}
-	if order.FilledQty < 0 || order.FilledQty > order.RequestedQty || order.FillWatermark < 0 || order.FillWatermark > order.RequestedQty {
-		return fmt.Errorf("managed order fill evidence is outside requested quantity")
-	}
-	if order.FillWatermark < order.FilledQty {
-		order.FillWatermark = order.FilledQty
-	}
-
 	var existing models.DBManagedOrder
 	result := s.db.Where("client_order_id = ?", order.ClientOrderID).First(&existing)
 	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		if err := validateManagedOrderContract(order); err != nil {
+			return err
+		}
 		if order.Revision == 0 {
 			order.Revision = 1
 		}
@@ -692,13 +679,11 @@ func (s *LocalStorage) SaveManagedOrder(order *models.DBManagedOrder) error {
 	if existing.BrokerOrderID != "" && order.BrokerOrderID != "" && existing.BrokerOrderID != order.BrokerOrderID {
 		return fmt.Errorf("managed order broker identity cannot be rotated")
 	}
-	if existing.PositionID != order.PositionID || existing.Role != order.Role || existing.Purpose != order.Purpose ||
-		existing.Symbol != order.Symbol || existing.Side != order.Side || existing.AssetClass != order.AssetClass ||
-		existing.Underlying != order.Underlying || existing.PositionIntent != order.PositionIntent ||
-		existing.OrderType != order.OrderType || existing.TimeInForce != order.TimeInForce ||
-		existing.RequestedQty != order.RequestedQty || !managedPriceEqual(existing.LimitPrice, order.LimitPrice) ||
-		!managedPriceEqual(existing.StopPrice, order.StopPrice) {
-		return fmt.Errorf("managed order client identity is already bound to different order parameters")
+	if err := mergeManagedOrderContract(&existing, order); err != nil {
+		return err
+	}
+	if err := validateManagedOrderContract(order); err != nil {
+		return err
 	}
 	if order.Revision != existing.Revision {
 		return fmt.Errorf("stale managed order revision")
@@ -766,6 +751,76 @@ func (s *LocalStorage) MarkManagedSubmissionAttempted(clientOrderID, positionID,
 		}
 		return nil
 	})
+}
+
+func validateManagedOrderContract(order *models.DBManagedOrder) error {
+	if order.RequestedQty <= 0 || math.IsNaN(order.RequestedQty) || math.IsInf(order.RequestedQty, 0) {
+		return fmt.Errorf("managed order requested quantity must be finite and positive")
+	}
+	if strings.TrimSpace(order.Role) == "" || strings.TrimSpace(order.Purpose) == "" {
+		return fmt.Errorf("managed order role and purpose are required")
+	}
+	if order.Role != order.Purpose && !(order.Role == "protection" && order.Purpose == "protection") {
+		return fmt.Errorf("managed order role and purpose do not agree")
+	}
+	if order.FilledQty < 0 || order.FilledQty > order.RequestedQty || order.FillWatermark < 0 || order.FillWatermark > order.RequestedQty {
+		return fmt.Errorf("managed order fill evidence is outside requested quantity")
+	}
+	if order.FillWatermark < order.FilledQty {
+		order.FillWatermark = order.FilledQty
+	}
+	return nil
+}
+
+// mergeManagedOrderContract repairs legacy blank projections while preserving
+// the fail-closed behavior for any non-empty immutable contract conflict.
+func mergeManagedOrderContract(existing, incoming *models.DBManagedOrder) error {
+	mergeString := func(name string, current, next *string) error {
+		if *next == "" {
+			*next = *current
+		} else if *current != "" && *current != *next {
+			return fmt.Errorf("managed order client identity is already bound to different %s", name)
+		}
+		return nil
+	}
+	for _, field := range []struct {
+		name          string
+		current, next *string
+	}{
+		{"position ID", &existing.PositionID, &incoming.PositionID},
+		{"role", &existing.Role, &incoming.Role},
+		{"purpose", &existing.Purpose, &incoming.Purpose},
+		{"symbol", &existing.Symbol, &incoming.Symbol},
+		{"side", &existing.Side, &incoming.Side},
+		{"asset class", &existing.AssetClass, &incoming.AssetClass},
+		{"underlying", &existing.Underlying, &incoming.Underlying},
+		{"position intent", &existing.PositionIntent, &incoming.PositionIntent},
+		{"order type", &existing.OrderType, &incoming.OrderType},
+		{"time in force", &existing.TimeInForce, &incoming.TimeInForce},
+	} {
+		if err := mergeString(field.name, field.current, field.next); err != nil {
+			return err
+		}
+	}
+	if incoming.RequestedQty == 0 {
+		incoming.RequestedQty = existing.RequestedQty
+	} else if existing.RequestedQty != 0 && existing.RequestedQty != incoming.RequestedQty {
+		return fmt.Errorf("managed order client identity is already bound to different requested quantity")
+	}
+	for _, field := range []struct {
+		name          string
+		current, next **float64
+	}{
+		{"limit price", &existing.LimitPrice, &incoming.LimitPrice},
+		{"stop price", &existing.StopPrice, &incoming.StopPrice},
+	} {
+		if *field.next == nil {
+			*field.next = *field.current
+		} else if *field.current != nil && !managedPriceEqual(*field.current, *field.next) {
+			return fmt.Errorf("managed order client identity is already bound to different %s", field.name)
+		}
+	}
+	return nil
 }
 
 func managedPriceEqual(left, right *float64) bool {

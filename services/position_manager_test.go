@@ -294,13 +294,14 @@ func TestPartialProtectionCancellationPersistsPositiveFillEvidence(t *testing.T)
 }
 
 type exitOrderRecorder struct {
-	placed     *interfaces.Order
-	result     *interfaces.OrderResult
-	placeErr   error
-	marker     func(string, string, string) error
-	markerFail bool
-	calls      int
-	cancelErr  error
+	placed       *interfaces.Order
+	brokerOrders map[string]*interfaces.Order
+	result       *interfaces.OrderResult
+	placeErr     error
+	marker       func(string, string, string) error
+	markerFail   bool
+	calls        int
+	cancelErr    error
 }
 
 func (s *exitOrderRecorder) SetManagedSubmissionMarker(marker func(string, string, string) error) {
@@ -365,11 +366,85 @@ func TestManagedProtectionMarkerFailureDoesNotCallBroker(t *testing.T) {
 		t.Fatalf("failed marker persisted generic=%#v managed=%#v errors=(%v,%v), want both unattempted", order, projection, orderErr, projectionErr)
 	}
 }
+
+func TestReconcilePersistedPositionsRepairsLegacyManagedOrderContract(t *testing.T) {
+	identity := models.DurableIdentity{BrokerAccountID: "test-broker-account", PaperLive: "paper", TenantID: "test-tenant", SandboxID: "test-sandbox"}
+	entryFill := 274.50
+	entry := &interfaces.Order{ID: "broker-entry", ClientOrderID: "client-entry", BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Qty: 1, Side: "buy", Type: "market", TimeInForce: "gtc", Status: "filled", FilledQty: 1, FilledAvgPrice: &entryFill, AssetClass: "us_equity", Underlying: "IWM", PositionIntent: "buy_to_open", Purpose: "entry"}
+	protectionStop := 274.89
+	protection := &interfaces.Order{ID: "broker-protection", ClientOrderID: "client-protection", BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Qty: 1, Side: "sell", Type: "stop", TimeInForce: "gtc", StopPrice: &protectionStop, Status: "new", AssetClass: "us_equity", Underlying: "IWM", PositionIntent: "sell_to_close", Purpose: "close"}
+	rec := &exitOrderRecorder{brokerOrders: map[string]*interfaces.Order{entry.ID: entry, protection.ID: protection}}
+	pm, storage := newTestPositionManager(t, rec)
+	defer storage.Close()
+	position := &ManagedPosition{DurableIdentity: identity, ID: "position-iwm", Symbol: "IWM", Side: "buy", Status: "ACTIVE", Quantity: 1, RemainingQty: 1, EntryOrderID: entry.ID, EntryClientOrderID: entry.ClientOrderID, StopLossOrderID: protection.ID, StopLossClientOrderID: protection.ClientOrderID}
+	pm.positions[position.ID] = position
+	for _, projection := range []*models.DBManagedOrder{
+		{DurableIdentity: identity, PositionID: position.ID, Role: "entry", Purpose: "entry", ClientOrderID: entry.ClientOrderID, BrokerOrderID: entry.ID, Symbol: "IWM", RequestedQty: 1},
+		{DurableIdentity: identity, PositionID: position.ID, Role: "protection", Purpose: "protection", ClientOrderID: protection.ClientOrderID, BrokerOrderID: protection.ID, Symbol: "IWM", RequestedQty: 1, StopPrice: &protectionStop},
+	} {
+		if err := storage.SaveManagedOrder(projection); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if skipped := pm.ReconcilePersistedPositions(context.Background()); skipped != 0 {
+		t.Fatalf("ReconcilePersistedPositions() skipped %d positions, want 0", skipped)
+	}
+	repairedEntry, err := storage.GetManagedOrder(entry.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repairedEntry.AssetClass != "us_equity" || repairedEntry.Underlying != "IWM" || repairedEntry.PositionIntent != "buy_to_open" || repairedEntry.OrderType != "market" || repairedEntry.TimeInForce != "gtc" {
+		t.Fatalf("repaired entry projection = %#v, want broker contract fields persisted", repairedEntry)
+	}
+	repairedProtection, err := storage.GetManagedOrder(protection.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repairedProtection.AssetClass != "us_equity" || repairedProtection.Underlying != "IWM" || repairedProtection.PositionIntent != "sell_to_close" || repairedProtection.OrderType != "stop" || repairedProtection.TimeInForce != "gtc" {
+		t.Fatalf("repaired protection projection = %#v, want broker contract fields persisted", repairedProtection)
+	}
+}
+
+func TestReconcilePersistedPositionsRejectsConflictingManagedOrderContract(t *testing.T) {
+	identity := models.DurableIdentity{BrokerAccountID: "test-broker-account", PaperLive: "paper", TenantID: "test-tenant", SandboxID: "test-sandbox"}
+	entryFill := 274.50
+	brokerOrder := &interfaces.Order{ID: "broker-entry", ClientOrderID: "client-entry", BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Qty: 1, Side: "buy", Type: "market", TimeInForce: "gtc", Status: "filled", FilledQty: 1, FilledAvgPrice: &entryFill, AssetClass: "us_equity", Underlying: "IWM", PositionIntent: "buy_to_open", Purpose: "entry"}
+	rec := &exitOrderRecorder{brokerOrders: map[string]*interfaces.Order{brokerOrder.ID: brokerOrder}}
+	pm, storage := newTestPositionManager(t, rec)
+	defer storage.Close()
+	position := &ManagedPosition{DurableIdentity: identity, ID: "position-conflict", Symbol: "IWM", Side: "buy", Status: "ACTIVE", Quantity: 1, RemainingQty: 1, EntryOrderID: brokerOrder.ID, EntryClientOrderID: brokerOrder.ClientOrderID}
+	pm.positions[position.ID] = position
+	projection := &models.DBManagedOrder{DurableIdentity: identity, PositionID: position.ID, Role: "entry", Purpose: "entry", ClientOrderID: brokerOrder.ClientOrderID, BrokerOrderID: brokerOrder.ID, Symbol: "IWM", AssetClass: "us_option", RequestedQty: 1}
+	if err := storage.SaveManagedOrder(projection); err != nil {
+		t.Fatal(err)
+	}
+	if skipped := pm.ReconcilePersistedPositions(context.Background()); skipped != 1 {
+		t.Fatalf("ReconcilePersistedPositions() skipped %d positions, want 1", skipped)
+	}
+	unchanged, err := storage.GetManagedOrder(brokerOrder.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.AssetClass != "us_option" {
+		t.Fatalf("conflicting asset class was overwritten: %#v", unchanged)
+	}
+}
+
 func (s *exitOrderRecorder) CancelOrder(context.Context, string) error { return s.cancelErr }
-func (s *exitOrderRecorder) GetOrder(context.Context, string) (*interfaces.Order, error) {
+func (s *exitOrderRecorder) GetOrder(ctx context.Context, id string) (*interfaces.Order, error) {
+	for _, order := range s.brokerOrders {
+		if order.ID == id {
+			return order, nil
+		}
+	}
 	return nil, nil
 }
-func (s *exitOrderRecorder) GetOrderByClientOrderID(context.Context, string) (*interfaces.Order, error) {
+func (s *exitOrderRecorder) GetOrderByClientOrderID(_ context.Context, clientID string) (*interfaces.Order, error) {
+	for _, order := range s.brokerOrders {
+		if order.ClientOrderID == clientID {
+			return order, nil
+		}
+	}
 	return nil, nil
 }
 func (s *exitOrderRecorder) ListOrders(context.Context, string) ([]*interfaces.Order, error) {

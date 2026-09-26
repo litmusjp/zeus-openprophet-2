@@ -42,6 +42,14 @@ function portOffsetForSandbox(sandboxId) {
 
 export { shouldShowGoLogLine, createGoLogLineBuffer };
 
+export function isStructuredReadiness503(error) {
+  const response = error?.response;
+  const health = response?.data;
+  return response?.status === 503 && health && typeof health === 'object'
+    && typeof health.ready === 'boolean'
+    && typeof health.reconciliation_complete === 'boolean';
+}
+
 function setRuntimeProcessNonce(runtime) {
   const header = 'X-OpenProphet-Process-Nonce';
   const processNonce = runtime.processNonce;
@@ -336,6 +344,7 @@ export class AgentOrchestrator extends EventEmitter {
       });
     });
 
+    let sawStructuredReadiness503 = false;
     for (let i = 0; i < 20; i++) {
       await new Promise(resolve => setTimeout(resolve, 500));
       try {
@@ -367,9 +376,14 @@ export class AgentOrchestrator extends EventEmitter {
         });
         if (restartHarness && !runtime.harness.state.running) await runtime.harness.start();
         return runtime;
-      } catch {
+      } catch (error) {
+        if (isStructuredReadiness503(error)) sawStructuredReadiness503 = true;
         // keep waiting
       }
+    }
+
+    if (sawStructuredReadiness503) {
+      throw new Error(`Trading backend is alive but not ready for sandbox ${sandboxId}`);
     }
 
     // Didn't come up — the binary may be stale/wrong-arch for this host. Rebuild once and retry.

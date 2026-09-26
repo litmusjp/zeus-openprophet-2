@@ -807,6 +807,7 @@ func (pm *PositionManager) ReconcilePersistedPositions(ctx context.Context) int 
 				valid = false
 				break
 			}
+			repairMissingManagedOrderProjectionFields(projection, brokerOrder)
 			if err := validateManagedOrderProjection(projection, brokerOrder); err != nil {
 				valid = false
 				break
@@ -837,6 +838,40 @@ func (pm *PositionManager) ReconcilePersistedPositions(ctx context.Context) int 
 		}
 	}
 	return skipped
+}
+
+// repairMissingManagedOrderProjectionFields repairs only legacy blank fields
+// after the durable position/client-order binding has already been checked.
+// Non-empty values are deliberately left untouched; validateManagedOrderProjection
+// remains the fail-closed authority for any conflict.
+func repairMissingManagedOrderProjectionFields(projection *models.DBManagedOrder, order *interfaces.Order) {
+	if projection == nil || order == nil {
+		return
+	}
+	if projection.Side == "" {
+		projection.Side = order.Side
+	}
+	if projection.AssetClass == "" {
+		projection.AssetClass = order.AssetClass
+	}
+	if projection.Underlying == "" {
+		projection.Underlying = order.Underlying
+	}
+	if projection.PositionIntent == "" {
+		projection.PositionIntent = order.PositionIntent
+	}
+	if projection.OrderType == "" {
+		projection.OrderType = order.Type
+	}
+	if projection.TimeInForce == "" {
+		projection.TimeInForce = order.TimeInForce
+	}
+	if projection.LimitPrice == nil && order.LimitPrice != nil {
+		projection.LimitPrice = order.LimitPrice
+	}
+	if projection.StopPrice == nil && order.StopPrice != nil {
+		projection.StopPrice = order.StopPrice
+	}
 }
 
 func (pm *PositionManager) MonitorPositions(ctx context.Context) {

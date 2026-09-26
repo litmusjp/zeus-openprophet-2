@@ -376,6 +376,92 @@ func TestManagedOrderProjectionRejectsContractIdentityMutation(t *testing.T) {
 	}
 }
 
+func TestManagedOrderProjectionRepairsLegacyBlankContractFields(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-repair.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	price := 101.0
+	stop := 99.0
+	legacy := &models.DBManagedOrder{
+		PositionID: "position-1", Role: "entry", Purpose: "entry", ClientOrderID: "client-repair-1", BrokerOrderID: "broker-repair-1",
+		RequestedQty: 2, Lifecycle: "accepted",
+		DurableIdentity: models.DurableIdentity{BrokerAccountID: "broker-account-1", PaperLive: "paper", TenantID: "tenant-1", SandboxID: "sandbox-1"},
+	}
+	if err := storage.SaveManagedOrder(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	repaired := *legacy
+	repaired.Revision = 1
+	repaired.Symbol = "AAPL"
+	repaired.Side = "buy"
+	repaired.AssetClass = "us_equity"
+	repaired.Underlying = "AAPL"
+	repaired.PositionIntent = "buy_to_open"
+	repaired.OrderType = "limit"
+	repaired.TimeInForce = "gtc"
+	repaired.LimitPrice = &price
+	repaired.StopPrice = &stop
+	if err := storage.SaveManagedOrder(&repaired); err != nil {
+		t.Fatal(err)
+	}
+
+	blankUpdate := repaired
+	blankUpdate.Revision = 2
+	blankUpdate.Symbol = ""
+	blankUpdate.Side = ""
+	blankUpdate.AssetClass = ""
+	blankUpdate.Underlying = ""
+	blankUpdate.PositionIntent = ""
+	blankUpdate.OrderType = ""
+	blankUpdate.TimeInForce = ""
+	blankUpdate.Role = ""
+	blankUpdate.Purpose = ""
+	blankUpdate.RequestedQty = 0
+	blankUpdate.LimitPrice = nil
+	blankUpdate.StopPrice = nil
+	if err := storage.SaveManagedOrder(&blankUpdate); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := storage.GetManagedOrder(legacy.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Symbol != "AAPL" || fresh.Side != "buy" || fresh.AssetClass != "us_equity" || fresh.Underlying != "AAPL" ||
+		fresh.PositionIntent != "buy_to_open" || fresh.OrderType != "limit" || fresh.TimeInForce != "gtc" || fresh.Role != "entry" || fresh.Purpose != "entry" || fresh.RequestedQty != 2 ||
+		fresh.LimitPrice == nil || *fresh.LimitPrice != price || fresh.StopPrice == nil || *fresh.StopPrice != stop {
+		t.Fatalf("legacy contract fields were not repaired/preserved: %#v", fresh)
+	}
+}
+
+func TestManagedOrderProjectionRejectsNonEmptyContractConflictAfterRepair(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-repair-conflict.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+
+	order := &models.DBManagedOrder{
+		PositionID: "position-1", Role: "entry", Purpose: "entry", ClientOrderID: "client-repair-conflict-1", BrokerOrderID: "broker-repair-conflict-1",
+		Symbol: "AAPL", Side: "buy", AssetClass: "us_equity", Underlying: "AAPL", PositionIntent: "buy_to_open", OrderType: "limit", TimeInForce: "gtc", RequestedQty: 2,
+		DurableIdentity: models.DurableIdentity{BrokerAccountID: "broker-account-1", PaperLive: "paper", TenantID: "tenant-1", SandboxID: "sandbox-1"},
+	}
+	if err := storage.SaveManagedOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	conflict := *order
+	conflict.Revision = 1
+	conflict.AssetClass = "us_option"
+	if err := storage.SaveManagedOrder(&conflict); err == nil {
+		t.Fatal("non-empty immutable contract conflict should be rejected")
+	}
+}
+
 func TestManagedOrderProjectionKeepsCumulativeWatermarkAcrossSnapshots(t *testing.T) {
 	setManagedIdentity(t, "broker-account-1")
 	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "managed-orders-watermark.db"))

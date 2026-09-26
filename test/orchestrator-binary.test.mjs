@@ -83,6 +83,13 @@ test('concurrent starts for one sandbox are serialized', async () => {
   assert.equal(maximum, 1);
 });
 
+test('structured readiness 503 is treated as a live backend response', async () => {
+  const { isStructuredReadiness503 } = await import(`../agent/orchestrator.js?readiness-503=${Date.now()}`);
+  assert.equal(isStructuredReadiness503({ response: { status: 503, data: { ready: false, reconciliation_complete: false } } }), true);
+  assert.equal(isStructuredReadiness503({ response: { status: 503, data: 'backend unavailable' } }), false);
+  assert.equal(isStructuredReadiness503(new Error('transport failure')), false);
+});
+
 async function withUnavailableGo(callback) {
   const goDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openprophet-no-go-'));
   const goPath = path.join(goDir, 'go.cmd');

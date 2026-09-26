@@ -679,8 +679,13 @@ func (s *LocalStorage) SaveManagedOrder(order *models.DBManagedOrder) error {
 	if existing.BrokerOrderID != "" && order.BrokerOrderID != "" && existing.BrokerOrderID != order.BrokerOrderID {
 		return fmt.Errorf("managed order broker identity cannot be rotated")
 	}
-	if err := mergeManagedOrderContract(&existing, order); err != nil {
+	if err := mergeManagedOrderRecoveryFields(&existing, order); err != nil {
 		return err
+	}
+	if existing.PositionID != order.PositionID || existing.Role != order.Role || existing.Purpose != order.Purpose ||
+		existing.Symbol != order.Symbol ||
+		existing.RequestedQty != order.RequestedQty {
+		return fmt.Errorf("managed order client identity is already bound to different order parameters")
 	}
 	if err := validateManagedOrderContract(order); err != nil {
 		return err
@@ -772,9 +777,12 @@ func validateManagedOrderContract(order *models.DBManagedOrder) error {
 	return nil
 }
 
-// mergeManagedOrderContract repairs legacy blank projections while preserving
-// the fail-closed behavior for any non-empty immutable contract conflict.
-func mergeManagedOrderContract(existing, incoming *models.DBManagedOrder) error {
+// mergeManagedOrderRecoveryFields permits only broker-derived fields that the
+// reconciliation path explicitly repairs on legacy projections. Position
+// binding, role/purpose, symbol, and quantity remain immutable at the shared
+// storage boundary. Missing legacy prices may be recovered from the broker;
+// conflicting non-empty prices remain rejected.
+func mergeManagedOrderRecoveryFields(existing, incoming *models.DBManagedOrder) error {
 	mergeString := func(name string, current, next *string) error {
 		if *next == "" {
 			*next = *current
@@ -787,10 +795,6 @@ func mergeManagedOrderContract(existing, incoming *models.DBManagedOrder) error 
 		name          string
 		current, next *string
 	}{
-		{"position ID", &existing.PositionID, &incoming.PositionID},
-		{"role", &existing.Role, &incoming.Role},
-		{"purpose", &existing.Purpose, &incoming.Purpose},
-		{"symbol", &existing.Symbol, &incoming.Symbol},
 		{"side", &existing.Side, &incoming.Side},
 		{"asset class", &existing.AssetClass, &incoming.AssetClass},
 		{"underlying", &existing.Underlying, &incoming.Underlying},
@@ -802,23 +806,22 @@ func mergeManagedOrderContract(existing, incoming *models.DBManagedOrder) error 
 			return err
 		}
 	}
-	if incoming.RequestedQty == 0 {
-		incoming.RequestedQty = existing.RequestedQty
-	} else if existing.RequestedQty != 0 && existing.RequestedQty != incoming.RequestedQty {
-		return fmt.Errorf("managed order client identity is already bound to different requested quantity")
-	}
-	for _, field := range []struct {
-		name          string
-		current, next **float64
-	}{
-		{"limit price", &existing.LimitPrice, &incoming.LimitPrice},
-		{"stop price", &existing.StopPrice, &incoming.StopPrice},
-	} {
-		if *field.next == nil {
-			*field.next = *field.current
-		} else if *field.current != nil && !managedPriceEqual(*field.current, *field.next) {
-			return fmt.Errorf("managed order client identity is already bound to different %s", field.name)
+	mergePrice := func(name string, current, next **float64) error {
+		if *next == nil {
+			*next = *current
+		} else if *current == nil {
+			// A missing legacy price is repaired by the incoming snapshot. Keep
+			// the loaded snapshot unchanged; only compare prices when both exist.
+		} else if !managedPriceEqual(*current, *next) {
+			return fmt.Errorf("managed order client identity is already bound to different %s", name)
 		}
+		return nil
+	}
+	if err := mergePrice("limit price", &existing.LimitPrice, &incoming.LimitPrice); err != nil {
+		return err
+	}
+	if err := mergePrice("stop price", &existing.StopPrice, &incoming.StopPrice); err != nil {
+		return err
 	}
 	return nil
 }

@@ -380,7 +380,7 @@ func TestReconcilePersistedPositionsRepairsLegacyManagedOrderContract(t *testing
 	pm.positions[position.ID] = position
 	for _, projection := range []*models.DBManagedOrder{
 		{DurableIdentity: identity, PositionID: position.ID, Role: "entry", Purpose: "entry", ClientOrderID: entry.ClientOrderID, BrokerOrderID: entry.ID, Symbol: "IWM", RequestedQty: 1},
-		{DurableIdentity: identity, PositionID: position.ID, Role: "protection", Purpose: "protection", ClientOrderID: protection.ClientOrderID, BrokerOrderID: protection.ID, Symbol: "IWM", RequestedQty: 1, StopPrice: &protectionStop},
+		{DurableIdentity: identity, PositionID: position.ID, Role: "protection", Purpose: "protection", ClientOrderID: protection.ClientOrderID, BrokerOrderID: protection.ID, Symbol: "IWM", RequestedQty: 1},
 	} {
 		if err := storage.SaveManagedOrder(projection); err != nil {
 			t.Fatal(err)

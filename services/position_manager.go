@@ -1070,9 +1070,11 @@ func validateManagedOrderProjection(projection *models.DBManagedOrder, order *in
 	if projection.BrokerOrderID != "" && order.ID != projection.BrokerOrderID {
 		return fmt.Errorf("managed broker order identity mismatch")
 	}
+	protectionCloseIntent := projection.Role == "protection" && projection.Purpose == "protection" &&
+		order.Purpose == "close" && strings.HasSuffix(strings.ToLower(strings.TrimSpace(order.PositionIntent)), "_to_close")
 	if order.ID == "" || order.Symbol != projection.Symbol || order.Side != projection.Side ||
 		order.Qty != projection.RequestedQty || order.Type != projection.OrderType ||
-		order.TimeInForce != projection.TimeInForce || order.Purpose != projection.Purpose ||
+		order.TimeInForce != projection.TimeInForce || (order.Purpose != projection.Purpose && !protectionCloseIntent) ||
 		order.AssetClass != projection.AssetClass || order.Underlying != projection.Underlying ||
 		order.PositionIntent != projection.PositionIntent {
 		return fmt.Errorf("managed broker order contract identity mismatch")

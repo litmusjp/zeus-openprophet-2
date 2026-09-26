@@ -19,6 +19,49 @@ func TestValidateManagedBrokerOrderRequiresRolePurpose(t *testing.T) {
 	}
 }
 
+func TestValidateManagedOrderProjectionAcceptsCloseIntentForProtection(t *testing.T) {
+	identity := models.DurableIdentity{BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+	projection := &models.DBManagedOrder{
+		DurableIdentity: identity,
+		PositionID:      "position-1",
+		Role:            "protection",
+		Purpose:         "protection",
+		ClientOrderID:   "client-protection",
+		BrokerOrderID:   "broker-protection",
+		Symbol:          "AAPL",
+		Side:            "sell",
+		OrderType:       "stop",
+		TimeInForce:     "gtc",
+		RequestedQty:    1,
+		StopPrice:       floatPtr(90),
+		PositionIntent:  "buy_to_close",
+		AssetClass:      "us_option",
+		Underlying:      "AAPL",
+	}
+	order := &interfaces.Order{
+		ID:              "broker-protection",
+		ClientOrderID:   "client-protection",
+		BrokerAccountID: identity.BrokerAccountID,
+		PaperLive:       identity.PaperLive,
+		TenantID:        identity.TenantID,
+		SandboxID:       identity.SandboxID,
+		Symbol:          "AAPL",
+		Side:            "sell",
+		Qty:             1,
+		Type:            "stop",
+		TimeInForce:     "gtc",
+		StopPrice:       floatPtr(90),
+		Status:          "new",
+		Purpose:         "close",
+		PositionIntent:  "buy_to_close",
+		AssetClass:      "us_option",
+		Underlying:      "AAPL",
+	}
+	if err := validateManagedOrderProjection(projection, order); err != nil {
+		t.Fatalf("protection projection with broker close intent was rejected: %v", err)
+	}
+}
+
 func TestValidateManagedBrokerOrderRequiresEntryContract(t *testing.T) {
 	position := &ManagedPosition{Symbol: "AAPL", Side: "buy", Quantity: 10, EntryOrderType: "limit"}
 	order := &interfaces.Order{Symbol: "AAPL", Qty: 10, Side: "buy", Type: "market", TimeInForce: "gtc", Status: "new", Purpose: "entry"}

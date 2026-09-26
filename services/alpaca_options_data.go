@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -45,10 +46,10 @@ type AlpacaOptionsSnapshot struct {
 
 // AlpacaOptionContract represents an option contract from Alpaca
 type AlpacaOptionContract struct {
-	LatestQuote AlpacaQuote `json:"latestQuote"`
-	LatestTrade AlpacaTrade `json:"latestTrade"`
-	Greeks      AlpacaGreeks `json:"greeks"`
-	ImpliedVolatility float64 `json:"impliedVolatility"`
+	LatestQuote       AlpacaQuote  `json:"latestQuote"`
+	LatestTrade       AlpacaTrade  `json:"latestTrade"`
+	Greeks            AlpacaGreeks `json:"greeks"`
+	ImpliedVolatility float64      `json:"impliedVolatility"`
 }
 
 // AlpacaQuote represents quote data
@@ -84,14 +85,31 @@ type AlpacaOptionChainResponse struct {
 
 // AlpacaOptionChainContract represents contract metadata
 type AlpacaOptionChainContract struct {
-	Symbol          string    `json:"symbol"`
-	UnderlyingSymbol string   `json:"underlying_symbol"`
-	ExpirationDate  string    `json:"expiration_date"`
-	StrikePrice     float64   `json:"strike_price"`
-	Type            string    `json:"type"` // "call" or "put"
-	Style           string    `json:"style"`
-	OpenInterest    int64     `json:"open_interest"`
-	ContractSize    int       `json:"contract_size"`
+	Symbol              string  `json:"symbol"`
+	UnderlyingSymbol    string  `json:"underlying_symbol"`
+	ExpirationDate      string  `json:"expiration_date"`
+	StrikePrice         float64 `json:"strike_price"`
+	Type                string  `json:"type"` // "call" or "put"
+	Style               string  `json:"style"`
+	OpenInterest        int64   `json:"open_interest"`
+	OpenInterestPresent bool    `json:"-"`
+	ContractSize        int     `json:"contract_size"`
+}
+
+func (c *AlpacaOptionChainContract) UnmarshalJSON(data []byte) error {
+	type alias AlpacaOptionChainContract
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*c = AlpacaOptionChainContract(decoded)
+	value, ok := fields["open_interest"]
+	c.OpenInterestPresent = ok && !bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+	return nil
 }
 
 // GetOptionSnapshot gets the latest snapshot for an option
@@ -195,7 +213,7 @@ func (s *AlpacaOptionsDataService) GetOptionChain(ctx context.Context, underlyin
 			StrikePrice:      alpacaContract.StrikePrice,
 			ExpirationDate:   expDate,
 			DTE:              dte,
-			OpenInterest:     alpacaContract.OpenInterest,
+			OpenInterest:     alpacaContract.OpenInterest, OpenInterestPresent: alpacaContract.OpenInterestPresent,
 		}
 
 		contracts[alpacaContract.Symbol] = contract
@@ -263,7 +281,7 @@ func (s *AlpacaOptionsDataService) FindOptionsNearDTE(ctx context.Context, under
 			StrikePrice:      alpacaContract.StrikePrice,
 			ExpirationDate:   expDate,
 			DTE:              dte,
-			OpenInterest:     alpacaContract.OpenInterest,
+			OpenInterest:     alpacaContract.OpenInterest, OpenInterestPresent: alpacaContract.OpenInterestPresent,
 		}
 
 		contracts[alpacaContract.Symbol] = contract

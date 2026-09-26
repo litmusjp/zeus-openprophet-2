@@ -1,6 +1,7 @@
 package database
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -16,6 +17,25 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func encodeOptionLegs(legs []interfaces.OptionLeg) (string, error) {
+	if len(legs) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(legs)
+	return string(b), err
+}
+
+func decodeOptionLegs(raw string) ([]interfaces.OptionLeg, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var legs []interfaces.OptionLeg
+	if err := json.Unmarshal([]byte(raw), &legs); err != nil {
+		return nil, err
+	}
+	return legs, nil
+}
 
 // LocalStorage implements the StorageService interface using SQLite
 type LocalStorage struct {
@@ -245,7 +265,7 @@ func orderIdentityMatchesDB(existing *models.DBOrder, incoming *interfaces.Order
 		existing.Type == incoming.Type && existing.TimeInForce == incoming.TimeInForce &&
 		sameOptionalFloat(existing.LimitPrice, incoming.LimitPrice) && sameOptionalFloat(existing.StopPrice, incoming.StopPrice) &&
 		existing.AssetClass == incoming.AssetClass && existing.Underlying == incoming.Underlying &&
-		existing.PositionIntent == incoming.PositionIntent && existing.Purpose == incoming.Purpose
+		existing.PositionIntent == incoming.PositionIntent && existing.Purpose == incoming.Purpose && existing.OptionLegsJSON == func() string { value, _ := encodeOptionLegs(incoming.OptionLegs); return value }()
 }
 
 func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
@@ -287,6 +307,11 @@ func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
 		Revision:            order.Revision,
 		SubmissionAttempted: order.SubmissionAttempted,
 		Metadata:            order.Metadata,
+	}
+	var legsErr error
+	dbOrder.OptionLegsJSON, legsErr = encodeOptionLegs(order.OptionLegs)
+	if legsErr != nil {
+		return fmt.Errorf("encode options leg identity: %w", legsErr)
 	}
 
 	var existingRevision int64
@@ -384,6 +409,10 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 	if result.Error != nil {
 		return nil, fmt.Errorf("failed to get order: %w", result.Error)
 	}
+	optionLegs, err := decodeOptionLegs(dbOrder.OptionLegsJSON)
+	if err != nil {
+		return nil, fmt.Errorf("stored options leg identity is malformed: %w", err)
+	}
 
 	return &interfaces.Order{
 		BrokerAccountID:     dbOrder.BrokerAccountID,
@@ -415,6 +444,7 @@ func (s *LocalStorage) GetOrder(orderID string) (*interfaces.Order, error) {
 		Revision:            dbOrder.Revision,
 		SubmissionAttempted: dbOrder.SubmissionAttempted,
 		Metadata:            dbOrder.Metadata,
+		OptionLegs:          optionLegs,
 	}, nil
 }
 
@@ -433,6 +463,10 @@ func (s *LocalStorage) GetOrderByClientOrderID(clientOrderID string) (*interface
 		}
 		return nil, fmt.Errorf("failed to get order by client order ID: %w", err)
 	}
+	optionLegs, err := decodeOptionLegs(dbOrder.OptionLegsJSON)
+	if err != nil {
+		return nil, fmt.Errorf("stored options leg identity is malformed: %w", err)
+	}
 	return &interfaces.Order{
 		BrokerAccountID:     dbOrder.BrokerAccountID,
 		PaperLive:           dbOrder.PaperLive,
@@ -463,6 +497,7 @@ func (s *LocalStorage) GetOrderByClientOrderID(clientOrderID string) (*interface
 		Revision:            dbOrder.Revision,
 		SubmissionAttempted: dbOrder.SubmissionAttempted,
 		Metadata:            dbOrder.Metadata,
+		OptionLegs:          optionLegs,
 	}, nil
 }
 
@@ -485,6 +520,10 @@ func (s *LocalStorage) GetOrders(status string) ([]*interfaces.Order, error) {
 
 	orders := make([]*interfaces.Order, len(dbOrders))
 	for i, dbOrder := range dbOrders {
+		optionLegs, err := decodeOptionLegs(dbOrder.OptionLegsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("stored options leg identity is malformed: %w", err)
+		}
 		orders[i] = &interfaces.Order{
 			BrokerAccountID:     dbOrder.BrokerAccountID,
 			PaperLive:           dbOrder.PaperLive,
@@ -514,6 +553,7 @@ func (s *LocalStorage) GetOrders(status string) ([]*interfaces.Order, error) {
 			Revision:            dbOrder.Revision,
 			SubmissionAttempted: dbOrder.SubmissionAttempted,
 			Metadata:            dbOrder.Metadata,
+			OptionLegs:          optionLegs,
 		}
 	}
 
@@ -536,6 +576,10 @@ func (s *LocalStorage) GetOrdersNeedingReconciliation() ([]*interfaces.Order, er
 
 	orders := make([]*interfaces.Order, len(dbOrders))
 	for i, dbOrder := range dbOrders {
+		optionLegs, err := decodeOptionLegs(dbOrder.OptionLegsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("stored options leg identity is malformed: %w", err)
+		}
 		orders[i] = &interfaces.Order{
 			BrokerAccountID:     dbOrder.BrokerAccountID,
 			PaperLive:           dbOrder.PaperLive,
@@ -564,6 +608,7 @@ func (s *LocalStorage) GetOrdersNeedingReconciliation() ([]*interfaces.Order, er
 			ExpiresAt:           dbOrder.ExpiresAt,
 			Revision:            dbOrder.Revision,
 			SubmissionAttempted: dbOrder.SubmissionAttempted,
+			OptionLegs:          optionLegs,
 		}
 	}
 

@@ -45,6 +45,7 @@ type DBOrder struct {
 	SubmissionAttempted bool
 	StrategyName        string
 	Metadata            string // JSON string for flexible data
+	OptionLegsJSON      string // JSON-encoded atomic options leg identity
 }
 
 // DBBar represents historical price data in the database

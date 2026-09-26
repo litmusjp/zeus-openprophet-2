@@ -85,11 +85,12 @@ type Order struct {
 	// pre-submission marker; it is not broker or database order state.
 	ManagedPositionID   string
 	ManagedRole         string
-	NextEligibleAt      *time.Time // next broker session for planned intents
-	ExpiresAt           *time.Time // planned-intent authorization expiry
-	Revision            int64      // optimistic lifecycle revision
-	SubmissionAttempted bool       // broker call may have occurred; never blind-retry when true
-	Metadata            string     `json:"metadata,omitempty"` // server-produced audit metadata; never credentials
+	NextEligibleAt      *time.Time  // next broker session for planned intents
+	ExpiresAt           *time.Time  // planned-intent authorization expiry
+	Revision            int64       // optimistic lifecycle revision
+	SubmissionAttempted bool        // broker call may have occurred; never blind-retry when true
+	Metadata            string      `json:"metadata,omitempty"` // server-produced audit metadata; never credentials
+	OptionLegs          []OptionLeg `json:"option_legs,omitempty"`
 }
 
 type OrderRequest struct {
@@ -234,6 +235,16 @@ type OptionsOrder struct {
 	ObservedAt            time.Time                        `json:"-"`
 	AssessmentExpiresAt   time.Time                        `json:"-"`
 	StrategyType          string                           `json:"-"`
+	Legs                  []OptionLeg                      `json:"legs,omitempty"`
+}
+
+// OptionLeg is one exact leg of an atomic multi-leg options order.
+type OptionLeg struct {
+	Symbol         string  `json:"symbol"`
+	Side           string  `json:"side"`
+	RatioQty       int     `json:"ratio_qty"`
+	PositionIntent string  `json:"position_intent"`
+	Price          float64 `json:"price"`
 }
 
 type AlphaDeskAssessmentLeg struct {
@@ -253,23 +264,63 @@ type AlphaDeskAssessmentLeg struct {
 }
 
 type AlphaDeskAssessment struct {
-	AssessmentID          string    `json:"assessment_id"`
-	Decision              string    `json:"decision"`
-	SignalScore           *float64  `json:"signal_score,omitempty"`
-	Threshold             *float64  `json:"execution_threshold,omitempty"`
-	Policy                any       `json:"policy,omitempty"`
-	Evidence              any       `json:"evidence,omitempty"`
-	ExpiresAt             time.Time `json:"expires_at"`
-	Fingerprint           string    `json:"trade_fingerprint"`
-	HumanApprovalRequired bool      `json:"human_approval_required"`
-	ExecutionAllowed      bool      `json:"execution_allowed"`
-	Pass                  bool      `json:"pass"`
-	FailedCheckCodes      []string  `json:"failed_check_codes,omitempty"`
-	PolicyVersion         string    `json:"policy_version,omitempty"`
-	MarketEvidenceAt      time.Time `json:"market_evidence_at,omitempty"`
-	ObservedAt            time.Time `json:"observed_at,omitempty"`
-	QualificationStatus   string    `json:"qualification_status"`
-	Qualified             bool      `json:"qualified"`
+	AssessmentID                 string                        `json:"assessment_id"`
+	Decision                     string                        `json:"decision"`
+	SignalScore                  *float64                      `json:"signal_score,omitempty"`
+	Threshold                    *float64                      `json:"execution_threshold,omitempty"`
+	Policy                       any                           `json:"policy,omitempty"`
+	Evidence                     any                           `json:"evidence,omitempty"`
+	ExpiresAt                    time.Time                     `json:"expires_at"`
+	Fingerprint                  string                        `json:"trade_fingerprint"`
+	HumanApprovalRequired        bool                          `json:"human_approval_required"`
+	ExecutionAllowed             bool                          `json:"execution_allowed"`
+	Pass                         bool                          `json:"pass"`
+	FailedCheckCodes             []string                      `json:"failed_check_codes,omitempty"`
+	PolicyVersion                string                        `json:"policy_version,omitempty"`
+	MarketEvidenceAt             time.Time                     `json:"market_evidence_at,omitempty"`
+	ObservedAt                   time.Time                     `json:"observed_at,omitempty"`
+	QualificationStatus          string                        `json:"qualification_status"`
+	Qualified                    bool                          `json:"qualified"`
+	AutonomousPaperAuthorization *AutonomousPaperAuthorization `json:"autonomous_paper_authorization,omitempty"`
+}
+
+// AutonomousPaperAuthorization is the explicit AlphaDesk authorization
+// contract for the opening-order paper execution path. Legacy assessment
+// flags remain separate audit data and are not folded into this contract.
+type AutonomousPaperAuthorization struct {
+	Allowed          bool                            `json:"allowed"`
+	Reason           string                          `json:"reason"`
+	AuthorizationID  string                          `json:"authorization_id"`
+	Fingerprint      string                          `json:"fingerprint"`
+	Mode             string                          `json:"mode"`
+	Environment      string                          `json:"environment"`
+	WorkspaceID      string                          `json:"workspace_id"`
+	AccountID        string                          `json:"account_id"`
+	Issuer           string                          `json:"issuer"`
+	Source           string                          `json:"source"`
+	IssuedAt         time.Time                       `json:"issued_at"`
+	ExpiresAt        time.Time                       `json:"expires_at"`
+	PolicyVersion    string                          `json:"policy_version"`
+	StrategyIdentity AutonomousPaperStrategyIdentity `json:"strategy_identity"`
+}
+
+// AutonomousPaperStrategyIdentity is the exact order identity bound by
+// AlphaDesk's autonomous paper authorization contract.
+type AutonomousPaperStrategyIdentity struct {
+	UnderlyingSymbol string                       `json:"underlying_symbol"`
+	StrategyType     string                       `json:"strategy_type"`
+	Side             string                       `json:"side"`
+	Quantity         int                          `json:"quantity"`
+	LimitPrice       string                       `json:"limit_price"`
+	MaxLoss          string                       `json:"max_loss"`
+	Legs             []AutonomousPaperStrategyLeg `json:"legs"`
+}
+
+type AutonomousPaperStrategyLeg struct {
+	Symbol   string `json:"symbol"`
+	Side     string `json:"side"`
+	Quantity int    `json:"quantity"`
+	Price    string `json:"price"`
 }
 
 type OptionsQuote struct {

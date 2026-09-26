@@ -1237,6 +1237,7 @@ type OptionsOrderRequest struct {
 	MarketEvidenceAt      time.Time                           `json:"market_evidence_at,omitempty"`
 	ObservedAt            time.Time                           `json:"observed_at,omitempty"`
 	ExpiresAt             time.Time                           `json:"expires_at,omitempty"`
+	OptionLegs            []interfaces.OptionLeg              `json:"option_legs,omitempty"`
 }
 
 type optionsAssessmentValidationError struct {
@@ -1264,7 +1265,7 @@ func validateOptionsAssessmentRequest(req OptionsOrderRequest) error {
 	if req.TimeInForce == "" {
 		fields["time_in_force"] = "is required; options assessments use day"
 	}
-	order := &interfaces.OptionsOrder{Symbol: strings.TrimSpace(req.Symbol), Underlying: strings.TrimSpace(req.Underlying), Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice}
+	order := &interfaces.OptionsOrder{Symbol: strings.TrimSpace(req.Symbol), Underlying: strings.TrimSpace(req.Underlying), Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, Legs: req.OptionLegs}
 	if err := services.ValidateOptionsOrder(order); err != nil {
 		if strings.Contains(err.Error(), "symbol") {
 			fields["symbol"] = "must be an exact OCC option contract symbol"
@@ -1339,7 +1340,12 @@ func optionalFloatEqual(a, b *float64) bool {
 }
 
 func plannedOptionsMatch(existing *interfaces.Order, req OptionsOrderRequest) bool {
-	return existing != nil && strings.EqualFold(existing.Symbol, req.Symbol) &&
+	if existing == nil {
+		return false
+	}
+	legs, _ := json.Marshal(req.OptionLegs)
+	existingLegs, _ := json.Marshal(existing.OptionLegs)
+	return string(legs) == string(existingLegs) && strings.EqualFold(existing.Symbol, req.Symbol) &&
 		strings.EqualFold(existing.Underlying, req.Underlying) &&
 		existing.Qty == req.Qty && existing.Side == req.Side &&
 		existing.PositionIntent == req.PositionIntent && existing.Type == req.Type &&
@@ -1414,6 +1420,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		MarketEvidenceAt:      req.MarketEvidenceAt,
 		ObservedAt:            req.ObservedAt,
 		AssessmentExpiresAt:   req.ExpiresAt,
+		Legs:                  req.OptionLegs,
 	}
 	if err := services.ValidateOptionsOrder(order); err != nil {
 		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", err.Error()))
@@ -1471,6 +1478,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			}
 			return "entry"
 		}(),
+		OptionLegs:  req.OptionLegs,
 		SubmittedAt: time.Now(),
 	}
 	var auditMetadata string
@@ -1637,7 +1645,7 @@ func (oc *OrderController) AssessOptionsStrategy(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "AlphaDesk assessment is unavailable"})
 		return
 	}
-	order := &interfaces.OptionsOrder{Symbol: req.Symbol, Underlying: req.Underlying, Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, StrategyType: req.StrategyType, AssessmentLegs: req.AssessmentLegs, AssessmentMaxLoss: req.MaxLoss, AssessmentGreeks: req.Greeks, MarketEvidenceAt: req.MarketEvidenceAt, ObservedAt: req.ObservedAt, AssessmentExpiresAt: req.ExpiresAt}
+	order := &interfaces.OptionsOrder{Symbol: req.Symbol, Underlying: req.Underlying, Qty: req.Qty, Side: req.Side, PositionIntent: req.PositionIntent, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, StrategyType: req.StrategyType, AssessmentLegs: req.AssessmentLegs, AssessmentMaxLoss: req.MaxLoss, AssessmentGreeks: req.Greeks, MarketEvidenceAt: req.MarketEvidenceAt, ObservedAt: req.ObservedAt, AssessmentExpiresAt: req.ExpiresAt, Legs: req.OptionLegs}
 	a, err := assessor.AssessOptionsStrategy(c.Request.Context(), order, req.MarketScannerFeatures)
 	if err != nil {
 		var providerUnavailable *services.AlphaDeskProviderUnavailableError

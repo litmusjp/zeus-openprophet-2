@@ -274,6 +274,36 @@ func validateOptionsOrder(order *interfaces.OptionsOrder) error {
 	if order.LimitPrice != nil && !isPositiveFinite(*order.LimitPrice) {
 		return fmt.Errorf("limit price must be positive")
 	}
+	if len(order.Legs) != 0 {
+		if len(order.Legs) != 2 && len(order.Legs) != 4 {
+			return fmt.Errorf("complex options order must contain exactly 2 or 4 legs")
+		}
+		_, parentExpiry, _, _, _ := parseOCCOptionSymbol(order.Symbol)
+		for i, leg := range order.Legs {
+			root, expiry, _, _, ok := parseOCCOptionSymbol(leg.Symbol)
+			if !ok {
+				return fmt.Errorf("leg %d symbol must be a valid OCC options symbol", i)
+			}
+			if !strings.EqualFold(root, order.Underlying) || !expiry.Equal(parentExpiry) {
+				return fmt.Errorf("leg %d must match the order underlying and expiration", i)
+			}
+			if leg.Side != "buy" && leg.Side != "sell" {
+				return fmt.Errorf("leg %d side must be buy or sell", i)
+			}
+			if leg.RatioQty <= 0 {
+				return fmt.Errorf("leg %d ratio quantity must be a positive whole number", i)
+			}
+			if !validIntents[leg.PositionIntent] {
+				return fmt.Errorf("leg %d position_intent is invalid", i)
+			}
+			if (strings.HasPrefix(leg.PositionIntent, "buy_") && leg.Side != "buy") || (strings.HasPrefix(leg.PositionIntent, "sell_") && leg.Side != "sell") {
+				return fmt.Errorf("leg %d position_intent must match side", i)
+			}
+			if !isPositiveFinite(leg.Price) {
+				return fmt.Errorf("leg %d price must be positive", i)
+			}
+		}
+	}
 	return nil
 }
 
@@ -300,6 +330,13 @@ func buildAlpacaOptionsOrderRequest(order *interfaces.OptionsOrder) (alpaca.Plac
 	if order.LimitPrice != nil {
 		limitPrice := decimal.NewFromFloat(*order.LimitPrice)
 		req.LimitPrice = &limitPrice
+	}
+	if len(order.Legs) > 0 {
+		req.OrderClass = alpaca.MLeg
+		req.Legs = make([]alpaca.Leg, len(order.Legs))
+		for i, leg := range order.Legs {
+			req.Legs[i] = alpaca.Leg{Symbol: leg.Symbol, Side: alpaca.Side(leg.Side), PositionIntent: alpaca.PositionIntent(leg.PositionIntent), RatioQty: decimal.NewFromInt(int64(leg.RatioQty))}
+		}
 	}
 	return req, nil
 }
@@ -533,6 +570,20 @@ func validateBrokerOrderIdentity(request *alpaca.PlaceOrderRequest, order *alpac
 	}
 	if request.PositionIntent != "" && order.PositionIntent != request.PositionIntent {
 		return fmt.Errorf("broker position intent %q does not match submitted intent %q", order.PositionIntent, request.PositionIntent)
+	}
+	if request.OrderClass == alpaca.MLeg {
+		if order.OrderClass != alpaca.MLeg {
+			return fmt.Errorf("broker order class %q does not match submitted mleg order", order.OrderClass)
+		}
+		if len(order.Legs) != len(request.Legs) {
+			return fmt.Errorf("broker returned %d legs for %d-leg request", len(order.Legs), len(request.Legs))
+		}
+		for i, leg := range request.Legs {
+			brokerLeg := order.Legs[i]
+			if brokerLeg.Symbol != leg.Symbol || brokerLeg.Side != leg.Side || brokerLeg.PositionIntent != leg.PositionIntent || brokerLeg.RatioQty == nil || !brokerLeg.RatioQty.Equal(leg.RatioQty) {
+				return fmt.Errorf("broker leg %d identity does not match submitted leg", i)
+			}
+		}
 	}
 	return nil
 }

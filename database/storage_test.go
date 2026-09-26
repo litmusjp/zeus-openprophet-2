@@ -42,6 +42,25 @@ func TestSaveOrderUpsertsByClientOrderID(t *testing.T) {
 	}
 }
 
+func TestSaveOrderRoundTripsAtomicOptionLegIdentity(t *testing.T) {
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "legs.db"))
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	defer storage.Close()
+	order := &interfaces.Order{ClientOrderID: "mleg-persist", Symbol: "TSLA251219P00400000", Underlying: "TSLA", Qty: 2, Side: "buy", Type: "limit", TimeInForce: "day", LimitPrice: func() *float64 { v := 1.25; return &v }(), Status: "pending", OptionLegs: []interfaces.OptionLeg{{Symbol: "TSLA251219P00400000", Side: "sell", RatioQty: 1, PositionIntent: "sell_to_open", Price: 2.1}, {Symbol: "TSLA251219P00390000", Side: "buy", RatioQty: 1, PositionIntent: "buy_to_open", Price: 0.85}}}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatalf("SaveOrder() error = %v", err)
+	}
+	saved, err := storage.GetOrderByClientOrderID(order.ClientOrderID)
+	if err != nil {
+		t.Fatalf("GetOrderByClientOrderID() error = %v", err)
+	}
+	if len(saved.OptionLegs) != 2 || saved.OptionLegs[0] != order.OptionLegs[0] || saved.OptionLegs[1] != order.OptionLegs[1] {
+		t.Fatalf("saved option legs = %#v, want %#v", saved.OptionLegs, order.OptionLegs)
+	}
+}
+
 func TestSaveOrderUpdatesLegacyBrokerOrder(t *testing.T) {
 	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
 	if err != nil {

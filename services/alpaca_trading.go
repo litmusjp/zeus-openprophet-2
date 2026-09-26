@@ -47,6 +47,8 @@ type AlpacaTradingService struct {
 	optionsChainProvider    func(context.Context, string, time.Time) ([]*interfaces.OptionContract, error)
 }
 
+const brokerQuoteMaxAge = 2 * time.Minute
+
 func (s *AlpacaTradingService) SetAlphaDeskClient(client *AlphaDeskClient) { s.alphaDesk = client }
 func (s *AlpacaTradingService) AssessOptionsStrategy(ctx context.Context, order *interfaces.OptionsOrder, features any) (*interfaces.AlphaDeskAssessment, error) {
 	if s.alphaDesk == nil || !s.alphaDesk.Enabled {
@@ -64,8 +66,25 @@ func (s *AlpacaTradingService) AssessOptionsStrategy(ctx context.Context, order 
 }
 
 func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, order *interfaces.OptionsOrder) error {
+	if len(order.Legs) > 0 && len(order.AssessmentLegs) <= 1 {
+		return &AlphaDeskUnavailableError{Reason: "complete multi-leg broker evidence is required"}
+	}
 	if len(order.AssessmentLegs) > 1 {
-		return &AlphaDeskUnavailableError{Reason: "multi-leg option evidence is unavailable; only single-leg orders are supported"}
+		if len(order.Legs) != 2 && len(order.Legs) != 4 {
+			return &AlphaDeskUnavailableError{Reason: "multi-leg option evidence is unavailable; complex orders require 2 or 4 typed legs"}
+		}
+		if order.AssessmentMaxLoss == nil || len(order.AssessmentGreeks) == 0 || order.MarketEvidenceAt.IsZero() || order.ObservedAt.IsZero() || order.AssessmentExpiresAt.IsZero() {
+			return &AlphaDeskUnavailableError{Reason: "complete multi-leg broker evidence is required"}
+		}
+		for i, leg := range order.AssessmentLegs {
+			if i >= len(order.Legs) || leg.Symbol != order.Legs[i].Symbol || leg.Side != order.Legs[i].Side || leg.Quantity <= 0 || leg.Price <= 0 || !quoteTimestampFresh(leg.QuotedAt) {
+				return &AlphaDeskUnavailableError{Reason: "multi-leg evidence does not exactly match the typed order legs"}
+			}
+		}
+		if order.StrategyType == "" {
+			order.StrategyType = "MULTI_LEG_OPTION"
+		}
+		return nil
 	}
 	if order.LimitPrice == nil || *order.LimitPrice <= 0 || order.Qty < 1 || order.Qty > 10 || math.Trunc(order.Qty) != order.Qty {
 		return &AlphaDeskUnavailableError{Reason: "valid limit price and integer quantity are required for market evidence"}
@@ -85,7 +104,7 @@ func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, orde
 			break
 		}
 	}
-	if contract == nil || contract.Ask <= 0 || contract.Bid < 0 || contract.QuoteTimestamp.IsZero() || contract.BidSize <= 0 || contract.AskSize <= 0 {
+	if contract == nil || contract.Ask <= 0 || contract.Bid < 0 || !quoteTimestampFresh(contract.QuoteTimestamp) || contract.BidSize <= 0 || contract.AskSize <= 0 {
 		return &AlphaDeskUnavailableError{Reason: "fresh broker quote evidence is unavailable"}
 	}
 	quoteSize := float64(contract.AskSize)
@@ -93,6 +112,10 @@ func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, orde
 		quoteSize = float64(contract.BidSize)
 	}
 	leg := interfaces.AlphaDeskAssessmentLeg{Symbol: contract.Symbol, Side: strings.ToLower(order.Side), Quantity: int(order.Qty), Price: *order.LimitPrice, Bid: contract.Bid, Ask: contract.Ask, QuoteSize: quoteSize, QuotedAt: contract.QuoteTimestamp, Delta: &contract.Delta, Gamma: &contract.Gamma, Theta: &contract.Theta, Vega: &contract.Vega}
+	if contract.OpenInterestPresent {
+		openInterest := contract.OpenInterest
+		leg.OpenInterest = &openInterest
+	}
 	order.AssessmentLegs = []interfaces.AlphaDeskAssessmentLeg{leg}
 	order.StrategyType = "SINGLE_LEG_OPTION"
 	order.AssessmentGreeks = map[string]float64{"delta": contract.Delta * order.Qty, "gamma": contract.Gamma * order.Qty, "theta": contract.Theta * order.Qty, "vega": contract.Vega * order.Qty}
@@ -103,7 +126,7 @@ func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, orde
 		return &AlphaDeskUnavailableError{Reason: "maximum loss cannot be established truthfully for this option intent"}
 	}
 	now := time.Now()
-	order.MarketEvidenceAt, order.ObservedAt, order.AssessmentExpiresAt = contract.QuoteTimestamp, now, now.Add(2*time.Minute)
+	order.MarketEvidenceAt, order.ObservedAt, order.AssessmentExpiresAt = contract.QuoteTimestamp, now, now.Add(brokerQuoteMaxAge)
 	return nil
 }
 
@@ -289,7 +312,7 @@ func quoteTimestampFresh(timestamp time.Time) bool {
 		return false
 	}
 	age := time.Since(timestamp)
-	return age >= 0 && age <= 2*time.Minute
+	return age >= 0 && age <= brokerQuoteMaxAge
 }
 
 func (s *AlpacaTradingService) validateEquityPolicy(ctx context.Context, order *interfaces.Order) error {
@@ -801,6 +824,9 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	if order == nil || strings.TrimSpace(order.ClientOrderID) == "" {
 		return nil, fmt.Errorf("client order ID is required at broker boundary")
 	}
+	if order.SubmissionAttempted {
+		return nil, &SubmissionUncertainError{Err: fmt.Errorf("options order client_order_id %s already crossed the broker submission boundary; reconcile before retrying", order.ClientOrderID)}
+	}
 	if err := validateOptionsOrder(order); err != nil {
 		return nil, fmt.Errorf("invalid options order: %w", err)
 	}
@@ -850,6 +876,7 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	if err := s.markSubmissionBoundary(&interfaces.Order{ClientOrderID: order.ClientOrderID}); err != nil {
 		return nil, err
 	}
+	order.SubmissionAttempted = true
 	alpacaOrder, err := placeOrder(req)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to place options order")

@@ -6,25 +6,26 @@ import (
 
 // OptionContract represents an option contract
 type OptionContract struct {
-	Symbol            string    // Option symbol (e.g., "AAPL231215C00150000")
-	UnderlyingSymbol  string    // Underlying stock symbol
-	ContractType      string    // "call" or "put"
-	StrikePrice       float64   // Strike price
-	ExpirationDate    time.Time // Expiration date
-	Premium           float64   // Current premium/price
-	Bid               float64
-	Ask               float64
-	BidSize           int64
-	AskSize           int64
-	QuoteTimestamp    time.Time
-	Volume            int64
-	OpenInterest      int64
-	ImpliedVolatility float64
-	Delta             float64
-	Gamma             float64
-	Theta             float64
-	Vega              float64
-	DTE               int // Days to expiration
+	Symbol              string    // Option symbol (e.g., "AAPL231215C00150000")
+	UnderlyingSymbol    string    // Underlying stock symbol
+	ContractType        string    // "call" or "put"
+	StrikePrice         float64   // Strike price
+	ExpirationDate      time.Time // Expiration date
+	Premium             float64   // Current premium/price
+	Bid                 float64
+	Ask                 float64
+	BidSize             int64
+	AskSize             int64
+	QuoteTimestamp      time.Time
+	Volume              int64
+	OpenInterest        int64
+	OpenInterestPresent bool
+	ImpliedVolatility   float64
+	Delta               float64
+	Gamma               float64
+	Theta               float64
+	Vega                float64
+	DTE                 int // Days to expiration
 }
 
 // OptionPosition represents an open options position

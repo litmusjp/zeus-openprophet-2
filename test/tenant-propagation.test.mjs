@@ -13,3 +13,10 @@ test('contradictory or missing server-owned tenant fails closed', () => {
   assert.throws(() => buildGoBackendEnv({ OPENPROPHET_TENANT_ID: 'caller-tenant' }, { account, sandboxId: 'sandbox-2', processNonce: 'nonce', port: 4555, databasePath: 'db', activityLogDir: 'logs', permissions: {} }), /conflicts/);
   assert.throws(() => buildGoBackendEnv({}, { account: { ...account, id: '' }, sandboxId: 'sandbox-2', processNonce: 'nonce', port: 4555, databasePath: 'db', activityLogDir: 'logs', permissions: {} }), /missing/);
 });
+
+test('signal-quality flag is host-controlled and ANDed with sandbox AlphaDesk enablement', () => {
+  const enabled = buildGoBackendEnv({ ALPHADESK_SIGNAL_QUALITY_ENABLED: 'true' }, { account, sandboxId: 'sandbox-2', processNonce: 'nonce', port: 4555, databasePath: 'db', activityLogDir: 'logs', permissions: {}, alphaDesk: { enabled: true, url: 'https://desk.example', apiKey: 'shared' } });
+  const disabled = buildGoBackendEnv({ ALPHADESK_SIGNAL_QUALITY_ENABLED: 'true' }, { account, sandboxId: 'sandbox-2', processNonce: 'nonce', port: 4555, databasePath: 'db', activityLogDir: 'logs', permissions: {}, alphaDesk: { enabled: false } });
+  assert.equal(enabled.ALPHADESK_SIGNAL_QUALITY_ENABLED, 'true');
+  assert.equal(disabled.ALPHADESK_SIGNAL_QUALITY_ENABLED, 'false');
+});

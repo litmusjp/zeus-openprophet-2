@@ -31,15 +31,16 @@ func derefFloat(value *float64) float64 {
 // AlphaDeskClient is deliberately assessment-only. It never authorizes a
 // broker order and never includes the API key in an error or response.
 type AlphaDeskClient struct {
-	Enabled bool
-	URL     string
-	APIKey  string
-	HTTP    *http.Client
-	Now     func() time.Time
+	Enabled              bool
+	SignalQualityEnabled bool
+	URL                  string
+	APIKey               string
+	HTTP                 *http.Client
+	Now                  func() time.Time
 }
 
 func NewAlphaDeskClientFromEnv() *AlphaDeskClient {
-	return &AlphaDeskClient{Enabled: strings.EqualFold(os.Getenv("ALPHADESK_ENABLED"), "true"), URL: strings.TrimRight(strings.TrimSpace(os.Getenv("ALPHADESK_URL")), "/"), APIKey: os.Getenv("ALPHADESK_API_KEY"), HTTP: &http.Client{Timeout: 8 * time.Second}, Now: time.Now}
+	return &AlphaDeskClient{Enabled: strings.EqualFold(os.Getenv("ALPHADESK_ENABLED"), "true"), SignalQualityEnabled: strings.EqualFold(os.Getenv("ALPHADESK_SIGNAL_QUALITY_ENABLED"), "true"), URL: strings.TrimRight(strings.TrimSpace(os.Getenv("ALPHADESK_URL")), "/"), APIKey: os.Getenv("ALPHADESK_API_KEY"), HTTP: &http.Client{Timeout: 8 * time.Second}, Now: time.Now}
 }
 
 func ValidateAlphaDeskURL(raw string) error {
@@ -61,6 +62,7 @@ func ValidateAlphaDeskURL(raw string) error {
 }
 
 type AlphaDeskAssessmentRequest struct {
+	Scope                               string                              `json:"scope,omitempty"`
 	UnderlyingSymbol                    string                              `json:"underlying_symbol"`
 	StrategyType                        string                              `json:"strategy_type"`
 	Side                                string                              `json:"side"`
@@ -178,6 +180,21 @@ func OptionsTradeFingerprint(identity models.DurableIdentity, symbol, underlying
 }
 
 func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentRequest) (*interfaces.AlphaDeskAssessment, error) {
+	return c.assess(ctx, req, "")
+}
+
+// AssessSignalQuality requests the opt-in signal screen. It is deliberately
+// separate from Assess so the existing ACCOUNT_VERIFIED request remains byte-
+// compatible when signal quality is disabled.
+func (c *AlphaDeskClient) AssessSignalQuality(ctx context.Context, req AlphaDeskAssessmentRequest) (*interfaces.AlphaDeskAssessment, error) {
+	if !c.Enabled || !c.SignalQualityEnabled {
+		return nil, fmt.Errorf("AlphaDesk signal quality is disabled")
+	}
+	req.Scope = "SIGNAL_QUALITY"
+	return c.assess(ctx, req, "SIGNAL_QUALITY")
+}
+
+func (c *AlphaDeskClient) assess(ctx context.Context, req AlphaDeskAssessmentRequest, expectedScope string) (*interfaces.AlphaDeskAssessment, error) {
 	if !c.Enabled {
 		return nil, fmt.Errorf("AlphaDesk hard gate is disabled")
 	}
@@ -230,9 +247,16 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 		ExecutionAllowed             bool                                     `json:"execution_allowed"`
 		AutonomousPaperAuthorization *interfaces.AutonomousPaperAuthorization `json:"autonomous_paper_authorization"`
 		ExternalIdentity             *interfaces.AlphaDeskExternalIdentity    `json:"external_identity"`
+		ScoreSource                  string                                   `json:"score_source"`
+		ScoreObservedAt              time.Time                                `json:"score_observed_at"`
+		StrategyIdentity             *interfaces.AlphaDeskStrategyIdentity    `json:"strategy_identity"`
+		Scope                        string                                   `json:"scope"`
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return nil, &AlphaDeskProviderResponseError{Reason: "malformed score or response field", Err: err}
+	}
+	if expectedScope != "" && v.Scope != expectedScope {
+		return nil, &AlphaDeskProviderResponseError{Reason: "response scope does not match requested scope"}
 	}
 	if v.Decision == "" && v.Pass != nil {
 		if *v.Pass {
@@ -267,7 +291,86 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 	if identityPresent {
 		identity = *v.ExternalIdentity
 	}
-	return &interfaces.AlphaDeskAssessment{AssessmentID: v.AssessmentID, Decision: v.Decision, Pass: v.Pass != nil && *v.Pass, SignalScore: signalScore, Threshold: thresholdValue, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed, FailedCheckCodes: v.FailedCheckCodes, PolicyVersion: v.PolicyVersion, MarketEvidenceAt: v.MarketEvidenceAt, ObservedAt: v.ObservedAt, AutonomousPaperAuthorization: v.AutonomousPaperAuthorization, ExternalIdentity: identity, ExternalIdentityPresent: identityPresent}, nil
+	strategyIdentity := interfaces.AlphaDeskStrategyIdentity{}
+	if v.StrategyIdentity != nil {
+		strategyIdentity = *v.StrategyIdentity
+	}
+	return &interfaces.AlphaDeskAssessment{Scope: v.Scope, AssessmentID: v.AssessmentID, Decision: v.Decision, Pass: v.Pass != nil && *v.Pass, SignalScore: signalScore, Threshold: thresholdValue, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed, FailedCheckCodes: v.FailedCheckCodes, PolicyVersion: v.PolicyVersion, MarketEvidenceAt: v.MarketEvidenceAt, ObservedAt: v.ObservedAt, ScoreSource: v.ScoreSource, ScoreObservedAt: v.ScoreObservedAt, StrategyIdentity: strategyIdentity, AutonomousPaperAuthorization: v.AutonomousPaperAuthorization, ExternalIdentity: identity, ExternalIdentityPresent: identityPresent}, nil
+}
+
+func ValidateAlphaDeskSignalQuality(a *interfaces.AlphaDeskAssessment, expectedFingerprint string, identity models.DurableIdentity, now time.Time) error {
+	if a == nil || a.Scope != "SIGNAL_QUALITY" {
+		return fmt.Errorf("AlphaDesk signal quality scope is invalid")
+	}
+	if a.Decision != "PASS" && a.Decision != "FAIL" && a.Decision != "UNAVAILABLE" {
+		return fmt.Errorf("AlphaDesk signal quality decision is invalid")
+	}
+	if a.SignalScore != nil && (math.IsNaN(*a.SignalScore) || math.IsInf(*a.SignalScore, 0)) {
+		return fmt.Errorf("AlphaDesk signal quality score is missing or non-finite")
+	}
+	if a.Fingerprint == "" || a.Fingerprint != expectedFingerprint {
+		return fmt.Errorf("AlphaDesk signal quality fingerprint does not match the exact trade")
+	}
+	if err := ValidateExternalAssessmentBinding(a, identity); err != nil {
+		return err
+	}
+	if a.ExecutionAllowed || !a.HumanApprovalRequired {
+		return fmt.Errorf("AlphaDesk signal quality is assessment-only")
+	}
+	if a.MarketEvidenceAt.IsZero() || a.ObservedAt.IsZero() || a.ExpiresAt.IsZero() || a.MarketEvidenceAt.After(now) || a.ObservedAt.After(now) || a.ObservedAt.Before(a.MarketEvidenceAt) || a.ExpiresAt.Before(a.ObservedAt) || now.Sub(a.MarketEvidenceAt) > brokerQuoteMaxAge || now.Sub(a.ObservedAt) > brokerQuoteMaxAge || !now.Before(a.ExpiresAt) {
+		return fmt.Errorf("AlphaDesk signal quality evidence is stale or expired")
+	}
+	if a.Decision == "PASS" && a.SignalScore == nil {
+		return fmt.Errorf("AlphaDesk signal quality score is missing or non-finite")
+	}
+	if a.ScoreSource != "" || !a.ScoreObservedAt.IsZero() {
+		if a.ScoreSource != "alphadesk_connected_opportunity" || a.ScoreObservedAt.IsZero() || a.ScoreObservedAt.After(now) || now.Sub(a.ScoreObservedAt) > brokerQuoteMaxAge {
+			return fmt.Errorf("AlphaDesk signal quality score evidence is stale or invalid")
+		}
+	}
+	if a.Decision == "PASS" && (a.ScoreSource != "alphadesk_connected_opportunity" || a.ScoreObservedAt.IsZero()) {
+		return fmt.Errorf("AlphaDesk signal quality score evidence is stale or invalid")
+	}
+	return nil
+}
+
+func validateSignalQualityOrder(a *interfaces.AlphaDeskAssessment, order *interfaces.OptionsOrder) error {
+	if order == nil || !strings.EqualFold(a.StrategyIdentity.Underlying, order.Underlying) || a.StrategyIdentity.StrategyType != order.StrategyType || !strings.EqualFold(a.StrategyIdentity.Side, order.Side) || a.StrategyIdentity.Quantity != int(order.Qty) {
+		return fmt.Errorf("AlphaDesk signal quality strategy identity does not match the exact trade")
+	}
+	if !a.MarketEvidenceAt.Equal(order.MarketEvidenceAt) || !a.ObservedAt.Equal(order.ObservedAt) || !a.ExpiresAt.Equal(order.AssessmentExpiresAt) {
+		return fmt.Errorf("AlphaDesk signal quality evidence does not match the exact trade")
+	}
+	return nil
+}
+
+func (c *AlphaDeskClient) AssessAndValidateSignalQuality(ctx context.Context, identity models.DurableIdentity, order *interfaces.OptionsOrder, features any) (*interfaces.AlphaDeskAssessment, error) {
+	if order == nil || len(order.AssessmentLegs) == 0 || order.AssessmentMaxLoss == nil || len(order.AssessmentGreeks) == 0 || order.MarketEvidenceAt.IsZero() || order.ObservedAt.IsZero() || order.AssessmentExpiresAt.IsZero() {
+		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
+	}
+	fp := OptionsOrderFingerprint(identity, order)
+	a, err := c.AssessSignalQuality(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, ExternalAccountID: identity.BrokerAccountID, ExternalSandboxID: identity.SandboxID, ExternalEnvironment: "PAPER", MarketScannerFeatures: features})
+	if err != nil {
+		return nil, signalQualityUnavailable(err)
+	}
+	if err := ValidateAlphaDeskSignalQuality(a, fp, identity, c.Now()); err != nil {
+		return nil, signalQualityUnavailable(err)
+	}
+	if err := validateSignalQualityOrder(a, order); err != nil {
+		return nil, signalQualityUnavailable(err)
+	}
+	return a, nil
+}
+
+func signalQualityUnavailable(err error) error {
+	if err == nil {
+		return nil
+	}
+	var unavailable *AlphaDeskUnavailableError
+	if errors.As(err, &unavailable) {
+		return err
+	}
+	return &AlphaDeskUnavailableError{Reason: "AlphaDesk signal quality result is unavailable", Err: err}
 }
 
 func policyThreshold(policy any) *alphaDeskFloat {
@@ -379,7 +482,7 @@ func (c *AlphaDeskClient) assessAndValidate(ctx context.Context, identity models
 		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
 	}
 	opening := strings.HasSuffix(strings.ToLower(strings.TrimSpace(order.PositionIntent)), "_to_open")
-	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, RequestAutonomousPaperAuthorization: opening, ExternalAccountID: identity.BrokerAccountID, ExternalSandboxID: identity.SandboxID, ExternalEnvironment: "PAPER", MarketScannerFeatures: features})
+	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{Scope: "ACCOUNT_VERIFIED", UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, RequestAutonomousPaperAuthorization: opening, ExternalAccountID: identity.BrokerAccountID, ExternalSandboxID: identity.SandboxID, ExternalEnvironment: "PAPER", MarketScannerFeatures: features})
 	if err != nil {
 		return nil, err
 	}

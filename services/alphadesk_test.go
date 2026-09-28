@@ -75,6 +75,79 @@ func TestAlphaDeskAssessmentUsesExactContractAndMapsLiveResponse(t *testing.T) {
 	}
 }
 
+func TestAlphaDeskSignalQualityUsesScopeAndEchoedPaperIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	var got AlphaDeskAssessmentRequest
+	var gotKey string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("X-AlphaDesk-API-Key")
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"scope":"SIGNAL_QUALITY","decision":"PASS","market_scanner_signal_score":0.91,"strategy_identity":{"underlying_symbol":"TSLA","strategy_type":"SINGLE_LEG_OPTION","side":"buy","quantity":1},"external_identity":{"account_id":"l1-account","sandbox_id":"l2-sandbox","environment":"PAPER"},"market_evidence_at":"2026-09-28T11:59:30Z","observed_at":"2026-09-28T11:59:40Z","expires_at":"2026-09-28T12:01:00Z","execution_allowed":false,"human_approval_required":true}`))
+	}))
+	defer ts.Close()
+	c := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: ts.URL, APIKey: "shared-key", HTTP: ts.Client(), Now: func() time.Time { return now }}
+	assessment, err := c.AssessSignalQuality(context.Background(), AlphaDeskAssessmentRequest{TradeFingerprint: "local-fingerprint", ExternalAccountID: "l1-account", ExternalSandboxID: "l2-sandbox", ExternalEnvironment: "PAPER"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "SIGNAL_QUALITY" || got.ExternalAccountID != "l1-account" || got.ExternalSandboxID != "l2-sandbox" || got.ExternalEnvironment != "PAPER" {
+		t.Fatalf("request = %#v, want signal scope and declared identity", got)
+	}
+	if gotKey != "shared-key" || assessment.Decision != "PASS" || assessment.SignalScore == nil || *assessment.SignalScore != 0.91 || assessment.StrategyIdentity.Underlying != "TSLA" {
+		t.Fatalf("key/assessment = %q %#v", gotKey, assessment)
+	}
+}
+
+func TestValidateAlphaDeskSignalQualityRequiresExactContract(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	identity := models.DurableIdentity{BrokerAccountID: "l1-account", SandboxID: "l2-sandbox", PaperLive: "paper"}
+	base := &interfaces.AlphaDeskAssessment{Scope: "SIGNAL_QUALITY", Decision: "PASS", SignalScore: func() *float64 { v := 0.9; return &v }(), Fingerprint: "fp", ExternalIdentity: interfaces.AlphaDeskExternalIdentity{AccountID: "l1-account", SandboxID: "l2-sandbox", Environment: "PAPER"}, ExternalIdentityPresent: true, MarketEvidenceAt: now.Add(-time.Minute), ObservedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute), ExecutionAllowed: false, HumanApprovalRequired: true, ScoreSource: "alphadesk_connected_opportunity", ScoreObservedAt: now.Add(-2 * time.Second), StrategyIdentity: interfaces.AlphaDeskStrategyIdentity{Underlying: "TSLA", StrategyType: "SINGLE_LEG_OPTION", Side: "buy", Quantity: 1}}
+	for name, mutate := range map[string]func(*interfaces.AlphaDeskAssessment){"wrong scope": func(a *interfaces.AlphaDeskAssessment) { a.Scope = "ACCOUNT_VERIFIED" }, "missing score": func(a *interfaces.AlphaDeskAssessment) { a.SignalScore = nil }, "expired": func(a *interfaces.AlphaDeskAssessment) { a.ExpiresAt = now }, "wrong identity": func(a *interfaces.AlphaDeskAssessment) { a.ExternalIdentity.AccountID = "other-account" }} {
+		t.Run(name, func(t *testing.T) {
+			a := *base
+			mutate(&a)
+			if err := ValidateAlphaDeskSignalQuality(&a, "fp", identity, now); err == nil {
+				t.Fatal("validation unexpectedly passed")
+			}
+		})
+	}
+	if err := ValidateAlphaDeskSignalQuality(base, "fp", identity, now); err != nil {
+		t.Fatalf("valid signal quality assessment rejected: %v", err)
+	}
+}
+
+func TestValidateAlphaDeskSignalQualityRejectsStaleOrMismatchedEvidence(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	identity := models.DurableIdentity{BrokerAccountID: "acct", SandboxID: "sandbox", PaperLive: "paper"}
+	order := &interfaces.OptionsOrder{Underlying: "TSLA", Qty: 1, Side: "buy", StrategyType: "SINGLE_LEG_OPTION", MarketEvidenceAt: now.Add(-time.Minute), ObservedAt: now.Add(-30 * time.Second), AssessmentExpiresAt: now.Add(time.Minute)}
+	score := 0.9
+	base := &interfaces.AlphaDeskAssessment{Scope: "SIGNAL_QUALITY", Decision: "PASS", SignalScore: &score, Fingerprint: "fp", ExternalIdentity: interfaces.AlphaDeskExternalIdentity{AccountID: "acct", SandboxID: "sandbox", Environment: "PAPER"}, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, ExecutionAllowed: false, HumanApprovalRequired: true, ScoreSource: "alphadesk_connected_opportunity", ScoreObservedAt: order.ObservedAt.Add(-time.Second), StrategyIdentity: interfaces.AlphaDeskStrategyIdentity{Underlying: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: 1}}
+	if err := ValidateAlphaDeskSignalQuality(base, "fp", identity, now); err != nil {
+		t.Fatalf("fresh signal rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*interfaces.AlphaDeskAssessment){
+		"stale but unexpired": func(a *interfaces.AlphaDeskAssessment) { a.MarketEvidenceAt = now.Add(-3 * time.Minute) },
+		"fake source":         func(a *interfaces.AlphaDeskAssessment) { a.ScoreSource = "client_supplied" },
+		"mismatched account":  func(a *interfaces.AlphaDeskAssessment) { a.ExternalIdentity.AccountID = "other" },
+		"missing score":       func(a *interfaces.AlphaDeskAssessment) { a.SignalScore = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := *base
+			mutate(&a)
+			if err := ValidateAlphaDeskSignalQuality(&a, "fp", identity, now); err == nil {
+				t.Fatal("invalid signal unexpectedly passed")
+			}
+		})
+	}
+	wrongStrategy := *base
+	wrongStrategy.StrategyIdentity.StrategyType = "OTHER"
+	if err := validateSignalQualityOrder(&wrongStrategy, order); err == nil {
+		t.Fatal("wrong strategy unexpectedly passed")
+	}
+}
+
 func TestAlphaDeskAssessmentDecodesAutonomousPaperAuthorization(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"decision":"PASS","execution_allowed":false,"human_approval_required":true,"autonomous_paper_authorization":{"allowed":true,"reason":"approved","authorization_id":"auth-1","fingerprint":"fp-1","mode":"PAPER_ONLY","environment":"PAPER","workspace_id":"workspace-1","account_id":"account-1","issuer":"AlphaDesk","source":"strategy_assessment","issued_at":"2026-09-26T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","policy_version":"v1","strategy_identity":{"underlying_symbol":"AAPL","strategy_type":"SINGLE_LEG_OPTION","side":"buy","quantity":1,"limit_price":"1.25","max_loss":"125.00","legs":[{"symbol":"AAPL260116C00200000","side":"buy","quantity":1,"price":"1.25"}]}}}`))

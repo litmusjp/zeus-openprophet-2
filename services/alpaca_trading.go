@@ -62,7 +62,17 @@ func (s *AlpacaTradingService) AssessOptionsStrategy(ctx context.Context, order 
 			return nil, err
 		}
 	}
-	return s.alphaDesk.AssessForTrade(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, features)
+	identity := models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}
+	if s.alphaDesk.SignalQualityEnabled && strings.HasSuffix(strings.ToLower(strings.TrimSpace(order.PositionIntent)), "_to_open") {
+		a, err := s.alphaDesk.AssessAndValidateSignalQuality(ctx, identity, order, features)
+		if err != nil {
+			return nil, err
+		}
+		a.Qualified = false
+		a.QualificationStatus = "assessment_only"
+		return a, nil
+	}
+	return s.alphaDesk.AssessForTrade(ctx, identity, order, features)
 }
 
 func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, order *interfaces.OptionsOrder) error {
@@ -851,10 +861,29 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		if err := s.enrichOptionsAssessment(ctx, order); err != nil {
 			return nil, err
 		}
-		assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, order.AssessmentAuditSink)
+		if s.alphaDesk.SignalQualityEnabled {
+			signal, err := s.alphaDesk.AssessAndValidateSignalQuality(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures)
+			if err != nil {
+				return nil, err
+			}
+			if signal.Decision != "PASS" {
+				return nil, &AlphaDeskUnavailableError{Reason: "AlphaDesk signal quality decision is not PASS"}
+			}
+			order.SignalQualityAssessment = signal
+		}
+		audit := order.AssessmentAuditSink
+		if order.SignalQualityAssessment != nil && audit != nil {
+			signal := order.SignalQualityAssessment
+			audit = func(assessment *interfaces.AlphaDeskAssessment) error {
+				assessment.SignalQualityAssessment = signal
+				return order.AssessmentAuditSink(assessment)
+			}
+		}
+		assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, audit)
 		if err != nil {
 			return nil, err
 		}
+		assessment.SignalQualityAssessment = order.SignalQualityAssessment
 		order.AlphaDeskAssessment = assessment
 	}
 

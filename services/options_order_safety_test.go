@@ -165,6 +165,44 @@ func TestBuildAlpacaOptionsOrderRequestBuildsOneAtomicTwoLegOrder(t *testing.T) 
 	}
 }
 
+func TestSignalQualityFailAndUnavailableBlockAuthorizationAndBroker(t *testing.T) {
+	for _, decision := range []string{"FAIL", "UNAVAILABLE"} {
+		t.Run(decision, func(t *testing.T) {
+			now := time.Now().UTC()
+			order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "signal-" + decision, Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)})
+			alphaCalls, accountVerifiedCalls, brokerCalls := 0, 0, 0
+			alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				alphaCalls++
+				var request AlphaDeskAssessmentRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				if request.Scope == "ACCOUNT_VERIFIED" {
+					accountVerifiedCalls++
+				}
+				if request.Scope != "SIGNAL_QUALITY" {
+					return
+				}
+				response := map[string]any{
+					"scope": "SIGNAL_QUALITY", "decision": decision, "market_scanner_signal_score": 0.91,
+					"score_source": "alphadesk_connected_opportunity", "score_observed_at": order.ObservedAt.Add(-time.Second),
+					"strategy_identity":  map[string]any{"underlying_symbol": strings.ToLower(order.Underlying), "strategy_type": order.StrategyType, "side": order.Side, "quantity": int(order.Qty)},
+					"external_identity":  map[string]string{"account_id": "acct", "sandbox_id": "sandbox", "environment": "PAPER"},
+					"market_evidence_at": order.MarketEvidenceAt, "observed_at": order.ObservedAt, "expires_at": order.AssessmentExpiresAt,
+					"execution_allowed": false, "human_approval_required": true,
+				}
+				_ = json.NewEncoder(w).Encode(response)
+			}))
+			defer alpha.Close()
+			service := &AlpacaTradingService{clockReader: fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}}, logger: logrus.New(), submissionMarker: func(string) error { return nil }, expectedAccountID: "acct", expectedPaper: true, expectedTenantID: "tenant", expectedSandboxID: "sandbox", optionsChainProvider: freshAssessmentChainProvider, alphaDesk: &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: alpha.URL, APIKey: "shared", HTTP: alpha.Client(), Now: func() time.Time { return now }}, placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { brokerCalls++; return nil, nil }}
+			_, err := service.PlaceOptionsOrder(context.Background(), order)
+			if err == nil || alphaCalls != 1 || accountVerifiedCalls != 0 || brokerCalls != 0 {
+				t.Fatalf("err=%v AlphaDesk calls=%d ACCOUNT_VERIFIED calls=%d broker calls=%d", err, alphaCalls, accountVerifiedCalls, brokerCalls)
+			}
+		})
+	}
+}
+
 func TestPlaceOptionsOrderSubmitsAtomicTwoLegOrderOnceAfterAutonomousAuthorization(t *testing.T) {
 	now := time.Now().UTC()
 	price := 1.25
@@ -184,11 +222,20 @@ func TestPlaceOptionsOrderSubmitsAtomicTwoLegOrderOnceAfterAutonomousAuthorizati
 	}
 	identity := models.DurableIdentity{BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
 	alphaCalls, brokerCalls := 0, 0
+	var persisted *interfaces.AlphaDeskAssessment
 	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		alphaCalls++
 		var req AlphaDeskAssessmentRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
+		}
+		if req.Scope == "SIGNAL_QUALITY" {
+			response, _ := json.Marshal(map[string]any{"scope": "SIGNAL_QUALITY", "decision": "PASS", "market_scanner_signal_score": 0.91, "score_source": "alphadesk_connected_opportunity", "score_observed_at": order.ObservedAt.Add(-time.Second), "strategy_identity": map[string]any{"underlying_symbol": order.Underlying, "strategy_type": order.StrategyType, "side": order.Side, "quantity": int(order.Qty)}, "external_identity": map[string]string{"account_id": "acct", "sandbox_id": "sandbox", "environment": "PAPER"}, "market_evidence_at": order.MarketEvidenceAt, "observed_at": order.ObservedAt, "expires_at": order.AssessmentExpiresAt, "execution_allowed": false, "human_approval_required": true})
+			_, _ = w.Write(response)
+			return
+		}
+		if req.Scope != "ACCOUNT_VERIFIED" {
+			t.Fatalf("authorization request scope = %q, want ACCOUNT_VERIFIED", req.Scope)
 		}
 		if !req.RequestAutonomousPaperAuthorization {
 			t.Fatal("opening assessment did not request autonomous paper authorization")
@@ -200,7 +247,7 @@ func TestPlaceOptionsOrderSubmitsAtomicTwoLegOrderOnceAfterAutonomousAuthorizati
 	service := &AlpacaTradingService{
 		clockReader: fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}}, logger: logrus.New(), submissionMarker: func(string) error { return nil },
 		expectedAccountID: "acct", expectedPaper: true, expectedTenantID: "tenant", expectedSandboxID: "sandbox",
-		alphaDesk: &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: func() time.Time { return now }},
+		alphaDesk: &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: func() time.Time { return now }},
 		placeOrderFn: func(req alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
 			brokerCalls++
 			if req.OrderClass != alpaca.MLeg || len(req.Legs) != 2 || req.ClientOrderID != order.ClientOrderID || req.Qty == nil || req.Qty.InexactFloat64() != 2 {
@@ -212,9 +259,140 @@ func TestPlaceOptionsOrderSubmitsAtomicTwoLegOrderOnceAfterAutonomousAuthorizati
 			}}, nil
 		},
 	}
+	order.AssessmentAuditSink = func(a *interfaces.AlphaDeskAssessment) error { persisted = a; return nil }
 	result, err := service.PlaceOptionsOrder(context.Background(), order)
-	if err != nil || result == nil || result.ExecutionConfirmed || alphaCalls != 1 || brokerCalls != 1 {
-		t.Fatalf("result=%#v err=%v AlphaDesk calls=%d broker calls=%d; want one acknowledged atomic submission", result, err, alphaCalls, brokerCalls)
+	if err != nil || result == nil || result.ExecutionConfirmed || alphaCalls != 2 || brokerCalls != 1 {
+		t.Fatalf("result=%#v err=%v AlphaDesk calls=%d broker calls=%d; want signal plus authorization and one acknowledged atomic submission", result, err, alphaCalls, brokerCalls)
+	}
+	if persisted == nil || persisted.SignalQualityAssessment == nil || persisted.SignalQualityAssessment.Decision != "PASS" {
+		t.Fatalf("persisted assessment=%#v, want authorization assessment with nested signal_quality PASS", persisted)
+	}
+}
+
+func TestSignalQualityFailuresCannotReachAuthorizationOrBroker(t *testing.T) {
+	cases := map[string]string{
+		"FAIL":            `{"scope":"SIGNAL_QUALITY","decision":"FAIL","market_scanner_signal_score":0.91,"external_identity":{"account_id":"acct","sandbox_id":"sandbox","environment":"PAPER"},"market_evidence_at":"2026-09-28T11:59:30Z","observed_at":"2026-09-28T11:59:40Z","expires_at":"2099-01-01T00:00:00Z"}`,
+		"UNAVAILABLE":     `{"scope":"SIGNAL_QUALITY","decision":"UNAVAILABLE","market_scanner_signal_score":0.91,"external_identity":{"account_id":"acct","sandbox_id":"sandbox","environment":"PAPER"},"market_evidence_at":"2026-09-28T11:59:30Z","observed_at":"2026-09-28T11:59:40Z","expires_at":"2099-01-01T00:00:00Z"}`,
+		"HTTP error":      "HTTP_ERROR",
+		"malformed score": `{"scope":"SIGNAL_QUALITY","decision":"PASS","market_scanner_signal_score":"not-a-number","external_identity":{"account_id":"acct","sandbox_id":"sandbox","environment":"PAPER"},"market_evidence_at":"2026-09-28T11:59:30Z","observed_at":"2026-09-28T11:59:40Z","expires_at":"2099-01-01T00:00:00Z"}`,
+		"wrong scope":     `{"scope":"ACCOUNT_VERIFIED","decision":"PASS","market_scanner_signal_score":0.91,"external_identity":{"account_id":"acct","sandbox_id":"sandbox","environment":"PAPER"},"market_evidence_at":"2026-09-28T11:59:30Z","observed_at":"2026-09-28T11:59:40Z","expires_at":"2099-01-01T00:00:00Z"}`,
+		"wrong identity":  `{"scope":"SIGNAL_QUALITY","decision":"PASS","market_scanner_signal_score":0.91,"external_identity":{"account_id":"other","sandbox_id":"sandbox","environment":"PAPER"},"market_evidence_at":"2026-09-28T11:59:30Z","observed_at":"2026-09-28T11:59:40Z","expires_at":"2099-01-01T00:00:00Z"}`,
+		"stale":           `{"scope":"SIGNAL_QUALITY","decision":"PASS","market_scanner_signal_score":0.91,"external_identity":{"account_id":"acct","sandbox_id":"sandbox","environment":"PAPER"},"market_evidence_at":"2020-01-01T00:00:00Z","observed_at":"2020-01-01T00:00:01Z","expires_at":"2020-01-01T00:01:00Z"}`,
+	}
+	for name, response := range cases {
+		t.Run(name, func(t *testing.T) {
+			alphaCalls, accountVerifiedCalls, authCalls, brokerCalls := 0, 0, 0, 0
+			alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				alphaCalls++
+				var request AlphaDeskAssessmentRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				if request.Scope == "ACCOUNT_VERIFIED" {
+					accountVerifiedCalls++
+				}
+				if response == "HTTP_ERROR" {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write([]byte(response))
+			}))
+			defer alpha.Close()
+			now := time.Now().UTC()
+			service := &AlpacaTradingService{clockReader: fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}}, logger: logrus.New(), submissionMarker: func(string) error { return nil }, expectedAccountID: "acct", expectedPaper: true, expectedTenantID: "tenant", expectedSandboxID: "sandbox", alphaDesk: &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: alpha.URL, APIKey: "shared", HTTP: alpha.Client(), Now: func() time.Time { return now }}, optionsChainProvider: freshAssessmentChainProvider, placeOrderFn: func(req alpaca.PlaceOrderRequest) (*alpaca.Order, error) { brokerCalls++; return nil, nil }}
+			order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "signal-" + name, Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)})
+			order.AssessmentAuditSink = func(*interfaces.AlphaDeskAssessment) error { authCalls++; return nil }
+			_, err := service.PlaceOptionsOrder(context.Background(), order)
+			if err == nil || alphaCalls == 0 || accountVerifiedCalls != 0 || brokerCalls != 0 {
+				t.Fatalf("err=%v AlphaDesk calls=%d ACCOUNT_VERIFIED calls=%d broker calls=%d", err, alphaCalls, accountVerifiedCalls, brokerCalls)
+			}
+		})
+	}
+}
+
+func TestAssessOptionsStrategyUsesReadOnlySignalQualityForOpeningPreflight(t *testing.T) {
+	for _, decision := range []string{"PASS", "FAIL", "UNAVAILABLE"} {
+		t.Run(decision, func(t *testing.T) {
+			now := time.Now().UTC()
+			order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "preflight-" + decision, Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)})
+			brokerCalls := 0
+			alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request AlphaDeskAssessmentRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				if request.Scope != "SIGNAL_QUALITY" || request.ExternalAccountID != "acct" || request.ExternalSandboxID != "sandbox" || request.ExternalEnvironment != "PAPER" {
+					t.Fatalf("request scope/identity = %#v", request)
+				}
+				response, _ := json.Marshal(map[string]any{"scope": "SIGNAL_QUALITY", "decision": decision, "market_scanner_signal_score": func() any {
+					if decision == "UNAVAILABLE" {
+						return nil
+					}
+					return 0.91
+				}(), "score_source": func() string {
+					if decision == "UNAVAILABLE" {
+						return ""
+					}
+					return "alphadesk_connected_opportunity"
+				}(), "score_observed_at": func() time.Time {
+					if decision == "UNAVAILABLE" {
+						return time.Time{}
+					}
+					return order.ObservedAt.Add(-time.Second)
+				}(), "external_identity": map[string]string{"account_id": "acct", "sandbox_id": "sandbox", "environment": "PAPER"}, "strategy_identity": map[string]any{"underlying_symbol": order.Underlying, "strategy_type": order.StrategyType, "side": order.Side, "quantity": int(order.Qty)}, "market_evidence_at": order.MarketEvidenceAt, "observed_at": order.ObservedAt, "expires_at": order.AssessmentExpiresAt, "execution_allowed": false, "human_approval_required": true})
+				_, _ = w.Write(response)
+			}))
+			defer alpha.Close()
+			service := &AlpacaTradingService{expectedAccountID: "acct", expectedPaper: true, expectedTenantID: "tenant", expectedSandboxID: "sandbox", alphaDesk: &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: alpha.URL, APIKey: "shared", HTTP: alpha.Client(), Now: func() time.Time { return now }}, placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { brokerCalls++; return nil, nil }}
+			assessment, err := service.AssessOptionsStrategy(context.Background(), order, nil)
+			if err != nil || assessment == nil || assessment.Decision != decision || assessment.Qualified || assessment.QualificationStatus != "assessment_only" || brokerCalls != 0 {
+				t.Fatalf("assessment=%#v err=%v broker calls=%d", assessment, err, brokerCalls)
+			}
+			if decision == "UNAVAILABLE" && assessment.SignalScore != nil {
+				t.Fatalf("UNAVAILABLE score = %#v, want nil", assessment.SignalScore)
+			}
+		})
+	}
+}
+
+func TestAssessOptionsStrategyRejectsInvalidSignalQualityPass(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]any, *interfaces.OptionsOrder)
+	}{
+		{name: "wrong account", mutate: func(response map[string]any, _ *interfaces.OptionsOrder) {
+			response["external_identity"] = map[string]string{"account_id": "other", "sandbox_id": "sandbox", "environment": "PAPER"}
+		}},
+		{name: "fake source", mutate: func(response map[string]any, _ *interfaces.OptionsOrder) {
+			response["score_source"] = "client_supplied"
+		}},
+		{name: "stale score", mutate: func(response map[string]any, _ *interfaces.OptionsOrder) {
+			response["score_observed_at"] = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "preflight-invalid-" + tc.name, Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)})
+			response := map[string]any{
+				"scope": "SIGNAL_QUALITY", "decision": "PASS", "market_scanner_signal_score": 0.91,
+				"score_source": "alphadesk_connected_opportunity", "score_observed_at": order.ObservedAt.Add(-time.Second),
+				"external_identity":  map[string]string{"account_id": "acct", "sandbox_id": "sandbox", "environment": "PAPER"},
+				"strategy_identity":  map[string]any{"underlying_symbol": order.Underlying, "strategy_type": order.StrategyType, "side": order.Side, "quantity": int(order.Qty)},
+				"market_evidence_at": order.MarketEvidenceAt, "observed_at": order.ObservedAt, "expires_at": order.AssessmentExpiresAt,
+				"execution_allowed": false, "human_approval_required": true,
+			}
+			tc.mutate(response, order)
+			alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(response)
+			}))
+			defer alpha.Close()
+			brokerCalls := 0
+			service := &AlpacaTradingService{expectedAccountID: "acct", expectedPaper: true, expectedTenantID: "tenant", expectedSandboxID: "sandbox", alphaDesk: &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: alpha.URL, APIKey: "shared", HTTP: alpha.Client(), Now: func() time.Time { return now }}, placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { brokerCalls++; return nil, nil }}
+			assessment, err := service.AssessOptionsStrategy(context.Background(), order, nil)
+			if err == nil || assessment != nil || brokerCalls != 0 {
+				t.Fatalf("assessment=%#v err=%v broker calls=%d; want unavailable invalid PASS", assessment, err, brokerCalls)
+			}
+		})
 	}
 }
 

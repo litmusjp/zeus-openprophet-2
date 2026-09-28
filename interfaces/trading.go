@@ -215,27 +215,28 @@ type MarketData struct {
 
 // Options trading structures
 type OptionsOrder struct {
-	ClientOrderID         string
-	Symbol                string // Options symbol in OCC format (e.g., TSLA251219C00400000)
-	Underlying            string // Underlying stock symbol
-	Qty                   float64
-	Side                  string // "buy" or "sell"
-	PositionIntent        string // "buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close"
-	Type                  string // "market", "limit"
-	TimeInForce           string // "day", "gtc"
-	LimitPrice            *float64
-	SubmissionAttempted   bool
-	MarketScannerFeatures any                              `json:"-"`
-	AlphaDeskAssessment   *AlphaDeskAssessment             `json:"-"`
-	AssessmentAuditSink   func(*AlphaDeskAssessment) error `json:"-"`
-	AssessmentLegs        []AlphaDeskAssessmentLeg         `json:"-"`
-	AssessmentMaxLoss     *float64                         `json:"-"`
-	AssessmentGreeks      map[string]float64               `json:"-"`
-	MarketEvidenceAt      time.Time                        `json:"-"`
-	ObservedAt            time.Time                        `json:"-"`
-	AssessmentExpiresAt   time.Time                        `json:"-"`
-	StrategyType          string                           `json:"-"`
-	Legs                  []OptionLeg                      `json:"legs,omitempty"`
+	ClientOrderID           string
+	Symbol                  string // Options symbol in OCC format (e.g., TSLA251219C00400000)
+	Underlying              string // Underlying stock symbol
+	Qty                     float64
+	Side                    string // "buy" or "sell"
+	PositionIntent          string // "buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close"
+	Type                    string // "market", "limit"
+	TimeInForce             string // "day", "gtc"
+	LimitPrice              *float64
+	SubmissionAttempted     bool
+	MarketScannerFeatures   any                              `json:"-"`
+	AlphaDeskAssessment     *AlphaDeskAssessment             `json:"-"`
+	SignalQualityAssessment *AlphaDeskAssessment             `json:"-"`
+	AssessmentAuditSink     func(*AlphaDeskAssessment) error `json:"-"`
+	AssessmentLegs          []AlphaDeskAssessmentLeg         `json:"-"`
+	AssessmentMaxLoss       *float64                         `json:"-"`
+	AssessmentGreeks        map[string]float64               `json:"-"`
+	MarketEvidenceAt        time.Time                        `json:"-"`
+	ObservedAt              time.Time                        `json:"-"`
+	AssessmentExpiresAt     time.Time                        `json:"-"`
+	StrategyType            string                           `json:"-"`
+	Legs                    []OptionLeg                      `json:"legs,omitempty"`
 }
 
 // OptionLeg is one exact leg of an atomic multi-leg options order.
@@ -264,6 +265,7 @@ type AlphaDeskAssessmentLeg struct {
 }
 
 type AlphaDeskAssessment struct {
+	Scope                        string                        `json:"scope,omitempty"`
 	AssessmentID                 string                        `json:"assessment_id"`
 	Decision                     string                        `json:"decision"`
 	SignalScore                  *float64                      `json:"signal_score,omitempty"`
@@ -279,11 +281,22 @@ type AlphaDeskAssessment struct {
 	PolicyVersion                string                        `json:"policy_version,omitempty"`
 	MarketEvidenceAt             time.Time                     `json:"market_evidence_at,omitempty"`
 	ObservedAt                   time.Time                     `json:"observed_at,omitempty"`
+	ScoreSource                  string                        `json:"score_source,omitempty"`
+	ScoreObservedAt              time.Time                     `json:"score_observed_at,omitempty"`
+	StrategyIdentity             AlphaDeskStrategyIdentity     `json:"strategy_identity,omitempty"`
 	QualificationStatus          string                        `json:"qualification_status"`
 	Qualified                    bool                          `json:"qualified"`
 	AutonomousPaperAuthorization *AutonomousPaperAuthorization `json:"autonomous_paper_authorization,omitempty"`
+	SignalQualityAssessment      *AlphaDeskAssessment          `json:"signal_quality,omitempty"`
 	ExternalIdentity             AlphaDeskExternalIdentity     `json:"external_identity"`
 	ExternalIdentityPresent      bool                          `json:"-"`
+}
+
+type AlphaDeskStrategyIdentity struct {
+	Underlying   string `json:"underlying_symbol"`
+	StrategyType string `json:"strategy_type"`
+	Side         string `json:"side"`
+	Quantity     int    `json:"quantity"`
 }
 
 // AlphaDeskExternalIdentity is the external OP paper identity echoed by the

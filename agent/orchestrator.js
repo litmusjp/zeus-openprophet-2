@@ -101,6 +101,7 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     OPENPROPHET_PROCESS_NONCE: processNonce,
     ...tradingPolicyEnvironment(permissions),
     ALPHADESK_ENABLED: alphaDesk?.enabled ? 'true' : 'false',
+    ALPHADESK_SIGNAL_QUALITY_ENABLED: baseEnv?.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true' && alphaDesk?.enabled ? 'true' : 'false',
     ALPHADESK_URL: alphaDesk?.url || '',
     ALPHADESK_API_KEY: alphaDesk?.apiKey || '',
   };

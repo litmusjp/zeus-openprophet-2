@@ -19,7 +19,28 @@ import (
 func readyAlphaRequest() AlphaDeskAssessmentRequest {
 	quoted := time.Date(2026, 9, 22, 1, 0, 0, 0, time.UTC)
 	d, g, th, v := 0.5, 0.1, -0.2, 0.3
-	return AlphaDeskAssessmentRequest{UnderlyingSymbol: "AAPL", StrategyType: "SINGLE_LEG_OPTION", Side: "buy", Quantity: 1, LimitPrice: 1.25, Legs: []interfaces.AlphaDeskAssessmentLeg{{Symbol: "AAPL260116C00200000", Side: "buy", Quantity: 1, Price: 1.25, Bid: 1.2, Ask: 1.3, QuoteSize: 10, QuotedAt: quoted, Delta: &d, Gamma: &g, Theta: &th, Vega: &v}}, MaxLoss: 125, Greeks: map[string]float64{"delta": d, "gamma": g, "theta": th, "vega": v}, MarketEvidenceAt: quoted, ObservedAt: quoted.Add(time.Second), ExpiresAt: quoted.Add(time.Minute), TradeFingerprint: "fp"}
+	return AlphaDeskAssessmentRequest{UnderlyingSymbol: "AAPL", StrategyType: "SINGLE_LEG_OPTION", Side: "buy", Quantity: 1, LimitPrice: 1.25, Legs: []interfaces.AlphaDeskAssessmentLeg{{Symbol: "AAPL260116C00200000", Side: "buy", Quantity: 1, Price: 1.25, Bid: 1.2, Ask: 1.3, QuoteSize: 10, QuotedAt: quoted, Delta: &d, Gamma: &g, Theta: &th, Vega: &v}}, MaxLoss: 125, Greeks: map[string]float64{"delta": d, "gamma": g, "theta": th, "vega": v}, MarketEvidenceAt: quoted, ObservedAt: quoted.Add(time.Second), ExpiresAt: quoted.Add(time.Minute), TradeFingerprint: "fp", ExternalAccountID: "op-account", ExternalSandboxID: "op-sandbox", ExternalEnvironment: "PAPER"}
+}
+
+func TestValidateExternalAssessmentBindingRejectsCrossAccountOrSandbox(t *testing.T) {
+	for _, tc := range []struct{ account, sandbox string }{{"op-l1", "sandbox-l1"}, {"op-l2", "sandbox-l2"}} {
+		identity := models.DurableIdentity{BrokerAccountID: tc.account, SandboxID: tc.sandbox, PaperLive: "paper"}
+		a := &interfaces.AlphaDeskAssessment{ExternalIdentity: interfaces.AlphaDeskExternalIdentity{AccountID: tc.account, SandboxID: tc.sandbox, Environment: "PAPER"}, ExternalIdentityPresent: true}
+		if err := ValidateExternalAssessmentBinding(a, identity); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity := models.DurableIdentity{BrokerAccountID: "op-l1", SandboxID: "sandbox-l1", PaperLive: "paper"}
+	a := &interfaces.AlphaDeskAssessment{ExternalIdentity: interfaces.AlphaDeskExternalIdentity{AccountID: "op-l1", SandboxID: "sandbox-l1", Environment: "PAPER"}, ExternalIdentityPresent: true}
+	a.ExternalIdentity.AccountID = "alphadesk-third-account"
+	if err := ValidateExternalAssessmentBinding(a, identity); err == nil {
+		t.Fatal("cross-account assessment was accepted")
+	}
+	a.ExternalIdentity.AccountID = "op-l1"
+	a.ExternalIdentity.SandboxID = "sandbox-l2"
+	if err := ValidateExternalAssessmentBinding(a, identity); err == nil {
+		t.Fatal("cross-sandbox assessment was accepted")
+	}
 }
 
 func TestAlphaDeskAssessmentUsesExactContractAndMapsLiveResponse(t *testing.T) {
@@ -39,6 +60,11 @@ func TestAlphaDeskAssessmentUsesExactContractAndMapsLiveResponse(t *testing.T) {
 	for _, key := range []string{"underlying_symbol", "strategy_type", "side", "quantity", "limit_price", "legs", "max_loss", "greeks", "market_evidence_at", "observed_at", "expires_at"} {
 		if _, ok := got[key]; !ok {
 			t.Fatalf("outbound request missing %q: %#v", key, got)
+		}
+	}
+	for _, key := range []string{"external_account_id", "external_sandbox_id", "external_environment"} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("outbound request missing external identity field %q: %#v", key, got)
 		}
 	}
 	if _, ok := got["symbol"]; ok {

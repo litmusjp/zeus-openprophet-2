@@ -282,6 +282,17 @@ type AlphaDeskAssessment struct {
 	QualificationStatus          string                        `json:"qualification_status"`
 	Qualified                    bool                          `json:"qualified"`
 	AutonomousPaperAuthorization *AutonomousPaperAuthorization `json:"autonomous_paper_authorization,omitempty"`
+	ExternalIdentity             AlphaDeskExternalIdentity     `json:"external_identity"`
+	ExternalIdentityPresent      bool                          `json:"-"`
+}
+
+// AlphaDeskExternalIdentity is the external OP paper identity echoed by the
+// assessment service. It is intentionally distinct from AlphaDesk workspace
+// identity and from any AlphaDesk broker account.
+type AlphaDeskExternalIdentity struct {
+	AccountID   string `json:"account_id"`
+	SandboxID   string `json:"sandbox_id"`
+	Environment string `json:"environment"`
 }
 
 // AutonomousPaperAuthorization is the explicit AlphaDesk authorization

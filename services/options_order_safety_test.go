@@ -43,7 +43,7 @@ func autonomousAuthorizationJSON(order *interfaces.OptionsOrder, identity models
 		Issuer: "AlphaDesk", Source: "strategy_assessment", IssuedAt: issuedAt, ExpiresAt: order.AssessmentExpiresAt, PolicyVersion: "v1",
 		StrategyIdentity: autonomousPaperStrategyIdentity(order),
 	}
-	b, _ := json.Marshal(map[string]any{"decision": "PASS", "signal_score": 0.9, "execution_threshold": 0.8, "expires_at": order.AssessmentExpiresAt, "execution_allowed": false, "human_approval_required": true, "autonomous_paper_authorization": auth})
+	b, _ := json.Marshal(map[string]any{"decision": "PASS", "signal_score": 0.9, "execution_threshold": 0.8, "expires_at": order.AssessmentExpiresAt, "execution_allowed": false, "human_approval_required": true, "external_identity": map[string]string{"account_id": identity.BrokerAccountID, "sandbox_id": identity.SandboxID, "environment": "PAPER"}, "autonomous_paper_authorization": auth})
 	return string(b)
 }
 
@@ -344,7 +344,7 @@ func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
 	alphaCalls := 0
 	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		alphaCalls++
-		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z","execution_allowed":true,"human_approval_required":false}`))
+		_, _ = w.Write([]byte(`{"assessment_id":"fresh","decision":"PASS","signal_score":0.9,"execution_threshold":0.8,"expires_at":"2099-01-01T00:00:00Z","execution_allowed":true,"human_approval_required":false,"external_identity":{"account_id":"acct","sandbox_id":"sandbox","environment":"PAPER"},"autonomous_paper_authorization":{"allowed":true,"authorization_id":"fresh-auth","fingerprint":"","mode":"PAPER_ONLY","environment":"PAPER","workspace_id":"","account_id":"acct","issuer":"AlphaDesk","source":"strategy_assessment","issued_at":"2020-01-01T00:00:00Z","expires_at":"2099-01-01T00:00:00Z","policy_version":"v1"}}`))
 	}))
 	defer alpha.Close()
 	service := &AlpacaTradingService{
@@ -367,7 +367,7 @@ func TestOpeningOptionsRetryFetchesFreshAlphaDeskAssessment(t *testing.T) {
 
 func TestOpeningOptionsBlocksWhenAlphaDeskDisallowsExecution(t *testing.T) {
 	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"pass":true,"decision":"PASS","assessment_id":"blocked","market_scanner_signal_score":0.9,"policy_snapshot":{"minimum_signal_score":"0.8"},"expires_at":"2099-01-01T00:00:00Z","paper_only":true,"human_approval_required":false,"execution_allowed":false}`))
+		_, _ = w.Write([]byte(`{"pass":true,"decision":"PASS","assessment_id":"blocked","market_scanner_signal_score":0.9,"policy_snapshot":{"minimum_signal_score":"0.8"},"expires_at":"2099-01-01T00:00:00Z","paper_only":true,"human_approval_required":false,"execution_allowed":false,"external_identity":{"account_id":"acct","sandbox_id":"sandbox","environment":"PAPER"}}`))
 	}))
 	defer alpha.Close()
 
@@ -449,6 +449,39 @@ func TestOpeningOptionsFailsClosedWhenAlphaDeskUnavailable(t *testing.T) {
 			t.Fatalf("err=%v broker calls=%d; disabled AlphaDesk added a new block", err, calls)
 		}
 	})
+}
+
+func TestOpeningOptionsRejectsMissingOrWrongExternalBindingBeforeBroker(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing binding", body: `{"decision":"PASS"}`},
+		{name: "wrong account", body: `{"decision":"PASS","external_identity":{"account_id":"other-acct","sandbox_id":"sandbox","environment":"PAPER"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer alpha.Close()
+			brokerCalls := 0
+			service := &AlpacaTradingService{
+				clockReader: fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}}, logger: logrus.New(),
+				submissionMarker: func(string) error { return nil }, expectedAccountID: "acct", expectedPaper: true,
+				expectedTenantID: "tenant", expectedSandboxID: "sandbox",
+				alphaDesk:            &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+				optionsChainProvider: freshAssessmentChainProvider,
+				placeOrderFn:         func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) { brokerCalls++; return nil, nil },
+			}
+			_, err := service.PlaceOptionsOrder(context.Background(), readyAssessmentOrder(&interfaces.OptionsOrder{
+				ClientOrderID: "op-binding-" + tc.name, Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
+				Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+			}))
+			if err == nil || brokerCalls != 0 {
+				t.Fatalf("err=%v brokerCalls=%d; want binding rejection before broker", err, brokerCalls)
+			}
+		})
+	}
 }
 
 func TestOpeningOptionsRefreshesInjectedEvidenceBeforeAlphaDesk(t *testing.T) {

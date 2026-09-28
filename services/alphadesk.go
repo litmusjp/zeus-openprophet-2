@@ -75,6 +75,9 @@ type AlphaDeskAssessmentRequest struct {
 	MarketScannerFeatures               any                                 `json:"market_scanner_features,omitempty"`
 	TradeFingerprint                    string                              `json:"-"`
 	RequestAutonomousPaperAuthorization bool                                `json:"request_autonomous_paper_authorization,omitempty"`
+	ExternalAccountID                   string                              `json:"external_account_id"`
+	ExternalSandboxID                   string                              `json:"external_sandbox_id"`
+	ExternalEnvironment                 string                              `json:"external_environment"`
 }
 
 type AlphaDeskUnavailableError struct {
@@ -226,6 +229,7 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 		HumanApprovalRequired        bool                                     `json:"human_approval_required"`
 		ExecutionAllowed             bool                                     `json:"execution_allowed"`
 		AutonomousPaperAuthorization *interfaces.AutonomousPaperAuthorization `json:"autonomous_paper_authorization"`
+		ExternalIdentity             *interfaces.AlphaDeskExternalIdentity    `json:"external_identity"`
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return nil, &AlphaDeskProviderResponseError{Reason: "malformed score or response field", Err: err}
@@ -256,9 +260,14 @@ func (c *AlphaDeskClient) Assess(ctx context.Context, req AlphaDeskAssessmentReq
 		value := float64(*threshold)
 		thresholdValue = &value
 	}
-	// Keep the local request fingerprint as the audit/request binding; opening
-	// authorization uses its separately validated contract fingerprint below.
-	return &interfaces.AlphaDeskAssessment{AssessmentID: v.AssessmentID, Decision: v.Decision, Pass: v.Pass != nil && *v.Pass, SignalScore: signalScore, Threshold: thresholdValue, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed, FailedCheckCodes: v.FailedCheckCodes, PolicyVersion: v.PolicyVersion, MarketEvidenceAt: v.MarketEvidenceAt, ObservedAt: v.ObservedAt, AutonomousPaperAuthorization: v.AutonomousPaperAuthorization}, nil
+	// Keep the local request fingerprint as an audit/request binding. External
+	// account and sandbox identity are validated separately below.
+	identity := interfaces.AlphaDeskExternalIdentity{}
+	identityPresent := v.ExternalIdentity != nil
+	if identityPresent {
+		identity = *v.ExternalIdentity
+	}
+	return &interfaces.AlphaDeskAssessment{AssessmentID: v.AssessmentID, Decision: v.Decision, Pass: v.Pass != nil && *v.Pass, SignalScore: signalScore, Threshold: thresholdValue, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed, FailedCheckCodes: v.FailedCheckCodes, PolicyVersion: v.PolicyVersion, MarketEvidenceAt: v.MarketEvidenceAt, ObservedAt: v.ObservedAt, AutonomousPaperAuthorization: v.AutonomousPaperAuthorization, ExternalIdentity: identity, ExternalIdentityPresent: identityPresent}, nil
 }
 
 func policyThreshold(policy any) *alphaDeskFloat {
@@ -337,6 +346,22 @@ func ValidateAlphaDeskAssessment(a *interfaces.AlphaDeskAssessment, expectedFing
 	return nil
 }
 
+func ValidateExternalAssessmentBinding(a *interfaces.AlphaDeskAssessment, identity models.DurableIdentity) error {
+	if a == nil {
+		return fmt.Errorf("AlphaDesk external assessment is missing")
+	}
+	if a.ExternalIdentity.AccountID == "" || a.ExternalIdentity.AccountID != identity.BrokerAccountID {
+		return fmt.Errorf("AlphaDesk external assessment account does not match")
+	}
+	if a.ExternalIdentity.SandboxID == "" || a.ExternalIdentity.SandboxID != identity.SandboxID {
+		return fmt.Errorf("AlphaDesk external assessment sandbox does not match")
+	}
+	if a.ExternalIdentity.Environment != "PAPER" || identity.PaperLive != "paper" {
+		return fmt.Errorf("AlphaDesk external assessment is not paper-only")
+	}
+	return nil
+}
+
 func (c *AlphaDeskClient) AssessAndValidate(ctx context.Context, identity models.DurableIdentity, order *interfaces.OptionsOrder, features any) (*interfaces.AlphaDeskAssessment, error) {
 	return c.assessAndValidate(ctx, identity, order, features, nil)
 }
@@ -354,7 +379,7 @@ func (c *AlphaDeskClient) assessAndValidate(ctx context.Context, identity models
 		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
 	}
 	opening := strings.HasSuffix(strings.ToLower(strings.TrimSpace(order.PositionIntent)), "_to_open")
-	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, RequestAutonomousPaperAuthorization: opening, MarketScannerFeatures: features})
+	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, RequestAutonomousPaperAuthorization: opening, ExternalAccountID: identity.BrokerAccountID, ExternalSandboxID: identity.SandboxID, ExternalEnvironment: "PAPER", MarketScannerFeatures: features})
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +387,9 @@ func (c *AlphaDeskClient) assessAndValidate(ctx context.Context, identity models
 		if err := audit(a); err != nil {
 			return nil, fmt.Errorf("persist AlphaDesk assessment: %w", err)
 		}
+	}
+	if err := ValidateExternalAssessmentBinding(a, identity); err != nil {
+		return nil, err
 	}
 	if opening {
 		if err := ValidateAutonomousPaperAuthorization(a, identity, order, fp, c.Now()); err != nil {
@@ -381,11 +409,11 @@ func (c *AlphaDeskClient) AssessForTrade(ctx context.Context, identity models.Du
 	if order == nil || len(order.AssessmentLegs) == 0 || order.AssessmentMaxLoss == nil || len(order.AssessmentGreeks) == 0 || order.MarketEvidenceAt.IsZero() || order.ObservedAt.IsZero() || order.AssessmentExpiresAt.IsZero() {
 		return nil, &AlphaDeskUnavailableError{Reason: "required broker option evidence is unavailable"}
 	}
-	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, MarketScannerFeatures: features})
+	a, err := c.Assess(ctx, AlphaDeskAssessmentRequest{UnderlyingSymbol: order.Underlying, StrategyType: order.StrategyType, Side: order.Side, Quantity: int(order.Qty), LimitPrice: derefFloat(order.LimitPrice), Legs: order.AssessmentLegs, MaxLoss: *order.AssessmentMaxLoss, Greeks: order.AssessmentGreeks, MarketEvidenceAt: order.MarketEvidenceAt, ObservedAt: order.ObservedAt, ExpiresAt: order.AssessmentExpiresAt, TradeFingerprint: fp, ExternalAccountID: identity.BrokerAccountID, ExternalSandboxID: identity.SandboxID, ExternalEnvironment: "PAPER", MarketScannerFeatures: features})
 	if err != nil {
 		return nil, err
 	}
-	a.Qualified = ValidateAlphaDeskAssessment(a, fp, c.Now()) == nil
+	a.Qualified = ValidateExternalAssessmentBinding(a, identity) == nil && ValidateAlphaDeskAssessment(a, fp, c.Now()) == nil
 	if a.Qualified {
 		a.QualificationStatus = "qualified"
 	} else {

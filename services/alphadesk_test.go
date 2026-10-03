@@ -243,6 +243,31 @@ func TestValidateAutonomousPaperAuthorizationBindsExactIdentityAndContext(t *tes
 	}
 }
 
+func TestOpeningAssessmentRejectsFailDespiteAllowedAuthorization(t *testing.T) {
+	now := time.Now().UTC()
+	identity := models.DurableIdentity{BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+	order := authorizationTestOrder()
+	order.PositionIntent = "buy_to_open"
+	order.AssessmentExpiresAt = now.Add(time.Minute)
+	order.MarketEvidenceAt = now.Add(-time.Minute)
+	order.ObservedAt = now.Add(-time.Second)
+	order.AssessmentGreeks = map[string]float64{"delta": 0.5}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := &interfaces.AutonomousPaperAuthorization{
+			Allowed: true, AuthorizationID: "auth-1", Mode: "PAPER_ONLY", Environment: "PAPER", WorkspaceID: identity.TenantID, AccountID: identity.BrokerAccountID,
+			Issuer: "AlphaDesk", Source: "strategy_assessment", IssuedAt: now.Add(-time.Minute), ExpiresAt: order.AssessmentExpiresAt, PolicyVersion: "v1", StrategyIdentity: autonomousPaperStrategyIdentity(order),
+		}
+		auth.Fingerprint = AlphaDeskAuthorizationFingerprint(identity, order, auth.PolicyVersion)
+		response, _ := json.Marshal(map[string]any{"decision": "FAIL", "external_identity": map[string]string{"account_id": identity.BrokerAccountID, "sandbox_id": identity.SandboxID, "environment": "PAPER"}, "autonomous_paper_authorization": auth})
+		_, _ = w.Write(response)
+	}))
+	defer server.Close()
+	client := &AlphaDeskClient{Enabled: true, URL: server.URL, APIKey: "test", HTTP: server.Client(), Now: func() time.Time { return now }}
+	if assessment, err := client.AssessAndValidate(context.Background(), identity, order, nil); err == nil || assessment != nil {
+		t.Fatalf("assessment=%#v err=%v; FAIL assessment authorized opening", assessment, err)
+	}
+}
+
 func TestAlphaDeskAssessmentUsesLocalFingerprintBecauseResponseHasNoIdentityField(t *testing.T) {
 	request := readyAlphaRequest()
 	request.TradeFingerprint = "locally-bound-fingerprint"

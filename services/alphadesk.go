@@ -495,6 +495,9 @@ func (c *AlphaDeskClient) assessAndValidate(ctx context.Context, identity models
 		return nil, err
 	}
 	if opening {
+		if a.Decision != "PASS" {
+			return nil, fmt.Errorf("AlphaDesk account-verified assessment decision is not PASS")
+		}
 		if err := ValidateAutonomousPaperAuthorization(a, identity, order, fp, c.Now()); err != nil {
 			return nil, err
 		}

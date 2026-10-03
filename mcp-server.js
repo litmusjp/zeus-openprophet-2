@@ -121,7 +121,7 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
       lastError = error;
       const status = error?.response?.status || 0;
       if (options.returnAvailability && status === 503 && error?.response?.data?.category) return { ...error.response.data, http_status: 503 };
-      if (options.returnValidation && status === 422 && error?.response?.data) return error.response.data;
+      if (options.returnValidation && [400, 422].includes(status) && error?.response?.data) return error.response.data;
       const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
       if (!retryable || attempt >= maxAttempts) break;
       await new Promise(resolve => setTimeout(resolve, Math.min(100 * (2 ** (attempt - 1)), 750)));

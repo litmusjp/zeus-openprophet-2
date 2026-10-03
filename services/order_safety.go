@@ -72,6 +72,44 @@ type SubmissionUncertainError struct {
 	Result *interfaces.OrderResult
 }
 
+// BrokerRejectionError identifies a typed, deterministic broker HTTP rejection
+// after the submission boundary. Network failures, provider route failures,
+// duplicate identities, and conflicts remain submission-uncertain.
+type BrokerRejectionError struct{ Err error }
+
+func (e *BrokerRejectionError) Error() string {
+	if e == nil || e.Err == nil {
+		return "broker rejected order"
+	}
+	return "broker rejected order: " + e.Err.Error()
+}
+
+func (e *BrokerRejectionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func IsBrokerRejection(err error) bool {
+	var rejection *BrokerRejectionError
+	return errors.As(err, &rejection)
+}
+
+// classifyBrokerSubmissionError intentionally relies on the one observed
+// typed SDK rejection, not HTTP status or message substrings. Unknown 4xx
+// responses, duplicate identities, conflicts, and timeouts remain uncertain.
+func classifyBrokerSubmissionError(err error) error {
+	var apiErr *alpaca.APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return nil
+	}
+	if apiErr.StatusCode != 403 || apiErr.Code != 40310000 {
+		return nil
+	}
+	return &BrokerRejectionError{Err: apiErr}
+}
+
 // ManagedRequestError identifies a request that is invalid before any broker interaction.
 type ManagedRequestError struct{ Err error }
 

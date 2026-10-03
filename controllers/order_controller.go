@@ -428,7 +428,10 @@ func (oc *OrderController) Buy(ctx context.Context, req BuyRequest) (*interfaces
 			}
 			return oc.plannedOrderResult(order, closedErr), nil
 		}
-		if services.IsPreSubmissionRejection(err) {
+		if services.IsBrokerRejection(err) {
+			order.Status = "rejected"
+			order.SubmissionAttempted = true
+		} else if services.IsPreSubmissionRejection(err) {
 			order.Status = "rejected_before_submission"
 		} else {
 			order.Status = "submit_failed"
@@ -539,7 +542,10 @@ func (oc *OrderController) Sell(ctx context.Context, req SellRequest) (*interfac
 			}
 			return oc.plannedOrderResult(order, closedErr), nil
 		}
-		if services.IsPreSubmissionRejection(err) {
+		if services.IsBrokerRejection(err) {
+			order.Status = "rejected"
+			order.SubmissionAttempted = true
+		} else if services.IsPreSubmissionRejection(err) {
 			order.Status = "rejected_before_submission"
 		} else {
 			order.Status = "submit_failed"
@@ -1561,6 +1567,19 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			return
 		}
 
+		if services.IsBrokerRejection(err) {
+			intent.Status = "rejected"
+			intent.SubmissionAttempted = true
+			if saveErr := oc.storageService.SaveOrder(intent); saveErr != nil {
+				oc.logger.WithError(saveErr).Warn("Failed to record terminal options broker rejection")
+				intent.Status = "submission_uncertain"
+				c.JSON(http.StatusBadGateway, oc.optionsResponseWithIdentity(intent, nil, intent.Status, "broker rejection was not durably recorded; execution remains unconfirmed"))
+				return
+			}
+			oc.logger.WithError(err).Error("Broker rejected options order")
+			c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(intent, nil, intent.Status, err.Error()))
+			return
+		}
 		intent.Status = "submit_failed"
 		if services.IsSubmissionUncertain(err) {
 			intent.Status = "submission_uncertain"

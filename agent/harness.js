@@ -102,6 +102,45 @@ export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult =
   };
 }
 
+const OPEN_CODE_ERROR_LIMIT = 1200;
+
+function sanitizeOpenCodeError(value) {
+  return String(value || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/(["']?)(api[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|authorization|token|secret|key)\1\s*[:=]\s*(["']?)[^,;\s}\]]+\3/gi, (_m, quote, key) => `${quote}${key}${quote}=[redacted]`)
+    .replace(/https?:\/\/[^\s]+/gi, match => {
+      try {
+        const url = new URL(match);
+        if (url.username || url.password) { url.username = '[redacted]'; url.password = '[redacted]'; }
+        for (const key of [...url.searchParams.keys()]) {
+          if (/^(?:api[_-]?key|token|key|client[_-]?secret|secret|authorization|password)$/i.test(key)) url.searchParams.set(key, '[redacted]');
+        }
+        return url.toString();
+      } catch { return match.replace(/([?&](?:api[_-]?key|token|key|client[_-]?secret|secret|authorization)=)[^&\s]*/gi, '$1[redacted]'); }
+    })
+    .trim()
+    .slice(0, OPEN_CODE_ERROR_LIMIT);
+}
+
+export function formatOpenCodeError(event) {
+  const outer = event?.error || event?.message || event?.part || event;
+  const detail = outer && typeof outer === 'object' && outer.data && typeof outer.data === 'object'
+    ? { ...outer, ...outer.data } : outer;
+  const name = detail && typeof detail === 'object' ? (detail.name || detail.type || '') : '';
+  const message = detail && typeof detail === 'object'
+    ? (detail.message || detail.error || detail.detail || '')
+    : detail;
+  const status = detail && typeof detail === 'object' ? (detail.status || detail.statusCode || '') : '';
+  const code = detail && typeof detail === 'object' ? (detail.code || '') : '';
+  // Vendor/API codes are numeric. Arbitrary string codes may contain credentials
+  // or executable-looking content and must never be surfaced.
+  const safeCode = /^\d{3,12}$/.test(String(code)) ? code : '';
+  const pieces = [name, status && `HTTP ${status}`, safeCode && `Code ${safeCode}`, message]
+    .map(sanitizeOpenCodeError).filter(Boolean);
+  return sanitizeOpenCodeError([...new Set(pieces)].join(': '));
+}
+
 // ── System Prompt Builder ──────────────────────────────────────────
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
@@ -305,6 +344,7 @@ export class AgentHarness {
       getPermissions = () => ({}),
       chatStore = null,
       opencodeEnv = {},
+      spawnFn = spawn,
       checkCliAuthFn = checkCliAuth,
       getCurrentPhaseFn = getCurrentPhase,
     } = options;
@@ -321,6 +361,7 @@ export class AgentHarness {
     this.getPermissions = getPermissions;
     this.chatStore = chatStore;
     this.opencodeEnv = opencodeEnv;
+    this.spawnFn = spawnFn;
     this.checkCliAuthFn = checkCliAuthFn;
     this.getCurrentPhaseFn = getCurrentPhaseFn;
     this.systemPrompt = '';
@@ -852,7 +893,7 @@ ${userBlock}`;
         });
       }
 
-      const proc = spawn('opencode', args, {
+      const proc = this.spawnFn('opencode', args, {
         cwd: process.cwd(),
         env: {
           ...process.env,
@@ -882,6 +923,7 @@ ${userBlock}`;
       let totalCost = 0;
       let totalTokens = 0;
       let stderrText = '';
+      let streamError = '';
       let timedOut = false;
 
       proc.stdout.on('data', (chunk) => {
@@ -900,13 +942,14 @@ ${userBlock}`;
               setSession: (id) => { sessionId = id; },
               addCost: (c) => { totalCost += c; },
               addTokens: (t) => { totalTokens += t; },
+              setError: (message) => { streamError = message; },
             });
           } catch { /* skip unparseable lines */ }
         }
       });
 
       proc.stderr.on('data', (chunk) => {
-        const msg = chunk.toString().trim();
+        const msg = sanitizeOpenCodeError(chunk.toString());
         if (msg) {
           stderrText = `${stderrText}${msg}\n`.slice(-2000);
           this.state.emit('agent_log', { message: `[opencode] ${msg}`, level: 'info' });
@@ -933,6 +976,7 @@ ${userBlock}`;
               setSession: (id) => { sessionId = id; },
               addCost: (c) => { totalCost += c; },
               addTokens: (t) => { totalTokens += t; },
+              setError: (message) => { streamError = message; },
             });
           } catch {}
         }
@@ -959,9 +1003,11 @@ ${userBlock}`;
           level: code === 0 ? 'info' : 'warning',
         });
 
-        if (timedOut && !fullText) {
+        if (streamError) {
+          resolve({ error: streamError, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
+        } else if (timedOut && !fullText) {
           resolve({ error: `opencode timed out after ${BEAT_TIMEOUT_MS / 1000}s; harness sent SIGTERM${stderrText ? `: ${stderrText.trim()}` : ''}`, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
-        } else if (code !== 0 && code !== null && !fullText) {
+        } else if ((code !== 0 || code === null) && !fullText) {
           resolve({ error: `opencode exited with code ${code} signal ${signal}${stderrText ? `: ${stderrText.trim()}` : ''}`, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
         } else if (signal && !fullText) {
           resolve({ error: `opencode killed by ${signal}`, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
@@ -1004,6 +1050,14 @@ ${userBlock}`;
     }
 
     switch (event.type) {
+      case 'error': {
+        const message = formatOpenCodeError(event);
+        if (message) {
+          ctx.setError?.(message);
+          this.state.emit('agent_log', { message: `OpenCode error: ${message}`, level: 'error' });
+        }
+        break;
+      }
       case 'text': {
         const text = event.part?.text;
         if (text?.trim()) {

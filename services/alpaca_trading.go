@@ -502,6 +502,9 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 	if err != nil {
 		// Startup reconciliation is handled by OrderController.ReconcileOpenOrders.
 		s.logger.WithError(err).Error("Failed to place order")
+		if rejection := classifyBrokerSubmissionError(err); rejection != nil {
+			return nil, rejection
+		}
 		return nil, &SubmissionUncertainError{Err: fmt.Errorf("failed to place order with client_order_id %s: %w", order.ClientOrderID, err)}
 	}
 
@@ -909,6 +912,9 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	alpacaOrder, err := placeOrder(req)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to place options order")
+		if rejection := classifyBrokerSubmissionError(err); rejection != nil {
+			return nil, rejection
+		}
 		return nil, &SubmissionUncertainError{Err: fmt.Errorf("failed to place options order with client_order_id %s: %w", order.ClientOrderID, err)}
 	}
 	result := orderResultFromAlpacaOrder(&req, alpacaOrder, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID})

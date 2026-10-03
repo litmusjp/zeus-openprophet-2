@@ -501,6 +501,34 @@ func TestBuyPersistsIntentBeforeSubmit(t *testing.T) {
 	}
 }
 
+func TestBuyPersistsTypedBrokerRejectionAsTerminalAndDoesNotRetry(t *testing.T) {
+	t.Setenv("ALPACA_ACCOUNT_ID", "test-broker-account")
+	t.Setenv("ALPACA_PAPER", "true")
+	t.Setenv("OPENPROPHET_TENANT_ID", "test-tenant")
+	t.Setenv("OPENPROPHET_SANDBOX_ID", "test-sandbox")
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "rejected.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	rejection := &services.BrokerRejectionError{Err: errors.New("typed broker rejection")}
+	rec := &placeOrderRecorder{reconciliationTradingService: &reconciliationTradingService{}, placeErr: rejection}
+	oc := NewOrderController(rec, nil, storage)
+	if _, err := oc.Buy(context.Background(), BuyRequest{Symbol: "IWM", Qty: 10, Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(280), ClientOrderID: "op-rejected"}); err == nil {
+		t.Fatal("Buy() expected the broker rejection")
+	}
+	saved, err := storage.GetOrderByClientOrderID("op-rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved == nil || saved.Status != "rejected" || !saved.SubmissionAttempted {
+		t.Fatalf("saved=%#v; want terminal rejected identity", saved)
+	}
+	if _, err := oc.Buy(context.Background(), BuyRequest{Symbol: "IWM", Qty: 10, Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(280), ClientOrderID: "op-rejected"}); err == nil {
+		t.Fatal("terminal rejected client order ID must not be reposted")
+	}
+}
+
 func TestSellRetryReloadsPlannedIntentRevision(t *testing.T) {
 	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "sell-retry.db"))
 	if err != nil {

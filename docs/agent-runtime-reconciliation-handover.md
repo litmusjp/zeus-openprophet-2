@@ -1,0 +1,19 @@
+# OpenProphet 2 runtime reconciliation handover
+
+October 3, 2026. Target is the isolated OpenProphet 2 Railway paper preview. Production, AlphaDesk's separate account/worker, credentials, live permissions and assessment/authorization gates are unchanged. Codex implemented the code; the parent independently verified tests and performed the guarded recovery below.
+
+Implemented:
+
+- OpenCode JSON `type: "error"` events now produce bounded, sanitized harness errors, including the observed nested `error.data.message/statusCode` wire shape and partial-text/exit-zero cases. Error beats fail and therefore do not clear the heartbeat failure streak or count as successful work. Paid fallback remains off; both L1 and L2 are approved for `opencode/ling-3.1-flash-free`. No successful trading claim is made.
+- The observed typed Alpaca SDK HTTP 403 / code 40310000 submission rejection is now a terminal `rejected` outcome after the submission boundary. Unsupported 4xx codes remain uncertain. Auth, route, rate-limit, conflict, duplicate-client-ID, network, 5xx, malformed-response, missing-row, and identity ambiguity cases remain fail-closed uncertain. Existing AlphaDesk/SIGNAL_QUALITY and authorization paths are untouched.
+- The narrow recovery utility is [recover-l2-wash-trade-rejection.mjs](../scripts/recover-l2-wash-trade-rejection.mjs). It is read-only by default; `--apply` requires exact L2 config, durable row, structured OpenCode tool-part evidence, broker account identity, typed 40410000 client-order lookup, zero broker ID/fills, a guarded revision/identity transaction, and a local mode-0600 row/evidence backup.
+
+Verification status:
+
+- Focused Go tests cover explicit typed rejection codes, HTTP 408/unknown-code ambiguity, stock/options service boundaries, and no-resubmit behavior. AlphaDesk quality and authorization gates are unchanged.
+- Full Node 22 sequential suite: 138 passed, 0 failed, 0 skipped, including 13 recovery tests. An initial parallel run hit an existing three-second inert-construction timeout; unchanged focused and sequential reruns passed. Dependency specifications and lockfile were not changed.
+- Full `go test ./...`, `go vet ./...`, and `git diff --check` pass.
+- Guarded deployed preflight matched the original structured tool error, L2 paper identity, no fills/no broker ID and broker 40410000. Explicit apply corrected only `op-iwm-stock-fallback-20260928` from uncertain revision 3 to rejected revision 4. Independent readback verified immutable fields unchanged, prior metadata in the audit and a mode-0600 row/evidence backup under `/app/data/recovery-backups/`. No deletion, broker order creation/cancellation or reconciliation bypass occurred.
+- With operator approval, both sandbox selections were changed to `opencode/ling-3.1-flash-free`; accounts, agent strategies and permissions were read back unchanged. Native no-tools probe returned OK. Ling 3.0 failed on deployed 1.18.3 and stable 1.18.34, including catalog refresh; no CLI upgrade or paid fallback was added.
+
+Post-deployment acceptance requires exact source, scoped health/reconciliation, both actual heartbeats/tool calls and broker-state verification. Browser authentication, fresh AlphaDesk PASS and successful paper execution remain separate checks; model OK, local tests and deployment SUCCESS do not establish those. GitHub CI must be checked separately. Apply recovery before replacing a container when its original OpenCode evidence database is ephemeral; retain the audited backup on the persistent volume.

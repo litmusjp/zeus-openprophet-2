@@ -68,6 +68,10 @@ func retryableProviderStatus(status int, safe bool) bool {
 // transient statuses. It returns a bounded, sanitized error on exhaustion.
 func DoProviderRequest(ctx context.Context, client *http.Client, endpoint string, safe bool, makeRequest func(context.Context) (*http.Request, error)) ([]byte, int, error) {
 	policy := defaultProviderRetryPolicy
+	// Provider credentials may use custom headers, which net/http forwards on
+	// redirects even when the destination is a different host.
+	noRedirectClient := *client
+	noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	callCtx, cancel := context.WithTimeout(ctx, policy.Total)
 	defer cancel()
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
@@ -75,7 +79,7 @@ func DoProviderRequest(ctx context.Context, client *http.Client, endpoint string
 		if err != nil {
 			return nil, 0, &ProviderError{Endpoint: providerEndpoint(endpoint), Category: "request_build", Attempts: attempt, Err: err}
 		}
-		resp, doErr := client.Do(req)
+		resp, doErr := noRedirectClient.Do(req)
 		if doErr != nil {
 			if safe && attempt < policy.MaxAttempts && callCtx.Err() == nil {
 				if err := providerBackoff(callCtx, policy, attempt); err == nil {

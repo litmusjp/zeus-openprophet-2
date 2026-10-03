@@ -22,6 +22,24 @@ func readyAlphaRequest() AlphaDeskAssessmentRequest {
 	return AlphaDeskAssessmentRequest{UnderlyingSymbol: "AAPL", StrategyType: "SINGLE_LEG_OPTION", Side: "buy", Quantity: 1, LimitPrice: 1.25, Legs: []interfaces.AlphaDeskAssessmentLeg{{Symbol: "AAPL260116C00200000", Side: "buy", Quantity: 1, Price: 1.25, Bid: 1.2, Ask: 1.3, QuoteSize: 10, QuotedAt: quoted, Delta: &d, Gamma: &g, Theta: &th, Vega: &v}}, MaxLoss: 125, Greeks: map[string]float64{"delta": d, "gamma": g, "theta": th, "vega": v}, MarketEvidenceAt: quoted, ObservedAt: quoted.Add(time.Second), ExpiresAt: quoted.Add(time.Minute), TradeFingerprint: "fp", ExternalAccountID: "op-account", ExternalSandboxID: "op-sandbox", ExternalEnvironment: "PAPER"}
 }
 
+func TestAlphaDeskDoesNotForwardKeyOnRedirect(t *testing.T) {
+	var forwarded string
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = r.Header.Get("X-AlphaDesk-API-Key")
+		_, _ = w.Write([]byte(`{"decision":"PASS"}`))
+	}))
+	defer destination.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	c := &AlphaDeskClient{Enabled: true, URL: source.URL, APIKey: "secret", HTTP: source.Client()}
+	_, _ = c.Assess(context.Background(), readyAlphaRequest())
+	if forwarded != "" {
+		t.Fatal("AlphaDesk API key was forwarded to a redirect destination")
+	}
+}
+
 func TestValidateExternalAssessmentBindingRejectsCrossAccountOrSandbox(t *testing.T) {
 	for _, tc := range []struct{ account, sandbox string }{{"op-l1", "sandbox-l1"}, {"op-l2", "sandbox-l2"}} {
 		identity := models.DurableIdentity{BrokerAccountID: tc.account, SandboxID: tc.sandbox, PaperLive: "paper"}

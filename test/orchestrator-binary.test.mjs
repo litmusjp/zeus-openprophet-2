@@ -92,30 +92,36 @@ test('structured readiness 503 is treated as a live backend response', async () 
 
 async function withUnavailableGo(callback) {
   const goDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openprophet-no-go-'));
-  const goPath = path.join(goDir, 'go.cmd');
-  await fs.writeFile(goPath, '@echo off\r\nexit /b 1\r\n');
-  const previousPath = process.env.Path;
-  process.env.Path = `${goDir}${path.delimiter}${previousPath || ''}`;
+  const windows = process.platform === 'win32';
+  const goPath = path.join(goDir, windows ? 'go.cmd' : 'go');
+  await fs.writeFile(goPath, windows ? '@echo off\r\nexit /b 1\r\n' : '#!/bin/sh\nexit 1\n');
+  if (!windows) await fs.chmod(goPath, 0o755);
+  const pathKey = windows ? 'Path' : 'PATH';
+  const previousPath = process.env[pathKey];
+  process.env[pathKey] = `${goDir}${path.delimiter}${previousPath || ''}`;
   try {
     return await callback();
   } finally {
-    if (previousPath === undefined) delete process.env.Path;
-    else process.env.Path = previousPath;
+    if (previousPath === undefined) delete process.env[pathKey];
+    else process.env[pathKey] = previousPath;
     await fs.rm(goDir, { recursive: true, force: true });
   }
 }
 
 async function withFakeGo(callback, body) {
   const goDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openprophet-fake-go-'));
-  const goPath = path.join(goDir, 'go.cmd');
-  await fs.writeFile(goPath, `@echo off\r\n${body}\r\n`);
-  const previousPath = process.env.Path;
-  process.env.Path = `${goDir}${path.delimiter}${previousPath || ''}`;
+  const windows = process.platform === 'win32';
+  const goPath = path.join(goDir, windows ? 'go.cmd' : 'go');
+  await fs.writeFile(goPath, windows ? `@echo off\r\n${body}\r\n` : `#!/bin/sh\n${body}\n`);
+  if (!windows) await fs.chmod(goPath, 0o755);
+  const pathKey = windows ? 'Path' : 'PATH';
+  const previousPath = process.env[pathKey];
+  process.env[pathKey] = `${goDir}${path.delimiter}${previousPath || ''}`;
   try {
     return await callback();
   } finally {
-    if (previousPath === undefined) delete process.env.Path;
-    else process.env.Path = previousPath;
+    if (previousPath === undefined) delete process.env[pathKey];
+    else process.env[pathKey] = previousPath;
     await fs.rm(goDir, { recursive: true, force: true });
   }
 }
@@ -148,7 +154,7 @@ test('normal startup builds a missing prophet_bot and promotes the completed out
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
-  }, 'if "%1"=="version" exit /b 0\r\necho built>"%~3"\r\nexit /b 0');
+  }, process.platform === 'win32' ? 'if "%1"=="version" exit /b 0\r\necho built>"%~3"\r\nexit /b 0' : 'if [ "$1" = version ]; then exit 0; fi\nprintf "built\\r\\n" > "$3"');
 });
 
 test('force rebuild fails closed and preserves an existing binary when Go is unavailable', async () => {
@@ -189,7 +195,7 @@ test('forced rebuild preserves the existing binary when the build fails after Go
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
-  }, 'if "%1"=="version" exit /b 0\r\nexit /b 1');
+  }, process.platform === 'win32' ? 'if "%1"=="version" exit /b 0\r\nexit /b 1' : 'if [ "$1" = version ]; then exit 0; fi\nexit 1');
 });
 
 test('force rebuild fails closed when Go is unavailable and the binary is missing', async () => {

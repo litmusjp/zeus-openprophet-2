@@ -313,8 +313,8 @@ func TestSignalQualityFailuresCannotReachAuthorizationOrBroker(t *testing.T) {
 func TestAssessOptionsStrategyUsesReadOnlySignalQualityForOpeningPreflight(t *testing.T) {
 	for _, decision := range []string{"PASS", "FAIL", "UNAVAILABLE"} {
 		t.Run(decision, func(t *testing.T) {
-			now := time.Now().UTC()
 			order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "preflight-" + decision, Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1)})
+			now := order.ObservedAt
 			brokerCalls := 0
 			alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request AlphaDeskAssessmentRequest

@@ -704,7 +704,7 @@ func (s *AlpacaTradingService) GetPositions(ctx context.Context) ([]*interfaces.
 			MarketValue:     ap.MarketValue.InexactFloat64(),
 			CostBasis:       ap.CostBasis.InexactFloat64(),
 			UnrealizedPL:    ap.UnrealizedPL.InexactFloat64(),
-			UnrealizedPLPC:  ap.UnrealizedIntradayPLPC.InexactFloat64(),
+			UnrealizedPLPC:  ap.UnrealizedPLPC.InexactFloat64(),
 			CurrentPrice:    ap.CurrentPrice.InexactFloat64(),
 			Side:            string(ap.Side),
 		}
@@ -1183,7 +1183,7 @@ func (s *AlpacaTradingService) GetOptionsPosition(ctx context.Context, symbol st
 				MarketValue:     pos.MarketValue.InexactFloat64(),
 				CostBasis:       pos.CostBasis.InexactFloat64(),
 				UnrealizedPL:    pos.UnrealizedPL.InexactFloat64(),
-				UnrealizedPLPC:  pos.UnrealizedIntradayPLPC.InexactFloat64(),
+				UnrealizedPLPC:  pos.UnrealizedPLPC.InexactFloat64(),
 				CurrentPrice:    pos.CurrentPrice.InexactFloat64(),
 				Side:            string(pos.Side),
 			}, nil
@@ -1217,7 +1217,7 @@ func (s *AlpacaTradingService) ListOptionsPositions(ctx context.Context) ([]*int
 				MarketValue:     pos.MarketValue.InexactFloat64(),
 				CostBasis:       pos.CostBasis.InexactFloat64(),
 				UnrealizedPL:    pos.UnrealizedPL.InexactFloat64(),
-				UnrealizedPLPC:  pos.UnrealizedIntradayPLPC.InexactFloat64(),
+				UnrealizedPLPC:  pos.UnrealizedPLPC.InexactFloat64(),
 				CurrentPrice:    pos.CurrentPrice.InexactFloat64(),
 				Side:            string(pos.Side),
 			})

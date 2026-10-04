@@ -88,8 +88,12 @@ func DoProviderRequest(ctx context.Context, client *http.Client, endpoint string
 			}
 			return nil, 0, &ProviderError{Endpoint: providerEndpoint(endpoint), Category: "transport", Attempts: attempt, Retryable: safe, Err: doErr}
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		const maxProviderBody = 2 << 20
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxProviderBody+1))
 		resp.Body.Close()
+		if len(body) > maxProviderBody {
+			return nil, resp.StatusCode, &ProviderError{Endpoint: providerEndpoint(endpoint), Status: resp.StatusCode, Category: "body_too_large", Attempts: attempt}
+		}
 		if readErr != nil {
 			return nil, resp.StatusCode, &ProviderError{Endpoint: providerEndpoint(endpoint), Status: resp.StatusCode, Category: "read", Attempts: attempt, Retryable: true, Err: readErr}
 		}

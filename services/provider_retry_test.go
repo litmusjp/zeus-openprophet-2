@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,4 +66,29 @@ func AsProviderError(err error, target **ProviderError) bool {
 		return true
 	}
 	return false
+}
+
+func TestDoProviderRequestRejectsOversizeWithoutRetry(t *testing.T) {
+	for _, size := range []int{2 << 20, (2 << 20) + 1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			var calls atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				_, _ = w.Write([]byte(strings.Repeat("x", size)))
+			}))
+			defer ts.Close()
+			body, _, err := DoProviderRequest(context.Background(), ts.Client(), ts.URL+"/read", true, func(ctx context.Context) (*http.Request, error) {
+				return http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/read", nil)
+			})
+			if size == 2<<20 && (err != nil || len(body) != size) {
+				t.Fatalf("exact limit: len=%d err=%v", len(body), err)
+			}
+			if size > 2<<20 && (err == nil || !strings.Contains(err.Error(), "body_too_large") || len(body) != 0) {
+				t.Fatalf("oversize: len=%d err=%v", len(body), err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("calls=%d", calls.Load())
+			}
+		})
+	}
 }

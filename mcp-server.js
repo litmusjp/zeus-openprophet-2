@@ -239,7 +239,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             status: {
               type: 'string',
-              description: 'Filter by existing order status; defaults to all.',
+              description: 'Defaults to all. active/open aggregate broker working statuses (new, accepted, pending and partial); planned intents and uncertain submissions remain separate application records. complete=false means broker history is unavailable.',
               enum: ['all', 'active', 'planned_for_next_session', 'accepted', 'new', 'pending_new', 'open', 'filled', 'partially_filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done_for_day', 'replaced', 'submit_failed', 'submission_uncertain', 'risk_blocked', 'rejected_before_submission', 'planned_intent_not_broker_visible', 'market_closed', 'unavailable'],
             },
           },
@@ -856,13 +856,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place a regular-session options order. For opening/increasing exposure, the server obtains a fresh AlphaDesk assessment immediately before broker submission; AlphaDesk UNAVAILABLE or FAIL is fail-closed. The broker clock is checked immediately before submission; market_closed means wait and is saved as planned_for_next_session, an application intent rather than a broker order; unavailable means fail closed. Accepted/new/open acknowledge only, and positive filled quantity is required for execution confirmation.',
+        description: 'Place one single-leg OCC options order. Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. AlphaDesk assessment is options-only: provider-owned nullable scores/features, PASS is necessary where enabled but never execution authorization, and UNAVAILABLE (including missing, stale, closed-market or provider evidence) blocks opening. The broker clock is checked before submission; market_closed creates a local planned intent, not a broker order. Accepted/new/open acknowledge only; positive filled quantity confirms execution.',
         inputSchema: {
           type: 'object',
           properties: {
             client_order_id: {
               type: 'string',
-              description: 'Stable client order ID returned for a planned/failed intent. Include it only when retrying that exact persisted intent.',
+              description: 'Generate a stable client_order_id for every NEW intent. Reuse it with immutable fields ONLY for an eligible persisted planned retry after reconciliation; uncertain submission must never be blindly retried.',
             },
             symbol: {
               type: 'string',
@@ -909,7 +909,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             market_scanner_features: {
               type: 'object',
-              description: 'Scanner features for the exact trade; required by AlphaDesk when the hard gate is enabled.',
+              description: 'Provider-owned scanner features for the exact trade, if available; do not invent values or turn a missing score into a zero score.',
             },
           },
           required: ['client_order_id', 'symbol', 'underlying', 'quantity', 'side', 'position_intent', 'order_type'],

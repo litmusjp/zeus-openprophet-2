@@ -20,45 +20,45 @@ type ActivityLogger struct {
 
 // DailyActivityLog represents a day's worth of trading activity
 type DailyActivityLog struct {
-	Date              string              `json:"date"`
-	SessionStart      time.Time           `json:"session_start"`
-	SessionEnd        time.Time           `json:"session_end,omitempty"`
-	Summary           SessionSummary      `json:"summary"`
-	Activities        []Activity          `json:"activities"`
-	PositionsOpened   []PositionActivity  `json:"positions_opened"`
-	PositionsClosed   []PositionActivity  `json:"positions_closed"`
+	Date               string             `json:"date"`
+	SessionStart       time.Time          `json:"session_start"`
+	SessionEnd         time.Time          `json:"session_end,omitempty"`
+	Summary            SessionSummary     `json:"summary"`
+	Activities         []Activity         `json:"activities"`
+	PositionsOpened    []PositionActivity `json:"positions_opened"`
+	PositionsClosed    []PositionActivity `json:"positions_closed"`
 	MarketIntelligence []IntelligenceNote `json:"market_intelligence"`
-	Decisions         []DecisionLog       `json:"decisions"`
+	Decisions          []DecisionLog      `json:"decisions"`
 }
 
 // SessionSummary provides high-level stats for the session
 type SessionSummary struct {
-	TotalTrades       int     `json:"total_trades"`
-	PositionsOpened   int     `json:"positions_opened"`
-	PositionsClosed   int     `json:"positions_closed"`
-	WinningTrades     int     `json:"winning_trades"`
-	LosingTrades      int     `json:"losing_trades"`
-	TotalPnL          float64 `json:"total_pnl"`
-	TotalPnLPercent   float64 `json:"total_pnl_percent"`
-	LargestWin        float64 `json:"largest_win"`
-	LargestLoss       float64 `json:"largest_loss"`
-	StartingCapital   float64 `json:"starting_capital"`
-	EndingCapital     float64 `json:"ending_capital"`
-	CapitalDeployed   float64 `json:"capital_deployed"`
-	ActivePositions   int     `json:"active_positions"`
-	StocksAnalyzed    int     `json:"stocks_analyzed"`
-	NewsArticlesRead  int     `json:"news_articles_read"`
-	WebSearches       int     `json:"web_searches"`
+	TotalTrades      int     `json:"total_trades"`
+	PositionsOpened  int     `json:"positions_opened"`
+	PositionsClosed  int     `json:"positions_closed"`
+	WinningTrades    int     `json:"winning_trades"`
+	LosingTrades     int     `json:"losing_trades"`
+	TotalPnL         float64 `json:"total_pnl"`
+	TotalPnLPercent  float64 `json:"total_pnl_percent"`
+	LargestWin       float64 `json:"largest_win"`
+	LargestLoss      float64 `json:"largest_loss"`
+	StartingCapital  float64 `json:"starting_capital"`
+	EndingCapital    float64 `json:"ending_capital"`
+	CapitalDeployed  float64 `json:"capital_deployed"`
+	ActivePositions  int     `json:"active_positions"`
+	StocksAnalyzed   int     `json:"stocks_analyzed"`
+	NewsArticlesRead int     `json:"news_articles_read"`
+	WebSearches      int     `json:"web_searches"`
 }
 
 // Activity represents a single action taken by the AI
 type Activity struct {
-	Timestamp   time.Time              `json:"timestamp"`
-	Type        string                 `json:"type"` // POSITION_OPENED, POSITION_CLOSED, ANALYSIS, INTELLIGENCE, DECISION
-	Action      string                 `json:"action"`
-	Symbol      string                 `json:"symbol,omitempty"`
-	Details     map[string]interface{} `json:"details"`
-	Reasoning   string                 `json:"reasoning,omitempty"`
+	Timestamp time.Time              `json:"timestamp"`
+	Type      string                 `json:"type"` // POSITION_OPENED, POSITION_CLOSED, ANALYSIS, INTELLIGENCE, DECISION
+	Action    string                 `json:"action"`
+	Symbol    string                 `json:"symbol,omitempty"`
+	Details   map[string]interface{} `json:"details"`
+	Reasoning string                 `json:"reasoning,omitempty"`
 }
 
 // PositionActivity represents opening or closing a position
@@ -91,12 +91,12 @@ type IntelligenceNote struct {
 
 // DecisionLog represents a trading decision (buy, sell, hold, pass)
 type DecisionLog struct {
-	Timestamp   time.Time              `json:"timestamp"`
-	Action      string                 `json:"action"` // BUY, SELL, HOLD, PASS
-	Symbol      string                 `json:"symbol"`
-	Reasoning   string                 `json:"reasoning"`
-	Conviction  int                    `json:"conviction"`
-	MarketData  map[string]interface{} `json:"market_data,omitempty"`
+	Timestamp  time.Time              `json:"timestamp"`
+	Action     string                 `json:"action"` // BUY, SELL, HOLD, PASS
+	Symbol     string                 `json:"symbol"`
+	Reasoning  string                 `json:"reasoning"`
+	Conviction int                    `json:"conviction"`
+	MarketData map[string]interface{} `json:"market_data,omitempty"`
 }
 
 // NewActivityLogger creates a new activity logger
@@ -125,11 +125,11 @@ func (al *ActivityLogger) StartSession(ctx context.Context, startingCapital floa
 		Summary: SessionSummary{
 			StartingCapital: startingCapital,
 		},
-		Activities:        make([]Activity, 0),
-		PositionsOpened:   make([]PositionActivity, 0),
-		PositionsClosed:   make([]PositionActivity, 0),
+		Activities:         make([]Activity, 0),
+		PositionsOpened:    make([]PositionActivity, 0),
+		PositionsClosed:    make([]PositionActivity, 0),
 		MarketIntelligence: make([]IntelligenceNote, 0),
-		Decisions:         make([]DecisionLog, 0),
+		Decisions:          make([]DecisionLog, 0),
 	}
 
 	al.logger.WithFields(logrus.Fields{

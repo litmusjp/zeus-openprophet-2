@@ -102,6 +102,7 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     ...tradingPolicyEnvironment(permissions),
     ALPHADESK_ENABLED: alphaDesk?.enabled ? 'true' : 'false',
     ALPHADESK_SIGNAL_QUALITY_ENABLED: baseEnv?.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true' && alphaDesk?.enabled ? 'true' : 'false',
+    ALPHADESK_EXECUTION_MODE: baseEnv?.ALPHADESK_EXECUTION_MODE || 'ACCOUNT_VERIFIED',
     ALPHADESK_URL: alphaDesk?.url || '',
     ALPHADESK_API_KEY: alphaDesk?.apiKey || '',
   };

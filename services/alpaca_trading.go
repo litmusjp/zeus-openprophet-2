@@ -860,7 +860,18 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	}
 	// This is the authorization boundary: fetch and validate fresh server-side
 	// evidence after all local checks and immediately before broker submission.
+	if strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil {
+		if err := validateAlphaDeskExecutionMode(s.alphaDesk.ExecutionMode); err != nil {
+			return nil, err
+		}
+		if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" && !s.alphaDesk.Enabled {
+			return nil, &AlphaDeskConfigurationError{Reason: "AlphaDesk must be enabled for OP2 signal execution mode"}
+		}
+	}
 	if strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil && s.alphaDesk.Enabled {
+		if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" && !s.alphaDesk.SignalQualityEnabled {
+			return nil, &AlphaDeskConfigurationError{Reason: "AlphaDesk signal quality is required for OP2 execution mode"}
+		}
 		if err := s.enrichOptionsAssessment(ctx, order); err != nil {
 			return nil, err
 		}
@@ -874,20 +885,30 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 			}
 			order.SignalQualityAssessment = signal
 		}
-		audit := order.AssessmentAuditSink
-		if order.SignalQualityAssessment != nil && audit != nil {
-			signal := order.SignalQualityAssessment
-			audit = func(assessment *interfaces.AlphaDeskAssessment) error {
-				assessment.SignalQualityAssessment = signal
-				return order.AssessmentAuditSink(assessment)
+		if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" {
+			if order.AssessmentAuditSink == nil {
+				return nil, &AlphaDeskUnavailableError{Reason: "AlphaDesk assessment audit is unavailable"}
 			}
+			if err := order.AssessmentAuditSink(order.SignalQualityAssessment); err != nil {
+				return nil, fmt.Errorf("persist AlphaDesk assessment: %w", err)
+			}
+			order.AlphaDeskAssessment = order.SignalQualityAssessment
+		} else {
+			audit := order.AssessmentAuditSink
+			if order.SignalQualityAssessment != nil && audit != nil {
+				signal := order.SignalQualityAssessment
+				audit = func(assessment *interfaces.AlphaDeskAssessment) error {
+					assessment.SignalQualityAssessment = signal
+					return order.AssessmentAuditSink(assessment)
+				}
+			}
+			assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, audit)
+			if err != nil {
+				return nil, err
+			}
+			assessment.SignalQualityAssessment = order.SignalQualityAssessment
+			order.AlphaDeskAssessment = assessment
 		}
-		assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, audit)
-		if err != nil {
-			return nil, err
-		}
-		assessment.SignalQualityAssessment = order.SignalQualityAssessment
-		order.AlphaDeskAssessment = assessment
 	}
 
 	s.logger.WithFields(logrus.Fields{

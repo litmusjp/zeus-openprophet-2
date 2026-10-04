@@ -118,6 +118,21 @@ func TestAlphaDeskSignalQualityUsesScopeAndEchoedPaperIdentity(t *testing.T) {
 	}
 }
 
+func TestAlphaDeskExecutionModeRequiresSeparateDeploymentOptIn(t *testing.T) {
+	t.Setenv("ALPHADESK_SIGNAL_QUALITY_ENABLED", "true")
+	t.Setenv("ALPHADESK_EXECUTION_MODE", "")
+	if got := NewAlphaDeskClientFromEnv().ExecutionMode; got != "ACCOUNT_VERIFIED" {
+		t.Fatalf("signal flag changed execution mode: %q", got)
+	}
+	t.Setenv("ALPHADESK_EXECUTION_MODE", "SIGNAL_QUALITY_OP2")
+	if got := NewAlphaDeskClientFromEnv().ExecutionMode; got != "SIGNAL_QUALITY_OP2" {
+		t.Fatalf("explicit mode ignored: %q", got)
+	}
+	if err := validateAlphaDeskExecutionMode("typo"); err == nil {
+		t.Fatal("unknown execution mode accepted")
+	}
+}
+
 func TestValidateAlphaDeskSignalQualityRequiresExactContract(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	identity := models.DurableIdentity{BrokerAccountID: "l1-account", SandboxID: "l2-sandbox", PaperLive: "paper"}

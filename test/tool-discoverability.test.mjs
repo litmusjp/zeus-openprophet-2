@@ -19,13 +19,12 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   });
 
   assert.match(prompt, /prophet_assess_options_strategy/);
-  assert.match(prompt, /before opening or increasing options exposure/i);
-  assert.match(prompt, /exact proposed trade/);
-  assert.match(prompt, /PASS\/FAIL\/unavailable result and signal score/);
-  assert.match(prompt, /assessment-only and is not broker authorization/);
-  assert.match(prompt, /independently reassesses immediately before broker submission/);
-  assert.match(prompt, /Client-supplied or replayed assessments do not authorize execution/);
-  assert.match(prompt, /AlphaDesk PASS alone never authorizes an order/);
+  assert.match(prompt, /before opening or increasing exposure/i);
+  assert.match(prompt, /for the exact proposal/);
+  assert.match(prompt, /Decision is PASS, FAIL or UNAVAILABLE/);
+  assert.match(prompt, /signal scores and scanner features are nullable provider-owned evidence/);
+  assert.match(prompt, /PASS is assessment-only, never account permission or broker authorization/);
+  assert.match(prompt, /independently refreshes evidence and reassesses at the final broker boundary/);
 });
 
 test('generated system prompt clarifies zero maxOrderValue semantics', async () => {
@@ -50,8 +49,8 @@ test('generated system prompt contains the approved evidence and privacy clarifi
   });
 
   assert.match(prompt, /heartbeat interval comes from heartbeat context|heartbeat context.*guardrails/i);
-  assert.match(prompt, /sandbox AlphaDesk plugin\/config.*enabled/);
-  assert.match(prompt, /broker boundary independently refreshes evidence and fails closed/);
+  assert.match(prompt, /When its gate is enabled/);
+  assert.match(prompt, /final broker boundary.*OP2 paper, identity, permission, market, risk and reconciliation checks/);
   assert.match(prompt, /stale MarketWatch.*informational only.*never current market evidence/i);
   assert.match(prompt, /daily loss.*broker account.*not from a dedicated status tool/i);
   assert.match(prompt, /find_similar_setups.*advisory.*materially relevant matches/i);

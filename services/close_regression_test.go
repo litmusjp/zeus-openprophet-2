@@ -16,7 +16,9 @@ func TestCloseManagedPositionKeepsAcceptedOrderUnresolved(t *testing.T) {
 	pm.positions[pos.ID] = pos
 	pos.DurableIdentity = storage.DurableIdentity()
 	capability, err := NewPositionCloseCapability("operator-secret", storage.DurableIdentity())
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := pm.CloseManagedPositionWithCapability(context.Background(), pos.ID, capability); err == nil {
 		t.Fatal("expected an accepted but unfilled exit to remain unresolved")
 	}

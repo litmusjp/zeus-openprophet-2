@@ -21,16 +21,16 @@ func NewTechnicalAnalysisService(dataService interfaces.DataService) *TechnicalA
 
 // AnalysisResult contains comprehensive technical analysis
 type AnalysisResult struct {
-	Symbol      string           `json:"symbol"`
+	Symbol       string          `json:"symbol"`
 	CurrentPrice float64         `json:"current_price"`
-	SMA20       float64          `json:"sma_20,omitempty"`
-	SMA50       float64          `json:"sma_50,omitempty"`
-	RSI         float64          `json:"rsi,omitempty"`
-	MACD        *MACDResult      `json:"macd,omitempty"`
-	Momentum    *MomentumResult  `json:"momentum,omitempty"`
-	Volume      *VolumeAnalysis  `json:"volume,omitempty"`
-	Signal      string           `json:"signal"` // "BUY", "SELL", "HOLD"
-	Confidence  float64          `json:"confidence"` // 0-100
+	SMA20        float64         `json:"sma_20,omitempty"`
+	SMA50        float64         `json:"sma_50,omitempty"`
+	RSI          float64         `json:"rsi,omitempty"`
+	MACD         *MACDResult     `json:"macd,omitempty"`
+	Momentum     *MomentumResult `json:"momentum,omitempty"`
+	Volume       *VolumeAnalysis `json:"volume,omitempty"`
+	Signal       string          `json:"signal"`     // "BUY", "SELL", "HOLD"
+	Confidence   float64         `json:"confidence"` // 0-100
 }
 
 // MACDResult contains MACD indicator values
@@ -50,10 +50,10 @@ type MomentumResult struct {
 
 // VolumeAnalysis contains volume-based indicators
 type VolumeAnalysis struct {
-	Current      int64   `json:"current"`
-	Average      float64 `json:"average"`
-	Ratio        float64 `json:"ratio"` // current / average
-	Trend        string  `json:"trend"` // "increasing", "decreasing", "stable"
+	Current int64   `json:"current"`
+	Average float64 `json:"average"`
+	Ratio   float64 `json:"ratio"` // current / average
+	Trend   string  `json:"trend"` // "increasing", "decreasing", "stable"
 }
 
 // CalculateSMA calculates Simple Moving Average

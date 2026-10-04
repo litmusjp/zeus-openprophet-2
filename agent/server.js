@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import axios from 'axios';
+import { testAlphaDeskAssessmentCapability } from './alphadesk-connection.js';
 
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
@@ -1698,13 +1699,14 @@ app.put('/api/plugins/:name', (req, res, next) => {
 
 app.post('/api/plugins/alphadesk/test', operatorAuthMiddleware, async (req, res) => {
   try {
-    const sandboxId = req.body?.sandboxId || req.query.sandboxId;
-    const plugin = sandboxId ? getPluginForSandbox(sandboxId, 'alphadesk') : getPlugin('alphadesk');
-    if (!plugin?.url) return res.status(400).json({ error: 'No AlphaDesk URL configured' });
+    const sandboxId = req.body?.sandboxId;
+    if (!sandboxId || !getSandbox(sandboxId)) return res.status(400).json({ ok: false, status: 'schema', message: 'Select a valid sandbox' });
+    const plugin = getPluginForSandbox(sandboxId, 'alphadesk');
+    if (!plugin?.url) return res.status(400).json({ ok: false, status: 'connection', message: 'No saved AlphaDesk URL' });
     const url = validateAlphaDeskUrl(plugin.url);
-    await axios.get(url, { timeout: 5000, validateStatus: status => status < 500 });
-    res.json({ ok: true });
-  } catch (err) { res.status(502).json({ error: 'AlphaDesk connection failed' }); }
+    const result = await testAlphaDeskAssessmentCapability(url, plugin.apiKey);
+    res.status(result.ok ? 200 : 502).json(result);
+  } catch { res.status(502).json({ ok: false, status: 'connection', message: 'AlphaDesk connection failed' }); }
 });
 
 app.post('/api/plugins/slack/test', async (req, res) => {

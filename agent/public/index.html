@@ -1196,6 +1196,7 @@ let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases
 const authToken = new URLSearchParams(window.location.search).get('token') || '';
 let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
+const sandboxSchedule = {}, sandboxRuntime = {};
 const terminal = document.getElementById('terminal');
 
 terminal.addEventListener('scroll', () => {
@@ -1245,11 +1246,13 @@ window.fetch = (resource, init) => {
 
 async function changeSandboxSelection(value) {
   selectedSandboxId = value || null;
+  showSelectedSandboxRuntime();
   await refreshSelectedSandboxView();
 }
 
 function followActiveSandbox() {
   selectedSandboxId = null;
+  showSelectedSandboxRuntime();
   const el = document.getElementById('sandbox-selector');
   if (el) el.value = '';
   refreshSelectedSandboxView();
@@ -1284,6 +1287,7 @@ async function refreshSelectedSandboxConfig() {
     const phaseData = await fetch('/api/heartbeat/phases')
       .then(phaseResp => phaseResp.ok ? phaseResp.json() : {})
       .catch(() => ({}));
+    if (sid !== getEffectiveSandboxId()) return;
     sandboxScoped = {
       sandbox: data.sandbox || null,
       agent: data.agent || null,
@@ -1301,7 +1305,7 @@ async function refreshSelectedSandboxConfig() {
     renderSlack(); renderAlphaDesk();
     renderPromptPreview();
   } catch (e) {
-    log('Sandbox config refresh failed: ' + e.message, 'error');
+    if (sid === getEffectiveSandboxId()) log('Sandbox config refresh failed: ' + e.message, 'error');
   }
 }
 
@@ -1403,19 +1407,37 @@ function formatSandboxPrefix(data) {
 let _eventSource = null;
 let _sseReconnectTimer = null;
 let _sseReconnectAttempts = 0;
+function showSelectedSandboxRuntime() {
+  const sid = getEffectiveSandboxId(), state = sandboxRuntime[sid];
+  const schedule = sandboxSchedule[sid];
+  nextBeatTime = schedule ? schedule.nextBeatTime : (state?.nextBeatTime ? new Date(state.nextBeatTime) : null);
+  heartbeatSeconds = schedule?.seconds || state?.heartbeatSeconds || 0;
+  _set('hb-next', nextBeatTime ? Math.max(0, Math.ceil((nextBeatTime - Date.now()) / 1000)) + 's' : '--');
+  if (state) updateState(state);
+  else {
+    updateOperatorCard({ sandboxId: sid });
+    updateButtons('loading');
+    _set('operator-next-heartbeat', '--');
+  }
+  startProgress();
+}
 function connectSSE() {
   if (_eventSource) { try { _eventSource.close(); } catch {} }
   if (_sseReconnectTimer) { clearTimeout(_sseReconnectTimer); _sseReconnectTimer = null; }
   const es = new EventSource(withAuthUrl('/api/events'));
   _eventSource = es;
-  es.onopen = () => { 
+  es.onopen = () => {
     _sseReconnectAttempts = 0;
     document.getElementById('sse-status').textContent = 'ok'; 
-    document.getElementById('sse-status').style.color = 'var(--success)'; 
+    document.getElementById('sse-status').style.color = 'var(--success)';
+    checkHealth(); refreshSelectedSandboxConfig(); refreshPortfolio();
   };
-  es.onerror = () => { 
+  es.onerror = () => {
+    if (_eventSource !== es) return;
     document.getElementById('sse-status').textContent = 'reconnecting'; 
-    document.getElementById('sse-status').style.color = 'var(--warning)'; 
+    document.getElementById('sse-status').style.color = 'var(--warning)';
+    nextBeatTime = null; _set('hb-next', '--'); _set('operator-next-heartbeat', '--');
+    _set('status-text', 'Reconnecting (state stale)');
     try { es.close(); } catch {}
     _sseReconnectAttempts++;
     const delay = Math.min(1000 * Math.pow(2, _sseReconnectAttempts), 30000);
@@ -1426,8 +1448,7 @@ function connectSSE() {
   es.addEventListener('config', e => { config = JSON.parse(e.data); renderAll(); refreshSelectedSandboxConfig(); });
   es.addEventListener('status', e => {
     const d = JSON.parse(e.data);
-    if (selectedSandboxId && d.sandboxId !== selectedSandboxId) return;
-    if (!selectedSandboxId || !d.sandboxId || d.sandboxId === getEffectiveSandboxId()) updateButtons(d.status);
+    if (d.sandboxId === getEffectiveSandboxId()) updateButtons(d.status);
   });
   es.addEventListener('agent_log', e => {
     const d = JSON.parse(e.data);
@@ -1488,12 +1509,14 @@ function connectSSE() {
   });
   es.addEventListener('schedule', e => {
     const d = JSON.parse(e.data);
-    const sid = d.sandboxId || getEffectiveSandboxId();
+    const sid = d.sandboxId;
+    if (!sid) return;
+    sandboxSchedule[sid] = { nextBeatTime: d.nextBeat ? new Date(d.nextBeat) : null, seconds: d.seconds };
     const hbEl = document.querySelector(`[data-stat="${sid}-hb-interval"]`);
     if (hbEl) hbEl.textContent = fmtInt(d.seconds);
     if (selectedSandboxId && d.sandboxId !== selectedSandboxId) return;
     if (d.sandboxId && d.sandboxId !== getEffectiveSandboxId()) return;
-    nextBeatTime = new Date(d.nextBeat); heartbeatSeconds = d.seconds;
+    nextBeatTime = sandboxSchedule[sid].nextBeatTime; heartbeatSeconds = d.seconds;
     _set('hb-interval', fmtInt(d.seconds));
     updatePhase(d.phase); startProgress();
   });
@@ -1539,6 +1562,10 @@ function connectSSE() {
 
 function _set(id, val) { const e = document.getElementById(id); if(e) e.textContent = val; }
 function _setData(key, val) { const e = document.querySelector(`[data-stat="${key}"]`); if(e) e.textContent = val; }
+function updateInitialStateLabel(sid, state) {
+  const label = sandboxTerminals[sid]?.termEl?.querySelector('[data-initial-state]');
+  if (label) label.textContent = sandboxLabelById(sid) + ' ' + (state.running ? (state.paused ? 'paused.' : 'running.') : 'stopped.');
+}
 
 function updateOperatorCard(s) {
   const sid = s?.sandboxId || getEffectiveSandboxId();
@@ -1555,7 +1582,7 @@ function updateOperatorCard(s) {
   _set('operator-model-name', (s.activeModel || sandbox.agent?.model || '--').replace('opencode/', ''));
   _set('operator-phase', labels[s.phase] || s.phase || '--');
   _set('operator-heartbeat', s.heartbeatSeconds ? fmtInt(s.heartbeatSeconds) : '--');
-  const next = s.nextBeat ? new Date(s.nextBeat) : nextBeatTime;
+  const next = s.nextBeatTime ? new Date(s.nextBeatTime) : (sandboxSchedule[sid]?.nextBeatTime || null);
   _set('operator-next-heartbeat', next instanceof Date && !Number.isNaN(next.getTime()) ? Math.max(0, Math.ceil((next - Date.now()) / 1000)) + 's' : '--');
   const attention = document.getElementById('operator-attention');
   const count = Number(s.stats?.errors || 0);
@@ -1571,7 +1598,11 @@ function noteBrokerAction(d) {
 }
 
 function updateState(s) {
-  const sid = s?.sandboxId || getEffectiveSandboxId();
+  const sid = s?.sandboxId;
+  if (!sid) return;
+  sandboxRuntime[sid] = s;
+  updateInitialStateLabel(sid, s);
+  if ('nextBeatTime' in s) sandboxSchedule[sid] = { nextBeatTime: s.nextBeatTime ? new Date(s.nextBeatTime) : null, seconds: s.heartbeatSeconds };
   
   // Update per-sandbox sidebar stats
   if (sid) {
@@ -1585,6 +1616,8 @@ function updateState(s) {
   
   if (selectedSandboxId && s?.sandboxId !== selectedSandboxId) return;
   if (s?.sandboxId && s.sandboxId !== getEffectiveSandboxId()) return;
+  nextBeatTime = sandboxSchedule[sid]?.nextBeatTime || null; heartbeatSeconds = s.heartbeatSeconds || 0; startProgress();
+  if (!nextBeatTime) { _set('hb-next', '--'); _set('operator-next-heartbeat', '--'); }
   _set('hb-count', s.beatCount);
   _set('stat-beats', s.stats?.totalBeats || 0);
   _set('stat-tools', s.stats?.toolCalls || 0);
@@ -1605,6 +1638,8 @@ function updateButtons(status) {
   const text = document.getElementById('status-text');
   dot.className = 'status-dot';
   switch(status) {
+    case 'loading':
+      text.textContent = 'Checking state'; break;
     case 'started': case 'resumed':
       document.getElementById('btn-pause').style.display = '';
       document.getElementById('btn-stop').style.display = '';
@@ -1915,6 +1950,7 @@ async function refreshPortfolio() {
     const [a, p] = await Promise.all([fetch('/api/portfolio/account' + qs), fetch('/api/portfolio/positions' + qs)]);
     if(a.ok) {
       const acc = await a.json();
+      if (sid !== getEffectiveSandboxId()) return;
       const pv = '$' + Number(acc.PortfolioValue||acc.portfolio_value||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const cv = '$' + Number(acc.Cash||acc.cash||0).toLocaleString('en-US',{minimumFractionDigits:2});
       const bv = '$' + Number(acc.BuyingPower||acc.buying_power||0).toLocaleString('en-US',{minimumFractionDigits:2});
@@ -1940,10 +1976,11 @@ async function refreshPortfolio() {
     }
     if(p.ok) {
       const positions = await p.json();
+      if (sid !== getEffectiveSandboxId()) return;
       const arr = positions.positions || positions || [];
       const html = arr.length ? arr.map(pos => {
         const sym = pos.Symbol||pos.symbol||'??', pnl = Number(pos.UnrealizedPL||pos.unrealized_pl||0);
-        const pct = (Number(pos.UnrealizedPLPercent||pos.unrealized_plpc||0)*100).toFixed(1);
+        const pct = (Number(pos.UnrealizedPLPC ?? pos.unrealized_plpc ?? pos.UnrealizedPLPercent ?? 0)*100).toFixed(1);
         const c = pnl>=0? 'var(--success)' : 'var(--error)';
         return '<div class="card"><div style="display:flex;justify-content:space-between"><span class="symbol">'+sym+'</span><span class="pnl" style="color:'+c+'">'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+pct+'%)</span></div><div style="color:var(--ink-faint);font-size:11px;margin-top:3px">Qty: '+(pos.Qty||pos.qty)+' | Avg: $'+Number(pos.AvgEntryPrice||pos.avg_entry_price||0).toFixed(2)+'</div></div>';
       }).join('') : '<div class="no-data">No open positions</div>';
@@ -1954,10 +1991,10 @@ async function refreshPortfolio() {
         if (posEl) posEl.innerHTML = html;
       }
     } else {
-      clearPortfolioView(sid);
+      if (sid === getEffectiveSandboxId()) clearPortfolioView(sid);
     }
   } catch {
-    clearPortfolioView(sid);
+    if (sid === getEffectiveSandboxId()) clearPortfolioView(sid);
   }
 }
 
@@ -2065,11 +2102,11 @@ function renderTradeChart() {
   const make=(tag,attrs={})=>{const n=document.createElementNS(ns,tag);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));return n;};
   [top,zero,H-bottom].forEach(v=>svg.appendChild(make('line',{x1:left,y1:v,x2:W-right,y2:v,class:'chart-grid'})));
   const label=(x,y,text,anchor='end')=>{const n=make('text',{x,y,'text-anchor':anchor,class:'chart-label'});n.textContent=text;svg.appendChild(n);};
-  label(left-8,top+4,'+'+fmtPnl(maxAbs)); label(left-8,zero+4,'$0'); label(left-8,H-bottom+4,fmtPnl(-maxAbs)); svg.appendChild(make('line',{x1:left,y1:zero,x2:W-right,y2:zero,class:'chart-axis'}));
+  label(left-8,top+4,fmtPnl(maxAbs)); label(left-8,zero+4,'$0'); label(left-8,H-bottom+4,fmtPnl(-maxAbs)); svg.appendChild(make('line',{x1:left,y1:zero,x2:W-right,y2:zero,class:'chart-axis'}));
   const color=a=>{let h=0; for(const c of String(a||'')) h=(h*31+c.charCodeAt(0))%360; return `hsl(${h},72%,52%)`;};
-  const bar=(value,x,width,account,tip,xText)=>{const yy=value>=0?y(value):zero,h=Math.max(2,Math.abs(y(value)-zero)),n=make('rect',{x,y:yy,width,height:h,rx:2,class:'trade-bar',fill:color(account),tabindex:'0','aria-label':tip}); n.addEventListener('mouseenter',e=>showTradeTooltip(e,tip)); n.addEventListener('focus',e=>showTradeTooltip(e,tip)); n.addEventListener('mouseleave',hideTradeTooltip); n.addEventListener('blur',hideTradeTooltip); svg.appendChild(n); label(Number(x)+Number(width)/2,H-bottom+16,xText,'middle');};
+  const bar=(value,x,width,account,tip,xText)=>{const yy=value>=0?y(value):zero,h=Math.max(2,Math.abs(y(value)-zero)),n=make('rect',{x,y:yy,width,height:h,rx:2,class:'trade-bar',fill:color(account),tabindex:'0','aria-label':tip}); n.addEventListener('mouseenter',e=>showTradeTooltip(e,tip)); n.addEventListener('focus',e=>showTradeTooltip(e,tip)); n.addEventListener('mouseleave',hideTradeTooltip); n.addEventListener('blur',hideTradeTooltip); svg.appendChild(n); if(xText) label(Number(x)+Number(width)/2,H-bottom+16,xText,'middle');};
   if(mode==='cumulative') { const accounts=[...selected].filter(a=>data.some(t=>(t.accountId || t.accountName)===a)),slot=plotW/Math.max(1,accounts.length),bw=Math.min(130,slot*.62); accounts.forEach((a,i)=>{const v=data.filter(t=>(t.accountId || t.accountName)===a).reduce((s,t)=>s+Number(t.pnl||0),0);const labelName=data.find(t=>(t.accountId || t.accountName)===a)?.accountName || a;bar(v,left+i*slot+(slot-bw)/2,bw,a,`${labelName}\nCumulative realized P/L: ${fmtPnl(v)}`,labelName);}); }
-  else {const gap=Math.max(2,Math.min(10,plotW/data.length*.2)),bw=Math.max(4,plotW/data.length-gap),step=plotW/data.length; data.forEach((t,i)=>{const stamp=new Date(t.timestamp||t.exitTime||t.entryTime),v=Number(t.pnl),x=left+i*step+gap/2,xt=stamp.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});bar(v,x,bw,t.accountId || t.accountName,`${t.accountName||'Unknown account'} / ${t.agentName||'Unassigned'}\n${t.symbol}\n${fmtPnl(v)}\n${stamp.toLocaleString()}`,xt);});}
+  else {const gap=Math.max(2,Math.min(10,plotW/data.length*.2)),bw=Math.max(4,plotW/data.length-gap),step=plotW/data.length,labelEvery=Math.max(1,Math.ceil(data.length/9)); data.forEach((t,i)=>{const stamp=new Date(t.timestamp||t.exitTime||t.entryTime),v=Number(t.pnl),x=left+i*step+gap/2,xt=i%labelEvery===0 || i===data.length-1 ? stamp.toLocaleDateString([], {month:'short',day:'numeric'}) : '';bar(v,x,bw,t.accountId || t.accountName,`${t.accountName||'Unknown account'} / ${t.agentName||'Unassigned'}\n${t.symbol}\n${fmtPnl(v)}\n${stamp.toLocaleString()}`,xt);});}
 }
 function showTradeTooltip(event,text){const tip=document.getElementById('trade-chart-tooltip');if(!tip)return;tip.hidden=false;tip.textContent=text;const r=document.querySelector('.trade-chart-wrap').getBoundingClientRect();tip.style.left=Math.max(4,event.clientX-r.left+8)+'px';tip.style.top=Math.max(4,event.clientY-r.top-70)+'px';}
 
@@ -2234,7 +2271,7 @@ function ensureSandboxTerminal(sandboxId, label) {
     </div>
     <div class="terminal-split">
       <div class="terminal" data-terminal="${sandboxId}">
-        <div class="log-entry info"><span class="time">--:--:--</span>${esc(label)} ready. Press Start to begin.</div>
+        <div class="log-entry info" data-initial-state>${esc(label)} ready. Checking runtime state...</div>
       </div>
       <div class="sidebar">
         <div class="section">
@@ -2305,6 +2342,8 @@ function renderSandboxTabs() {
   const accounts = config.accounts || [];
   
   const currentSid = getEffectiveSandboxId();
+  const account = accounts.find(a => 'sbx_' + a.id === currentSid);
+  _set('topbar-account-label', account?.name || '--');
   
   // Manager tab first
   ensureManagerTerminal();
@@ -2478,6 +2517,7 @@ async function sendManagerMessage() {
 async function switchSandboxTab(sandboxId) {
   // 1. Set selection immediately for UI
   selectedSandboxId = sandboxId || null;
+  showSelectedSandboxRuntime();
   renderSandboxTabs();
   
   // 2. Manager tab - no sandbox state needed
@@ -2493,7 +2533,7 @@ async function switchSandboxTab(sandboxId) {
   
   // 3. Reset start button for sandbox tabs
   const btn = document.getElementById('btn-start');
-  if (btn) { btn.style.display = ''; btn.textContent = 'Start'; btn.disabled = false; }
+  if (btn) { btn.textContent = 'Start'; btn.disabled = false; }
   
   // 4. Fetch fresh state + config + portfolio in parallel
   try {
@@ -2504,15 +2544,15 @@ async function switchSandboxTab(sandboxId) {
     ]);
     if (stateResp.ok) {
       const state = await stateResp.json();
-      if (state.running && !state.paused) updateButtons('started');
-      else if (state.running && state.paused) updateButtons('paused');
-      else updateButtons('stopped');
+      if (sandboxId !== getEffectiveSandboxId()) return;
+      updateState({ ...state, sandboxId });
     } else {
-      updateButtons('stopped');
+      if (sandboxId === getEffectiveSandboxId()) _set('status-text', 'State unavailable');
     }
   } catch {
-    updateButtons('stopped');
+    if (sandboxId === getEffectiveSandboxId()) _set('status-text', 'State unavailable');
   }
+  if (sandboxId !== getEffectiveSandboxId()) return;
   
   renderSandboxTabs();
   renderAccounts();
@@ -2785,6 +2825,7 @@ function renderAgents() {
     const strat = (config.strategies || []).find(s => s.id === a.strategyId);
     const stratName = strat ? strat.name : 'None';
     const modelShort = (a.model || 'default').replace('anthropic/', '').replace('openai/', '').replace('google/', '');
+    const runtimeModel = active ? sandboxRuntime[currentSid]?.activeModel : null;
 
     // Strategy options dropdown
     const stratOptions = (config.strategies || []).map(s => {
@@ -2809,8 +2850,8 @@ function renderAgents() {
       // Pipeline display
       + '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;align-items:center">'
       + '<div style="padding:6px 10px;background:var(--bg-dark);border:1px solid var(--border);border-radius:4px;font-size:11px">'
-      + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--ink-faint);margin-bottom:2px">Model</div>'
-      + '<div style="font-weight:600;color:var(--text)">' + esc(modelShort) + '</div></div>'
+      + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--ink-faint);margin-bottom:2px">' + (runtimeModel ? 'Effective model' : 'Template model') + '</div>'
+      + '<div style="font-weight:600;color:var(--text)">' + esc(runtimeModel ? runtimeModel.replace('opencode/', '') : modelShort) + '</div>' + (runtimeModel && runtimeModel !== a.model ? '<div style="font-size:10px;color:var(--ink-faint)">Template: ' + esc(modelShort) + '</div>' : '') + '</div>'
       + '<span style="color:var(--ink-faint)">&rarr;</span>'
       + '<div style="padding:6px 10px;background:var(--bg-dark);border:1px solid var(--border);border-radius:4px;font-size:11px">'
       + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--ink-faint);margin-bottom:2px">Strategy (Rules)</div>'
@@ -3586,9 +3627,20 @@ async function checkHealth() {
     const r = await fetch('/api/health');
     const d = await r.json();
     window._healthState = d; // Store for renderAccounts
+    for (const item of d.sandboxes || []) {
+      if (item.sandboxId && item.state) {
+        sandboxRuntime[item.sandboxId] = { ...item.state, sandboxId: item.sandboxId };
+        updateInitialStateLabel(item.sandboxId, item.state);
+        if ('nextBeatTime' in item.state) sandboxSchedule[item.sandboxId] = { nextBeatTime: item.state.nextBeatTime ? new Date(item.state.nextBeatTime) : null, seconds: item.state.heartbeatSeconds };
+      }
+    }
     const el = document.getElementById('bot-status');
     const sid = getEffectiveSandboxId();
     const sandboxState = (d.sandboxes || []).find(s => s.sandboxId === sid);
+    if (sandboxState?.state && 'nextBeatTime' in sandboxState.state) {
+      nextBeatTime = sandboxSchedule[sid].nextBeatTime;
+      if (!nextBeatTime) { _set('hb-next', '--'); _set('operator-next-heartbeat', '--'); }
+    }
     const healthy = sandboxState ? sandboxState.goReady : d.trading_bot === 'healthy';
     el.textContent = healthy ? 'ok' : 'off';
     el.style.color = healthy ? 'var(--success)' : 'var(--error)';
@@ -4070,15 +4122,15 @@ async function saveAlphaDeskConfig() {
 }
 async function testAlphaDesk() {
   const el = document.getElementById('alphadesk-test-result');
-  if (!await saveAlphaDeskConfig()) return;
-  el.textContent = 'Testing...'; el.style.color = 'var(--ink-muted)';
+  const sid = getEffectiveSandboxId();
+  if (!sid || sid === '_manager') { el.textContent = 'Select a sandbox'; el.style.color = 'var(--error)'; return; }
+  el.textContent = 'Testing saved settings...'; el.style.color = 'var(--ink-muted)';
   try {
-    const sid = getEffectiveSandboxId();
-    const r = await fetch('/api/plugins/alphadesk/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sid?{sandboxId:sid}:{})});
+    const r = await fetch('/api/plugins/alphadesk/test', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sandboxId:sid})});
     const d = await r.json();
-    if (!r.ok || !d.ok) throw new Error(d.error || 'Connection failed');
-    el.textContent = 'Connection OK'; el.style.color = 'var(--success)';
-  } catch(e) { el.textContent='Test failed: ' + (e.message || 'Connection failed'); el.style.color='var(--error)'; }
+    if (sid !== getEffectiveSandboxId()) return;
+    el.textContent = d.message || 'Connection test failed'; el.style.color = r.ok && d.ok ? 'var(--success)' : 'var(--error)';
+  } catch { if (sid === getEffectiveSandboxId()) { el.textContent='Connection test failed'; el.style.color='var(--error)'; } }
 }
 function stopPolling() {
   _pollIntervals.forEach(id => clearInterval(id));

@@ -15,15 +15,15 @@ test('MCP exposes structured options-chain availability instead of converting ma
 
 test('agent instructions distinguish market closed, provider unavailable, and assessment authorization', () => {
   assert.match(harness, /market_closed.*means wait/);
-  assert.match(harness, /provider_unavailable.*means do not trade/);
-  assert.match(harness, /always one of PASS, FAIL, or UNAVAILABLE/);
-  assert.match(harness, /PASS is never broker authorization/);
+  assert.match(harness, /provider_unavailable.*means fail closed/);
+  assert.match(harness, /Decision is PASS, FAIL or UNAVAILABLE/);
+  assert.match(harness, /PASS is assessment-only, never account permission or broker authorization/);
 });
 
 test('agent contract defines the deterministic first-session and managed-leg workflow', () => {
   assert.match(harness, /get_datetime.*account.*positions.*get_orders/s);
-  assert.match(harness, /unavailable means fail closed/);
-  assert.match(harness, /retry at most once/);
+  assert.match(harness, /means fail closed/);
+  assert.match(harness, /one eligible planned retry/);
   assert.match(harness, /Never retry .*submission_uncertain.*blindly/);
   assert.match(harness, /risk_blocked.*rejected_before_submission.*broker attempts/s);
   assert.match(harness, /exactly one executable leg/);

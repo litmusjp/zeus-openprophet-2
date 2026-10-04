@@ -4,7 +4,7 @@ import test from 'node:test';
 
 const html = fs.readFileSync(new URL('../agent/public/index.html', import.meta.url), 'utf8');
 
-test('AlphaDesk UI saves typed URL and API key before testing persisted config', () => {
+test('AlphaDesk UI tests saved sandbox settings without saving or restarting', () => {
   assert.match(html, /onclick="saveAlphaDeskConfig\(\)">Save AlphaDesk settings/);
   assert.doesNotMatch(html, /id="alphadesk-enabled" onchange="saveAlphaDeskConfig\(\)"/);
 
@@ -18,7 +18,7 @@ test('AlphaDesk UI saves typed URL and API key before testing persisted config',
   const testSource = html.slice(testStart, stopStart);
   assert.match(saveSource, /body\.apiKey = key/);
   assert.match(saveSource, /await fetch\('\/api\/plugins\/alphadesk'/);
-  assert.match(testSource, /if \(!await saveAlphaDeskConfig\(\)\) return;/);
-  assert.ok(testSource.indexOf('await saveAlphaDeskConfig()') < testSource.indexOf("fetch('/api/plugins/alphadesk/test'"));
+  assert.doesNotMatch(testSource, /saveAlphaDeskConfig\(/);
+  assert.match(testSource, /JSON\.stringify\(\{sandboxId:sid\}\)/);
   assert.doesNotMatch(testSource, /apiKey/);
 });

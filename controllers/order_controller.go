@@ -1031,12 +1031,25 @@ func mergeBrokerOrder(local, broker *interfaces.Order) *interfaces.Order {
 }
 
 func orderMatchesStatus(order *interfaces.Order, status string) bool {
-	return status == "" || strings.EqualFold(status, "all") || (order != nil && strings.EqualFold(order.Status, status))
+	if status == "" || strings.EqualFold(status, "all") {
+		return true
+	}
+	if order == nil {
+		return false
+	}
+	if strings.EqualFold(status, "active") || strings.EqualFold(status, "open") {
+		switch strings.ToLower(order.Status) {
+		case "new", "accepted", "pending_new", "partially_filled", "pending_replace", "pending_cancel", "open", "held", "stopped", "calculated", "suspended":
+			return true
+		}
+		return false
+	}
+	return strings.EqualFold(order.Status, status)
 }
 
 func brokerOrderHistoryStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "open":
+	case "open", "active":
 		return "open"
 	case "closed":
 		return "closed"

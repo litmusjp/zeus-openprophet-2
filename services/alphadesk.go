@@ -33,6 +33,7 @@ func derefFloat(value *float64) float64 {
 type AlphaDeskClient struct {
 	Enabled              bool
 	SignalQualityEnabled bool
+	ExecutionMode        string
 	URL                  string
 	APIKey               string
 	HTTP                 *http.Client
@@ -40,7 +41,20 @@ type AlphaDeskClient struct {
 }
 
 func NewAlphaDeskClientFromEnv() *AlphaDeskClient {
-	return &AlphaDeskClient{Enabled: strings.EqualFold(os.Getenv("ALPHADESK_ENABLED"), "true"), SignalQualityEnabled: strings.EqualFold(os.Getenv("ALPHADESK_SIGNAL_QUALITY_ENABLED"), "true"), URL: strings.TrimRight(strings.TrimSpace(os.Getenv("ALPHADESK_URL")), "/"), APIKey: os.Getenv("ALPHADESK_API_KEY"), HTTP: &http.Client{Timeout: 8 * time.Second}, Now: time.Now}
+	mode := strings.TrimSpace(os.Getenv("ALPHADESK_EXECUTION_MODE"))
+	if mode == "" {
+		mode = "ACCOUNT_VERIFIED"
+	}
+	return &AlphaDeskClient{Enabled: strings.EqualFold(os.Getenv("ALPHADESK_ENABLED"), "true"), SignalQualityEnabled: strings.EqualFold(os.Getenv("ALPHADESK_SIGNAL_QUALITY_ENABLED"), "true"), ExecutionMode: mode, URL: strings.TrimRight(strings.TrimSpace(os.Getenv("ALPHADESK_URL")), "/"), APIKey: os.Getenv("ALPHADESK_API_KEY"), HTTP: &http.Client{Timeout: 8 * time.Second}, Now: time.Now}
+}
+
+func validateAlphaDeskExecutionMode(mode string) error {
+	switch mode {
+	case "", "ACCOUNT_VERIFIED", "SIGNAL_QUALITY_OP2":
+		return nil
+	default:
+		return &AlphaDeskConfigurationError{Reason: "unknown AlphaDesk execution mode"}
+	}
 }
 
 func ValidateAlphaDeskURL(raw string) error {

@@ -107,6 +107,70 @@ func TestGetOrdersUsesSafeBrokerStatusAndPreservesCompleteness(t *testing.T) {
 	}
 }
 
+func TestGetOrdersActiveAndOpenIncludeWorkingBrokerOrdersOnly(t *testing.T) {
+	for _, filter := range []string{"active", "open"} {
+		for _, status := range []string{"new", "accepted", "pending_new", "partially_filled", "pending_replace", "pending_cancel", "filled", "canceled", "planned_for_next_session", "submission_uncertain"} {
+			t.Run(filter+"/"+status, func(t *testing.T) {
+				trading := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, brokerOrders: []*interfaces.Order{{ID: "broker-1", ClientOrderID: "broker-1", Status: status}}}
+				controller := NewOrderController(trading, nil, &visibleOrdersStorage{orders: []*interfaces.Order{{ClientOrderID: "plan-1", Status: "planned_for_next_session"}}})
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status="+filter, nil)
+				controller.HandleGetOrders(ctx)
+				var response struct {
+					Orders   []*interfaces.Order `json:"orders"`
+					Complete bool                `json:"complete"`
+				}
+				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				want := status == "new" || status == "accepted" || status == "pending_new" || status == "partially_filled" || status == "pending_replace" || status == "pending_cancel"
+				if len(response.Orders) != map[bool]int{true: 1, false: 0}[want] || !response.Complete {
+					t.Fatalf("filter=%s status=%s response=%s", filter, status, recorder.Body.String())
+				}
+				if len(trading.listStatuses) != 1 || trading.listStatuses[0] != "open" {
+					t.Fatalf("broker filter: %v", trading.listStatuses)
+				}
+			})
+		}
+	}
+}
+
+func TestGetOrdersActiveIsSandboxScopedAndIncompleteWhenBrokerUnavailable(t *testing.T) {
+	for _, sandbox := range []string{"l1", "l2"} {
+		t.Run(sandbox, func(t *testing.T) {
+			trading := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, brokerOrders: []*interfaces.Order{{ClientOrderID: sandbox + "-stop", Status: "new"}}}
+			if sandbox == "l2" {
+				trading.listErr = errors.New("broker unavailable")
+			}
+			controller := NewOrderController(trading, nil, &visibleOrdersStorage{orders: []*interfaces.Order{{ClientOrderID: sandbox + "-local", Status: "accepted"}, {ClientOrderID: sandbox + "-plan", Status: "planned_for_next_session"}, {ClientOrderID: sandbox + "-uncertain", Status: "submission_uncertain"}}})
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status=active", nil)
+			controller.HandleGetOrders(ctx)
+			var response struct {
+				Orders   []*interfaces.Order `json:"orders"`
+				Complete bool                `json:"complete"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			want := 2
+			if sandbox == "l2" {
+				want = 1
+			}
+			if len(response.Orders) != want || response.Complete != (sandbox == "l1") {
+				t.Fatalf("sandbox=%s body=%s", sandbox, recorder.Body.String())
+			}
+			for _, order := range response.Orders {
+				if !strings.HasPrefix(order.ClientOrderID, sandbox+"-") {
+					t.Fatalf("cross-sandbox order: %#v", order)
+				}
+			}
+		})
+	}
+}
+
 func TestGetAccountFailsClosedWhenBrokerServiceIsUnavailable(t *testing.T) {
 	oc := NewOrderController(nil, nil, nil)
 	if _, err := oc.GetAccount(); err == nil {

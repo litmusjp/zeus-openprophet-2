@@ -1060,16 +1060,42 @@ func brokerOrderHistoryStatus(status string) string {
 	}
 }
 
-func (oc *OrderController) listVisibleOrders(ctx context.Context, status string) ([]*interfaces.Order, bool, error) {
+func durableOrderIdentityMatches(local, broker *interfaces.Order) bool {
+	if !brokerOrderMatchesLocal(local, broker) {
+		return false
+	}
+	return (local.BrokerAccountID == "" || broker.BrokerAccountID == local.BrokerAccountID) &&
+		(local.PaperLive == "" || broker.PaperLive == local.PaperLive) &&
+		(local.TenantID == "" || broker.TenantID == local.TenantID) &&
+		(local.SandboxID == "" || broker.SandboxID == local.SandboxID) &&
+		(local.Underlying == "" || broker.Underlying == local.Underlying) &&
+		(local.Purpose == "" || broker.Purpose == "" || broker.Purpose == local.Purpose) &&
+		(local.LimitPrice == nil || (broker.LimitPrice != nil && *local.LimitPrice == *broker.LimitPrice)) &&
+		(local.StopPrice == nil || (broker.StopPrice != nil && *local.StopPrice == *broker.StopPrice))
+}
+
+func locallyWorkingOrder(order *interfaces.Order) bool {
+	if order == nil {
+		return false
+	}
+	switch strings.ToLower(order.Status) {
+	case "new", "accepted", "pending", "pending_new", "partially_filled", "pending_replace", "pending_cancel", "open", "held", "stopped", "calculated", "suspended":
+		return true
+	}
+	return false
+}
+
+func (oc *OrderController) listVisibleOrders(ctx context.Context, status string) ([]*interfaces.Order, bool, bool, error) {
 	if oc.tradingService == nil {
-		return nil, false, fmt.Errorf("broker order history is unavailable in inert mode")
+		return nil, false, false, fmt.Errorf("broker order history is unavailable in inert mode")
 	}
 	localOrders, err := oc.storageService.GetOrders("")
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	brokerOrders, brokerErr := oc.tradingService.ListOrders(ctx, brokerOrderHistoryStatus(status))
 	brokerAvailable := brokerErr == nil
+	complete := brokerAvailable
 	if brokerErr != nil {
 		// Planned intents remain useful when the broker is temporarily unavailable.
 		// Do not claim broker completeness; return only locally known records.
@@ -1086,6 +1112,7 @@ func (oc *OrderController) listVisibleOrders(ctx context.Context, status string)
 			byKey[key] = local
 		}
 	}
+	listedBrokerKeys := make(map[string]struct{})
 	for _, broker := range brokerOrders {
 		if !orderMatchesStatus(broker, status) {
 			continue
@@ -1100,6 +1127,50 @@ func (oc *OrderController) listVisibleOrders(ctx context.Context, status string)
 		merged := mergeBrokerOrder(local, broker)
 		for _, key := range orderIdentityKeys(merged) {
 			byKey[key] = merged
+			listedBrokerKeys[key] = struct{}{}
+		}
+	}
+	if brokerAvailable {
+		for _, local := range localOrders {
+			if !orderMatchesStatus(local, status) || !locallyWorkingOrder(local) {
+				continue
+			}
+			present := false
+			for _, key := range orderIdentityKeys(local) {
+				if _, ok := listedBrokerKeys[key]; ok {
+					present = true
+					break
+				}
+			}
+			if present {
+				continue
+			}
+			var broker *interfaces.Order
+			var lookupErr error
+			if strings.TrimSpace(local.ClientOrderID) != "" {
+				broker, lookupErr = oc.tradingService.GetOrderByClientOrderID(ctx, local.ClientOrderID)
+			} else if strings.TrimSpace(local.ID) != "" {
+				broker, lookupErr = oc.tradingService.GetOrder(ctx, local.ID)
+			} else {
+				lookupErr = fmt.Errorf("local working order has no broker identity")
+			}
+			if lookupErr != nil || broker == nil || (strings.TrimSpace(local.ID) != "" && broker.ID != local.ID) || !durableOrderIdentityMatches(local, broker) || services.ValidateBrokerOrderState(broker, local.Qty) != nil {
+				complete = false
+				for _, key := range orderIdentityKeys(local) {
+					byKey[key] = local
+				}
+				continue
+			}
+			if orderMatchesStatus(broker, status) {
+				merged := mergeBrokerOrder(local, broker)
+				for _, key := range orderIdentityKeys(merged) {
+					byKey[key] = merged
+				}
+			} else {
+				for _, key := range orderIdentityKeys(local) {
+					delete(byKey, key)
+				}
+			}
 		}
 	}
 
@@ -1115,7 +1186,7 @@ func (oc *OrderController) listVisibleOrders(ctx context.Context, status string)
 	sort.SliceStable(orders, func(i, j int) bool {
 		return orders[i].SubmittedAt.After(orders[j].SubmittedAt)
 	})
-	return orders, brokerAvailable, nil
+	return orders, complete, brokerAvailable, nil
 }
 
 // HandleGetOrders handles HTTP get orders requests
@@ -1123,7 +1194,7 @@ func (oc *OrderController) HandleGetOrders(c *gin.Context) {
 	status := c.Query("status")
 
 	ctx := context.Background()
-	orders, brokerAvailable, err := oc.listVisibleOrders(ctx, status)
+	orders, complete, brokerAvailable, err := oc.listVisibleOrders(ctx, status)
 	if err != nil {
 		if oc.tradingService == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error(), "complete": false})
@@ -1135,7 +1206,7 @@ func (oc *OrderController) HandleGetOrders(c *gin.Context) {
 
 	c.JSON(200, gin.H{
 		"orders":       orders,
-		"complete":     brokerAvailable,
+		"complete":     complete,
 		"broker_state": map[bool]string{true: "available", false: "unavailable"}[brokerAvailable],
 	})
 }

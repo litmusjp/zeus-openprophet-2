@@ -50,11 +50,20 @@ type visibleOrdersTradingService struct {
 	brokerOrders []*interfaces.Order
 	listErr      error
 	listStatuses []string
+	lookups      map[string]*interfaces.Order
+	lookupErr    error
 }
 
 func (s *visibleOrdersTradingService) ListOrders(_ context.Context, status string) ([]*interfaces.Order, error) {
 	s.listStatuses = append(s.listStatuses, status)
 	return s.brokerOrders, s.listErr
+}
+
+func (s *visibleOrdersTradingService) GetOrderByClientOrderID(_ context.Context, id string) (*interfaces.Order, error) {
+	if s.lookupErr != nil {
+		return nil, s.lookupErr
+	}
+	return s.lookups[id], nil
 }
 
 func TestGetOrdersUsesSafeBrokerStatusAndPreservesCompleteness(t *testing.T) {
@@ -136,6 +145,123 @@ func TestGetOrdersActiveAndOpenIncludeWorkingBrokerOrdersOnly(t *testing.T) {
 	}
 }
 
+func TestActiveAndOpenResolveStaleLocalWorkingOrders(t *testing.T) {
+	for _, filter := range []string{"active", "open"} {
+		t.Run(filter, func(t *testing.T) {
+			local := []*interfaces.Order{
+				{ID: "filled-id", ClientOrderID: "stale-filled", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "pending_new", SubmissionAttempted: true},
+				{ID: "cancel-id", ClientOrderID: "stale-cancel", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "new", SubmissionAttempted: true},
+				{ID: "genuine-id", ClientOrderID: "genuine", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Status: "accepted"},
+			}
+			avgFill := 210.25
+			trading := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, lookups: map[string]*interfaces.Order{
+				"stale-filled": {ID: "filled-id", ClientOrderID: "stale-filled", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "filled", FilledQty: 1, FilledAvgPrice: &avgFill},
+				"stale-cancel": {ID: "cancel-id", ClientOrderID: "stale-cancel", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "canceled"},
+			}, brokerOrders: []*interfaces.Order{{ID: "genuine-id", ClientOrderID: "genuine", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Status: "accepted"}}}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status="+filter, nil)
+			NewOrderController(trading, nil, &visibleOrdersStorage{orders: local}).HandleGetOrders(ctx)
+			var response struct {
+				Orders   []*interfaces.Order `json:"orders"`
+				Complete bool                `json:"complete"`
+			}
+			_ = json.Unmarshal(recorder.Body.Bytes(), &response)
+			if !response.Complete || len(response.Orders) != 1 || response.Orders[0].ClientOrderID != "genuine" {
+				t.Fatalf("unexpected response %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestExactLookupRequiresValidTerminalEvidence(t *testing.T) {
+	avg := 210.25
+	for _, tc := range []struct {
+		name string
+		edit func(*interfaces.Order)
+	}{
+		{"unknown status", func(o *interfaces.Order) { o.Status = "mystery" }},
+		{"uncertain status", func(o *interfaces.Order) { o.Status = "submission_uncertain" }},
+		{"invalid filled quantity", func(o *interfaces.Order) { o.FilledQty = 2; o.FilledAvgPrice = &avg }},
+		{"missing average price", func(o *interfaces.Order) { o.FilledQty = 1; o.FilledAvgPrice = nil }},
+		{"broker ID mismatch", func(o *interfaces.Order) { o.ID = "other" }},
+		{"account mismatch", func(o *interfaces.Order) { o.BrokerAccountID = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			local := &interfaces.Order{ID: "exit", ClientOrderID: "client-exit", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "pending_new", Purpose: "close", BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+			broker := *local
+			broker.Status, broker.FilledQty, broker.FilledAvgPrice = "filled", 1, &avg
+			tc.edit(&broker)
+			trading := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, lookups: map[string]*interfaces.Order{"client-exit": &broker}}
+			storage := &visibleOrdersStorage{orders: []*interfaces.Order{local}}
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status=active", nil)
+			NewOrderController(trading, nil, storage).HandleGetOrders(ctx)
+			var response struct {
+				Orders   []*interfaces.Order `json:"orders"`
+				Complete bool                `json:"complete"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &response)
+			if response.Complete || len(response.Orders) != 1 || response.Orders[0].Status != "pending_new" || len(storage.orders) != 1 {
+				t.Fatalf("invalid exact evidence not retained: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestStockTerminalProjectionWithoutPurposeResolvesStaleLocalExit(t *testing.T) {
+	avg := 281.85
+	local := &interfaces.Order{ID: "exit", ClientOrderID: "client-exit", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "pending_new", Purpose: "close", BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+	broker := *local
+	broker.Purpose, broker.Status, broker.FilledQty, broker.FilledAvgPrice = "", "filled", 1, &avg
+	service := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, lookups: map[string]*interfaces.Order{"client-exit": &broker}}
+	storage := &visibleOrdersStorage{orders: []*interfaces.Order{local}}
+	for _, filter := range []string{"active", "open"} {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status="+filter, nil)
+		NewOrderController(service, nil, storage).HandleGetOrders(ctx)
+		var response struct {
+			Orders   []*interfaces.Order `json:"orders"`
+			Complete bool                `json:"complete"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &response)
+		if !response.Complete || len(response.Orders) != 0 {
+			t.Fatalf("valid stock terminal projection was not accepted for %s: %s", filter, rec.Body.String())
+		}
+	}
+}
+
+func TestActiveRetainsUncertainLocalWorkingOrders(t *testing.T) {
+	for _, mode := range []string{"lookup failure", "identity mismatch"} {
+		t.Run(mode, func(t *testing.T) {
+			local := &interfaces.Order{ID: "expected", ClientOrderID: "uncertain", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "pending_new", BrokerAccountID: "acct", PaperLive: "paper", SandboxID: "sandbox"}
+			broker := &interfaces.Order{ID: "expected", ClientOrderID: "uncertain", Symbol: "IWM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "filled", FilledQty: 1, BrokerAccountID: "acct", PaperLive: "paper", SandboxID: "sandbox"}
+			trading := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, lookups: map[string]*interfaces.Order{"uncertain": broker}}
+			if mode == "lookup failure" {
+				trading.lookupErr = errors.New("temporary failure")
+			} else {
+				broker.BrokerAccountID = "other"
+			}
+			storage := &visibleOrdersStorage{orders: []*interfaces.Order{local}}
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status=active", nil)
+			NewOrderController(trading, nil, storage).HandleGetOrders(ctx)
+			var response struct {
+				Orders      []*interfaces.Order `json:"orders"`
+				Complete    bool                `json:"complete"`
+				BrokerState string              `json:"broker_state"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &response)
+			if response.Complete || response.BrokerState != "available" || len(response.Orders) != 1 || response.Orders[0].Status != "pending_new" || len(storage.orders) != 1 {
+				t.Fatalf("uncertain row not retained read-only: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestGetOrdersActiveIsSandboxScopedAndIncompleteWhenBrokerUnavailable(t *testing.T) {
 	for _, sandbox := range []string{"l1", "l2"} {
 		t.Run(sandbox, func(t *testing.T) {
@@ -159,7 +285,7 @@ func TestGetOrdersActiveIsSandboxScopedAndIncompleteWhenBrokerUnavailable(t *tes
 			if sandbox == "l2" {
 				want = 1
 			}
-			if len(response.Orders) != want || response.Complete != (sandbox == "l1") {
+			if len(response.Orders) != want || response.Complete {
 				t.Fatalf("sandbox=%s body=%s", sandbox, recorder.Body.String())
 			}
 			for _, order := range response.Orders {

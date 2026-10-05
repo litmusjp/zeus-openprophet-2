@@ -35,6 +35,53 @@ func shouldStartHTTPServer(executionEnabled bool) bool {
 	return executionEnabled
 }
 
+func registerHealthRoute(router *gin.Engine, accountCheck func() error, orderBlocked, managedBlocked func() bool) {
+	router.GET("/health", func(c *gin.Context) {
+		paper := config.AppConfig != nil && config.AppConfig.AlpacaPaper
+		brokerAvailable := accountCheck != nil && accountCheck() == nil
+		reconciliationComplete := os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true"
+		executionEnabledDiagnostic := os.Getenv("OPENPROPHET_EXECUTION_ENABLED") == "true"
+		brokerReadyDiagnostic := os.Getenv("OPENPROPHET_BROKER_READY") == "true"
+		reconcileSkippedDiagnostic, _ := strconv.Atoi(os.Getenv("OPENPROPHET_RECONCILE_SKIPPED"))
+		managedSkippedDiagnostic, _ := strconv.Atoi(os.Getenv("OPENPROPHET_MANAGED_SKIPPED"))
+		startupExecutionBlocked := os.Getenv("OPENPROPHET_EXECUTION_BLOCKED") != "false"
+		identityComplete := os.Getenv("OPENPROPHET_SANDBOX_ID") != "" && os.Getenv("OPENPROPHET_ACCOUNT_ID") != "" && os.Getenv("ALPACA_ACCOUNT_ID") != "" && os.Getenv("OPENPROPHET_PROCESS_NONCE") != ""
+		orderIsBlocked := orderBlocked == nil || orderBlocked()
+		managedIsBlocked := managedBlocked == nil || managedBlocked()
+		reasons := make([]string, 0, 5)
+		if !brokerAvailable {
+			reasons = append(reasons, "broker_unavailable")
+		}
+		if !identityComplete {
+			reasons = append(reasons, "execution_identity_incomplete")
+		}
+		if !reconciliationComplete {
+			reasons = append(reasons, "reconciliation_incomplete")
+		}
+		if orderIsBlocked {
+			reasons = append(reasons, "order_execution_blocked")
+		}
+		if managedIsBlocked {
+			reasons = append(reasons, "managed_execution_blocked")
+		}
+		ready := len(reasons) == 0
+		status, httpStatus := "healthy", http.StatusOK
+		if !ready {
+			status, httpStatus = "degraded", http.StatusServiceUnavailable
+		}
+		c.JSON(httpStatus, gin.H{
+			"status": status, "ready": ready, "execution_ready": ready,
+			"sandbox_id": os.Getenv("OPENPROPHET_SANDBOX_ID"), "account_id": os.Getenv("OPENPROPHET_ACCOUNT_ID"),
+			"broker_account_id": os.Getenv("ALPACA_ACCOUNT_ID"), "paper": paper,
+			"reconciliation_complete": reconciliationComplete, "execution_enabled": executionEnabledDiagnostic,
+			"broker_ready": brokerReadyDiagnostic, "reconcile_skipped": reconcileSkippedDiagnostic,
+			"managed_skipped": managedSkippedDiagnostic, "execution_blocked": orderIsBlocked || managedIsBlocked,
+			"execution_blocked_startup_diagnostic": startupExecutionBlocked, "readiness_reasons": reasons,
+			"process_nonce": os.Getenv("OPENPROPHET_PROCESS_NONCE"),
+		})
+	})
+}
+
 func main() {
 	// Load configuration
 	if err := config.Load(); err != nil {
@@ -338,45 +385,13 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		c.Next()
 	})
 
-	// Health check
-	router.GET("/health", func(c *gin.Context) {
-		brokerAvailable := tradingReady
-		if brokerAvailable {
-			if _, err := orderController.GetAccount(); err != nil {
-				brokerAvailable = false
-			}
+	registerHealthRoute(router, func() error {
+		if !tradingReady {
+			return fmt.Errorf("broker unavailable")
 		}
-		reconciliationComplete := os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true"
-		executionEnabledDiagnostic := os.Getenv("OPENPROPHET_EXECUTION_ENABLED") == "true"
-		brokerReadyDiagnostic := os.Getenv("OPENPROPHET_BROKER_READY") == "true"
-		reconcileSkippedDiagnostic, _ := strconv.Atoi(os.Getenv("OPENPROPHET_RECONCILE_SKIPPED"))
-		managedSkippedDiagnostic, _ := strconv.Atoi(os.Getenv("OPENPROPHET_MANAGED_SKIPPED"))
-		executionBlockedDiagnostic := os.Getenv("OPENPROPHET_EXECUTION_BLOCKED") != "false"
-		identityComplete := os.Getenv("OPENPROPHET_SANDBOX_ID") != "" && os.Getenv("OPENPROPHET_ACCOUNT_ID") != "" && os.Getenv("ALPACA_ACCOUNT_ID") != "" && os.Getenv("OPENPROPHET_PROCESS_NONCE") != ""
-		ready := brokerAvailable && identityComplete && reconciliationComplete && !orderController.ExecutionBlocked() && !positionManager.ExecutionBlocked()
-		status := "healthy"
-		httpStatus := 200
-		if !ready {
-			status = "degraded"
-			httpStatus = 503
-		}
-		c.JSON(httpStatus, gin.H{
-			"status":                  status,
-			"ready":                   ready,
-			"execution_ready":         ready,
-			"sandbox_id":              os.Getenv("OPENPROPHET_SANDBOX_ID"),
-			"account_id":              os.Getenv("OPENPROPHET_ACCOUNT_ID"),
-			"broker_account_id":       os.Getenv("ALPACA_ACCOUNT_ID"),
-			"paper":                   config.AppConfig.AlpacaPaper,
-			"reconciliation_complete": os.Getenv("OPENPROPHET_RECONCILIATION_COMPLETE") == "true",
-			"execution_enabled":       executionEnabledDiagnostic,
-			"broker_ready":            brokerReadyDiagnostic,
-			"reconcile_skipped":       reconcileSkippedDiagnostic,
-			"managed_skipped":         managedSkippedDiagnostic,
-			"execution_blocked":       executionBlockedDiagnostic,
-			"process_nonce":           os.Getenv("OPENPROPHET_PROCESS_NONCE"),
-		})
-	})
+		_, err := orderController.GetAccount()
+		return err
+	}, orderController.ExecutionBlocked, positionManager.ExecutionBlocked)
 
 	// Trading endpoints
 	api := router.Group("/api/v1")

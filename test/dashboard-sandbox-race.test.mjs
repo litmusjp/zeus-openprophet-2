@@ -7,6 +7,30 @@ const page = fs.readFileSync(new URL('../agent/public/index.html', import.meta.u
 function sourceBetween(start, end) { return page.slice(page.indexOf(start), page.indexOf(end, page.indexOf(start))); }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 
+test('operator heartbeat failure display separates history from active failure and switches sandboxes', () => {
+  const dom = new Map();
+  const element = id => dom.get(id) || (dom.set(id, { textContent: '', classList: { toggle() {} } }), dom.get(id));
+  const ctx = {
+    config: { sandboxes: { l1: {}, l2: {} }, accounts: [], agents: [] }, sandboxSchedule: {},
+    document: { getElementById: element }, getEffectiveSandboxId: () => 'l1', fmtInt: String,
+    _set: (id, value) => { element(id).textContent = value; },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(sourceBetween('function updateOperatorCard(s)', 'function noteBrokerAction('), ctx);
+  ctx.updateOperatorCard({ sandboxId: 'l1', stats: { errors: 1 }, lastHeartbeatFailure: { beat: 3, time: '2026-10-05T00:00:00Z', status: 429, message: 'Endpoint unavailable', recoveredAt: null } });
+  assert.match(element('operator-attention').textContent, /1 historical error.*active/);
+  assert.match(element('operator-last-heartbeat-failure').textContent, /HTTP 429.*Active/);
+  ctx.updateOperatorCard({ sandboxId: 'l1', stats: { errors: 1 }, lastHeartbeatFailure: { beat: 3, time: '2026-10-05T00:00:00Z', status: 429, message: 'Endpoint unavailable', recoveredAt: '2026-10-05T00:01:00Z', recoveredByBeat: 4 } });
+  assert.equal(element('operator-attention').textContent, '1 historical error');
+  assert.match(element('operator-last-heartbeat-failure').textContent, /Recovered by heartbeat #4/);
+  ctx.updateOperatorCard({ sandboxId: 'l2', stats: {} });
+  assert.equal(element('operator-last-heartbeat-failure').textContent, 'Last heartbeat failure: none recorded');
+  assert.equal(element('operator-attention').textContent, 'No active heartbeat failure');
+  ctx.updateOperatorCard({ sandboxId: 'l2', stats: { errors: 2 } });
+  assert.match(element('operator-attention').textContent, /details unavailable/i);
+  assert.match(element('operator-last-heartbeat-failure').textContent, /details unavailable/i);
+});
+
 test('late dashboard and portfolio responses cannot repaint another selected sandbox', async () => {
   const dashboards = { l1: deferred(), l2: deferred() };
   const accounts = { l1: deferred(), l2: deferred() };

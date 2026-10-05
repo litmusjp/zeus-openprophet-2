@@ -4,6 +4,7 @@ import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 
@@ -139,6 +140,14 @@ export function formatOpenCodeError(event) {
   const pieces = [name, status && `HTTP ${status}`, safeCode && `Code ${safeCode}`, message]
     .map(sanitizeOpenCodeError).filter(Boolean);
   return sanitizeOpenCodeError([...new Set(pieces)].join(': '));
+}
+
+function openCodeErrorMetadata(event) {
+  const outer = event?.error || event?.message || event?.part || event;
+  const detail = outer && typeof outer === 'object' && outer.data && typeof outer.data === 'object'
+    ? { ...outer, ...outer.data } : outer;
+  const status = Number(detail?.statusCode ?? detail?.status);
+  return { message: formatOpenCodeError(event), status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null };
 }
 
 // ── System Prompt Builder ──────────────────────────────────────────
@@ -289,6 +298,7 @@ export class AgentState extends EventEmitter {
     this.heartbeatOverride = null;
     this.beatCount = 0;
     this.lastBeatTime = null;
+    this.lastHeartbeatFailure = null;
     this.nextBeatTime = null;
     this.activeAgentId = null;
     this.activeAccountId = null;
@@ -319,6 +329,7 @@ export class AgentState extends EventEmitter {
       heartbeatOverride: this.heartbeatOverride,
       beatCount: this.beatCount,
       lastBeatTime: this.lastBeatTime,
+      lastHeartbeatFailure: this.lastHeartbeatFailure,
       nextBeatTime: this.nextBeatTime,
       activeAgentId: this.activeAgentId,
       activeAccountId: this.activeAccountId,
@@ -401,15 +412,15 @@ export class AgentHarness {
     return this.getPermissions(this.sandboxId) || {};
   }
 
-  async _persistSession(sessionId, metadata = {}) {
-    if (!this.chatStore || !sessionId || !this.state.activeAccountId) return;
+  async _persistSession(sessionId, metadata = {}, accountId = this.state.activeAccountId) {
+    if (!this.chatStore || !sessionId || !accountId) return;
     const sandbox = this._resolveSandbox();
     const account = this._resolveAccount();
-    await this.chatStore.startSession(this.state.activeAccountId, sessionId, {
+    await this.chatStore.startSession(accountId, sessionId, {
       sandboxId: this.sandboxId,
       sandboxName: sandbox?.name || this.sandboxId,
-      accountId: this.state.activeAccountId,
-      accountName: account?.name || this.state.activeAccountId,
+      accountId,
+      accountName: account?.name || accountId,
       agentId: this.state.activeAgentId,
       agentName: this._agentConfig?.name,
       model: this.state.activeModel,
@@ -426,11 +437,11 @@ export class AgentHarness {
     return `\n\n## Prior Session Context (persisted)\nThese are compact excerpts from earlier sessions for this same account. Use them for continuity, but verify current prices, positions, and order status with live tools. Do not repeat old orders merely because they appear here.\n${JSON.stringify(sessions)}\n## End Prior Session Context\n`;
   }
 
-  async _persistMessages(sessionId, messages = []) {
-    if (!this.chatStore || !sessionId || !this.state.activeAccountId) return;
+  async _persistMessages(sessionId, messages = [], accountId = this.state.activeAccountId) {
+    if (!this.chatStore || !sessionId || !accountId) return;
     for (const message of messages) {
     if (!message || (!message?.content?.trim() && !message?.eventType && !message?.kind)) continue;
-      await this.chatStore.addMessage(this.state.activeAccountId, sessionId, message);
+      await this.chatStore.addMessage(accountId, sessionId, message);
     }
   }
 
@@ -449,6 +460,7 @@ export class AgentHarness {
     this.state.stats = { totalBeats: 0, toolCalls: 0, trades: 0, errors: 0, startedAt: new Date().toISOString() };
     this.state.beatCount = 0;
     this.state.recentTrades = [];
+    this.state.lastHeartbeatFailure = null;
     this._sessionId = null;
 
     const account = this._resolveAccount();
@@ -783,6 +795,8 @@ ${userBlock}`;
     this.state.phase = phase;
     this._noteMarketSession(phase);
     const model = this.state.activeModel;
+    const beatAccountId = this.state.activeAccountId;
+    const beatEpoch = this._sessionEpoch;
 
     this.state.emit('beat_start', { beat: beatNum, phase, time: this.state.lastBeatTime });
     this.state.emit('agent_log', {
@@ -813,9 +827,19 @@ ${userBlock}`;
 
     const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}\n\nPerform your duties for this phase.`;
 
+    let failedResult = null;
+    let executionFailed = false;
     try {
-      const result = await this._runClaude(prompt, model);
+      let result;
+      try {
+        result = await this._runClaude(prompt, model);
+      } catch (err) {
+        executionFailed = true;
+        throw err;
+      }
       if (result.error) {
+        failedResult = result;
+        executionFailed = true;
         throw new Error(result.error);
       }
       // Text already streamed via _handleOpenCodeEvent agent_text events
@@ -830,16 +854,55 @@ ${userBlock}`;
         ...(result.toolEvents || []),
       ]);
 
+      if (beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId && this.state.lastHeartbeatFailure && !this.state.lastHeartbeatFailure.recoveredAt) {
+        const failure = this.state.lastHeartbeatFailure;
+        const recoveredAt = new Date().toISOString();
+        try {
+          await this._persistMessages(failure.sessionId, [{
+            role: 'assistant', kind: 'heartbeat_recovery', beat: beatNum, time: recoveredAt,
+            failureSessionId: failure.sessionId, failureBeat: failure.beat,
+            content: `Heartbeat #${beatNum} recovered from failure on heartbeat #${failure.beat}`,
+          }], beatAccountId);
+          failure.recoveredAt = recoveredAt;
+          failure.recoveredByBeat = beatNum;
+        } catch (auditErr) {
+          this.state.emit('agent_log', { message: `Heartbeat recovery audit error: ${sanitizeOpenCodeError(auditErr?.message || auditErr)}`, level: 'error' });
+        }
+      }
+
       this._consecutiveErrors = 0; // clean beat clears any backoff
 
     } catch (err) {
+      if (executionFailed && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
+        const failure = {
+          time: new Date().toISOString(), beat: beatNum,
+          sessionId: failedResult?.sessionId || this._sessionId || `heartbeat-failure-${randomUUID()}`,
+          accountId: beatAccountId,
+          provider: typeof model === 'string' ? model.split('/')[0].replace(/[^a-z0-9_-]/gi, '').slice(0, 60) : null,
+          status: failedResult?.errorStatus ?? null,
+          message: sanitizeOpenCodeError(err?.message || err),
+          recoveredAt: null, recoveredByBeat: null,
+        };
+        this.state.lastHeartbeatFailure = failure;
+        if (beatAccountId && this.chatStore) {
+          try {
+            await this._persistSession(failure.sessionId, { mode: 'heartbeat' }, beatAccountId);
+            await this._persistMessages(failure.sessionId, [
+              ...(failedResult?.toolEvents || []),
+              { role: 'assistant', kind: 'heartbeat_failure', ...failure, content: failure.message },
+            ], beatAccountId);
+          } catch (auditErr) {
+            this.state.emit('agent_log', { message: `Heartbeat failure audit error: ${sanitizeOpenCodeError(auditErr?.message || auditErr)}`, level: 'error' });
+          }
+        }
+      }
       this.state.stats.errors++;
       this._consecutiveErrors++;
-      this.state.emit('agent_log', { message: `Beat #${beatNum} error: ${err.message}`, level: 'error' });
+      this.state.emit('agent_log', { message: `Beat #${beatNum} error: ${sanitizeOpenCodeError(err?.message || err)}`, level: 'error' });
       if (this._consecutiveErrors >= BEAT_BACKOFF.threshold) {
         this.state.emit('agent_log', { message: `${this._consecutiveErrors} consecutive beat failures — backing off the next heartbeat.`, level: 'warning' });
       }
-      console.error(`Beat #${beatNum} error:`, err);
+      console.error(`Beat #${beatNum} error:`, sanitizeOpenCodeError(err?.message || err));
     }
 
     this.state.emit('beat_end', { beat: beatNum, phase });
@@ -924,6 +987,7 @@ ${userBlock}`;
       let totalTokens = 0;
       let stderrText = '';
       let streamError = '';
+      let streamErrorStatus = null;
       let timedOut = false;
 
       proc.stdout.on('data', (chunk) => {
@@ -942,7 +1006,7 @@ ${userBlock}`;
               setSession: (id) => { sessionId = id; },
               addCost: (c) => { totalCost += c; },
               addTokens: (t) => { totalTokens += t; },
-              setError: (message) => { streamError = message; },
+              setError: (error) => { streamError = error.message; streamErrorStatus = error.status; },
             });
           } catch { /* skip unparseable lines */ }
         }
@@ -976,7 +1040,7 @@ ${userBlock}`;
               setSession: (id) => { sessionId = id; },
               addCost: (c) => { totalCost += c; },
               addTokens: (t) => { totalTokens += t; },
-              setError: (message) => { streamError = message; },
+              setError: (error) => { streamError = error.message; streamErrorStatus = error.status; },
             });
           } catch {}
         }
@@ -1004,7 +1068,7 @@ ${userBlock}`;
         });
 
         if (streamError) {
-          resolve({ error: streamError, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
+          resolve({ error: streamError, errorStatus: streamErrorStatus, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
         } else if (timedOut && !fullText) {
           resolve({ error: `opencode timed out after ${BEAT_TIMEOUT_MS / 1000}s; harness sent SIGTERM${stderrText ? `: ${stderrText.trim()}` : ''}`, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
         } else if ((code !== 0 || code === null) && !fullText) {
@@ -1051,9 +1115,10 @@ ${userBlock}`;
 
     switch (event.type) {
       case 'error': {
-        const message = formatOpenCodeError(event);
+        const error = openCodeErrorMetadata(event);
+        const message = error.message;
         if (message) {
-          ctx.setError?.(message);
+          ctx.setError?.(error);
           this.state.emit('agent_log', { message: `OpenCode error: ${message}`, level: 'error' });
         }
         break;

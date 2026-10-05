@@ -42,9 +42,7 @@ export class ChatStore {
 
   _enqueue(accountId, fn) {
     const prev = this._writeQueues.get(accountId) || Promise.resolve();
-    const next = prev.then(fn).catch(err => {
-      console.error(`ChatStore write error (${accountId}):`, err.message);
-    });
+    const next = prev.catch(() => {}).then(fn);
     this._writeQueues.set(accountId, next);
     return next;
   }

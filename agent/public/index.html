@@ -731,6 +731,7 @@
           <span>Next <b id="operator-next-heartbeat">--</b></span>
         </div>
         <div class="operator-last-action" id="operator-last-action">Last broker-confirmed action: none recorded</div>
+        <div class="operator-last-action" id="operator-last-heartbeat-failure">Last heartbeat failure: none recorded</div>
       </div>
       <div class="control-console" title="Start/Pause/Stop act on this account's sandbox">
         <div class="cc-account">
@@ -1586,7 +1587,16 @@ function updateOperatorCard(s) {
   _set('operator-next-heartbeat', next instanceof Date && !Number.isNaN(next.getTime()) ? Math.max(0, Math.ceil((next - Date.now()) / 1000)) + 's' : '--');
   const attention = document.getElementById('operator-attention');
   const count = Number(s.stats?.errors || 0);
-  if (attention) { attention.textContent = count ? `${count} attention item${count === 1 ? '' : 's'}` : 'No attention items'; attention.classList.toggle('has-attention', count > 0); }
+  const failure = s.lastHeartbeatFailure;
+  const activeFailure = Boolean(failure && !failure.recoveredAt);
+  if (attention) { attention.textContent = count ? `${count} historical error${count === 1 ? '' : 's'}${activeFailure ? ' · heartbeat failure active' : !failure ? ' · details unavailable' : ''}` : 'No active heartbeat failure'; attention.classList.toggle('has-attention', activeFailure); }
+  const failureEl = document.getElementById('operator-last-heartbeat-failure');
+  if (failureEl) {
+    const when = failure?.time && !Number.isNaN(Date.parse(failure.time)) ? new Date(failure.time).toLocaleString() : 'time unknown';
+    failureEl.textContent = failure
+      ? `Last heartbeat failure: #${failure.beat ?? '?'} at ${when}${failure.status ? ` · HTTP ${failure.status}` : ''} · ${failure.message || 'Unknown error'}${failure.recoveredAt ? ` · Recovered by heartbeat #${failure.recoveredByBeat ?? '?'}` : ' · Active'}`
+      : count ? 'Last heartbeat failure: details unavailable' : 'Last heartbeat failure: none recorded';
+  }
 }
 
 function noteBrokerAction(d) {

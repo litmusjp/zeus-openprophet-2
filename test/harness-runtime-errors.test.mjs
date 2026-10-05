@@ -245,6 +245,81 @@ test('ChatStore reopens failed partial tools and one recovery without replay or 
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('resumed heartbeat and direct message persist under the captured session', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'resumed-session-'));
+  try {
+    const runs = ['first', 'second', 'message'].map((text, index) => [
+      { type: 'tool_use', ...(index === 1 ? {} : { sessionID: 'same-session' }), part: { tool: 'prophet_get_datetime', state: { input: {}, output: 'ok' } } },
+      { type: 'text', ...(index === 1 ? {} : { sessionID: 'same-session' }), part: { text } },
+    ]);
+    const harness = new AgentHarness({ sandboxId: 'sbx_a', accountId: 'a', chatStore: new ChatStore(dir),
+      spawnFn: () => fakeProcess(runs.shift()), getCurrentPhaseFn: () => 'closed' });
+    harness.state.activeAccountId = 'a';
+    harness.state.running = true;
+    await harness._beat();
+    await harness._beat();
+    await harness._adHocBeat('hello');
+    const reopened = new ChatStore(dir);
+    const messages = await reopened.getSessionMessages('a', 'same-session');
+    assert.deepEqual(messages.map(m => m.kind), ['heartbeat', 'tool_call', 'heartbeat', 'tool_call', 'message', 'message', 'tool_call']);
+    assert.deepEqual(messages.filter(m => m.role === 'assistant' && m.kind !== 'tool_call').map(m => m.toolCalls), [1, 1, 1]);
+    assert.equal((await reopened.listSessions('a'))[0].messageCount, 7);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('completion after a session reset does not restore or persist the old session', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'reset-session-'));
+  try {
+    let harness;
+    harness = new AgentHarness({ sandboxId: 'sbx_a', accountId: 'a', chatStore: new ChatStore(dir),
+      getCurrentPhaseFn: () => 'closed', spawnFn: () => {
+        const proc = fakeProcess([{ type: 'text', sessionID: 'old-session', part: { text: 'late reply' } }]);
+        proc.stdout.on('data', () => { harness._sessionId = null; harness._sessionEpoch++; });
+        return proc;
+      } });
+    harness.state.activeAccountId = 'a';
+    harness._sessionId = 'old-session';
+    await harness._beat();
+    assert.equal(harness._sessionId, null);
+    assert.deepEqual(await new ChatStore(dir).listSessions('a'), []);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('tool totals count streamed events once across success, failure, interrupt, and direct message', async () => {
+  const runs = [
+    { lines: [{ type: 'tool_use', sessionID: 's', part: { tool: 'prophet_get_datetime', state: { input: {}, output: 'ok' } } },
+      { type: 'text', sessionID: 's', part: { text: 'ok' } }] },
+    { lines: [{ type: 'tool_use', sessionID: 's', part: { tool: 'prophet_get_datetime', state: { input: {}, output: 'ok' } } },
+      { type: 'error', error: { message: 'failed' } }] },
+    { lines: [{ type: 'tool_use', sessionID: 's', part: { tool: 'prophet_get_datetime', state: { input: {}, output: 'ok' } } }], interrupt: true },
+    { lines: [{ type: 'tool_use', sessionID: 's', part: { tool: 'prophet_get_datetime', state: { input: {}, output: 'ok' } } },
+      { type: 'text', sessionID: 's', part: { text: 'reply' } }] },
+  ];
+  let harness;
+  harness = new AgentHarness({ sandboxId: 'sbx_a', accountId: 'a', getCurrentPhaseFn: () => 'closed',
+    spawnFn: () => {
+      const run = runs.shift();
+      const proc = fakeProcess(run.lines);
+      if (run.interrupt) proc.stdout.on('data', () => { harness._interrupted = true; });
+      return proc;
+    },
+  });
+  harness.state.activeAccountId = 'a';
+  harness.state.running = true;
+  const previous = console.error;
+  console.error = () => {};
+  try {
+    await harness._beat();
+    assert.equal(harness.state.stats.toolCalls, 1);
+    await harness._beat();
+    assert.equal(harness.state.stats.toolCalls, 2);
+    await harness._beat();
+    assert.equal(harness.state.stats.toolCalls, 3);
+    await harness._adHocBeat('hello');
+    assert.equal(harness.state.stats.toolCalls, 4);
+  } finally { console.error = previous; }
+});
+
 test('ChatStore reopens fallback audit when failure has no provider session', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'heartbeat-fallback-'));
   try {

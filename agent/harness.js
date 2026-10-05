@@ -700,7 +700,6 @@ ${userBlock}`;
       const result = await this._runClaude(prompt, model);
       if (result.error) throw new Error(result.error);
       // Text already streamed via _handleOpenCodeEvent agent_text events
-      if (result.toolCalls) this.state.stats.toolCalls += result.toolCalls;
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
       if (effectiveSessionId) this._sessionId = effectiveSessionId;
       await this._persistSession(effectiveSessionId, { mode: 'message' });
@@ -843,8 +842,6 @@ ${userBlock}`;
         throw new Error(result.error);
       }
       // Text already streamed via _handleOpenCodeEvent agent_text events
-      if (result.toolCalls) this.state.stats.toolCalls += result.toolCalls;
-
       // Save session ID for continuation
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
       if (effectiveSessionId) this._sessionId = effectiveSessionId;
@@ -980,7 +977,9 @@ ${userBlock}`;
 
       let fullText = '';
       let toolCalls = 0;
-      let sessionId = null;
+      // Snapshot the session used for this subprocess. A reset can change
+      // this._sessionId while it runs, so the result must not read it later.
+      let sessionId = this._sessionId;
       const toolEvents = [];
       let buffer = '';
       let totalCost = 0;
@@ -1109,7 +1108,7 @@ ${userBlock}`;
     const beatNum = this.state.beatCount;
 
     // Capture session ID from any event
-    if (event.sessionID && !this._sessionId) {
+    if (event.sessionID) {
       ctx.setSession(event.sessionID);
     }
 

@@ -1,12 +1,15 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"math"
 	"path/filepath"
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,6 +19,104 @@ func TestValidateManagedBrokerOrderRequiresRolePurpose(t *testing.T) {
 	order := &interfaces.Order{Symbol: "AAPL", Side: "sell", Qty: 5, Type: "stop", TimeInForce: "gtc", Status: "new", Purpose: "entry"}
 	if err := validateManagedBrokerOrder(position, order, "", true, "protection"); err == nil {
 		t.Fatal("validateManagedBrokerOrder() accepted an entry-purpose order as protection")
+	}
+}
+
+func TestStartupReconciliationCannotClearDerivedManagedBlock(t *testing.T) {
+	rec := &exitOrderRecorder{}
+	dbPath := filepath.Join(t.TempDir(), "startup-block.db")
+	pm, storage := newTestPositionManagerAt(t, rec, dbPath)
+	position := &ManagedPosition{DurableIdentity: storage.DurableIdentity(), ID: "persisted-block", Symbol: "IWM", Side: "buy", Status: "PROTECTION_BLOCKED", Quantity: 1, RemainingQty: 1}
+	if err := pm.savePositionToDB(position); err != nil {
+		t.Fatal(err)
+	}
+	storage.Close()
+	pm, storage = newTestPositionManagerAt(t, rec, dbPath)
+	defer storage.Close()
+	pm.SetExecutionBlocked(true)
+	if skipped := pm.ReconcilePersistedPositions(context.Background()); skipped != 1 {
+		t.Fatalf("startup managed reconciliation skipped=%d, want blocked state", skipped)
+	}
+	pm.SetExecutionBlocked(false)
+	if !pm.ExecutionBlocked() {
+		t.Fatal("startup SetExecutionBlocked(false) erased unresolved persisted protection state")
+	}
+}
+
+func TestMonitorPositionsRemainsObservableWhileDerivedBlockIsSet(t *testing.T) {
+	pm, storage := newTestPositionManager(t, &exitOrderRecorder{})
+	defer storage.Close()
+	pm.positions["blocked"] = &ManagedPosition{ID: "blocked", Status: "PROTECTION_BLOCKED"}
+	pm.SetExecutionBlocked(false)
+	var logs bytes.Buffer
+	pm.logger.SetOutput(&logs)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); pm.MonitorPositions(ctx) }()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("monitor did not stop after cancellation")
+	}
+	if !strings.Contains(logs.String(), "Position monitoring started") {
+		t.Fatalf("monitor exited before becoming observable: %s", logs.String())
+	}
+}
+
+func TestMonitorPositionsRejectsStorageInitializationFailure(t *testing.T) {
+	pm := NewPositionManager(&exitOrderRecorder{}, nil, nil)
+	var logs bytes.Buffer
+	pm.logger.SetOutput(&logs)
+	pm.MonitorPositions(context.Background())
+	if !strings.Contains(logs.String(), "Managed position monitoring disabled") {
+		t.Fatalf("monitor did not report initialization failure: %s", logs.String())
+	}
+}
+
+func TestMonitorPositionsRejectsRawStartupBlock(t *testing.T) {
+	pm, storage := newTestPositionManager(t, &exitOrderRecorder{})
+	defer storage.Close()
+	pm.SetExecutionBlocked(true)
+	var logs bytes.Buffer
+	pm.logger.SetOutput(&logs)
+	pm.MonitorPositions(context.Background())
+	if !strings.Contains(logs.String(), "Managed position monitoring disabled") {
+		t.Fatalf("monitor did not report raw startup block: %s", logs.String())
+	}
+}
+
+func TestBlockedRecoveryRequiresExactCurrentExposureBeforeBrokerMutation(t *testing.T) {
+	identity := models.DurableIdentity{BrokerAccountID: "test-broker-account", PaperLive: "paper", TenantID: "test-tenant", SandboxID: "test-sandbox"}
+	tests := []struct {
+		name      string
+		account   *interfaces.Account
+		positions []*interfaces.Position
+		readErr   error
+	}{
+		{name: "account read failure", readErr: errors.New("account unavailable")},
+		{name: "positions read failure", account: &interfaces.Account{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}, readErr: errors.New("positions unavailable")},
+		{name: "missing position", account: &interfaces.Account{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}},
+		{name: "flat", account: &interfaces.Account{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}, positions: []*interfaces.Position{{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Side: "long", Qty: 0}}},
+		{name: "partial", account: &interfaces.Account{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}, positions: []*interfaces.Position{{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Side: "long", Qty: 0.5}}},
+		{name: "wrong direction", account: &interfaces.Account{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}, positions: []*interfaces.Position{{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Side: "short", Qty: 1}}},
+		{name: "duplicate", account: &interfaces.Account{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}, positions: []*interfaces.Position{{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Side: "long", Qty: 1}, {BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Side: "long", Qty: 1}}},
+		{name: "account mismatch", account: &interfaces.Account{BrokerAccountID: "other", PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}, positions: []*interfaces.Position{{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Side: "long", Qty: 1}}},
+		{name: "nonfinite", account: &interfaces.Account{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID}, positions: []*interfaces.Position{{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, Symbol: "IWM", Side: "long", Qty: math.NaN()}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &exitOrderRecorder{account: tt.account, positions: tt.positions, readErr: tt.readErr}
+			pm, storage := newTestPositionManager(t, rec)
+			defer storage.Close()
+			position := &ManagedPosition{DurableIdentity: identity, ID: "blocked-exposure", Symbol: "IWM", Side: "buy", Status: "PROTECTION_BLOCKED", Quantity: 1, RemainingQty: 1, StopLossOrderID: "old-order", StopLossClientOrderID: "old-client"}
+			pm.positions[position.ID] = position
+			pm.processPosition(context.Background(), position)
+			if rec.calls != 0 || rec.cancelCalls != 0 || position.Status != "PROTECTION_BLOCKED" {
+				t.Fatalf("submit=%d cancel=%d status=%s; want zero mutation and blocked", rec.calls, rec.cancelCalls, position.Status)
+			}
+		})
 	}
 }
 
@@ -302,6 +403,10 @@ type exitOrderRecorder struct {
 	markerFail   bool
 	calls        int
 	cancelErr    error
+	cancelCalls  int
+	account      *interfaces.Account
+	positions    []*interfaces.Position
+	readErr      error
 }
 
 func (s *exitOrderRecorder) SetManagedSubmissionMarker(marker func(string, string, string) error) {
@@ -430,7 +535,10 @@ func TestReconcilePersistedPositionsRejectsConflictingManagedOrderContract(t *te
 	}
 }
 
-func (s *exitOrderRecorder) CancelOrder(context.Context, string) error { return s.cancelErr }
+func (s *exitOrderRecorder) CancelOrder(context.Context, string) error {
+	s.cancelCalls++
+	return s.cancelErr
+}
 func (s *exitOrderRecorder) GetOrder(ctx context.Context, id string) (*interfaces.Order, error) {
 	for _, order := range s.brokerOrders {
 		if order.ID == id {
@@ -451,10 +559,10 @@ func (s *exitOrderRecorder) ListOrders(context.Context, string) ([]*interfaces.O
 	return nil, nil
 }
 func (s *exitOrderRecorder) GetPositions(context.Context) ([]*interfaces.Position, error) {
-	return nil, nil
+	return s.positions, s.readErr
 }
 func (s *exitOrderRecorder) GetAccount(context.Context) (*interfaces.Account, error) {
-	return nil, nil
+	return s.account, s.readErr
 }
 func (s *exitOrderRecorder) PlaceOptionsOrder(context.Context, *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
 	return nil, nil

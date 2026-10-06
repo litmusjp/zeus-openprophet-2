@@ -155,6 +155,7 @@ type Position struct {
 	UnrealizedPLPC  float64
 	CurrentPrice    float64
 	Side            string
+	AssetClass      string
 }
 
 type Account struct {

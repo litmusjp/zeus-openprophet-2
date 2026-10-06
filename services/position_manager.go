@@ -222,6 +222,7 @@ type PositionManager struct {
 	positions            map[string]*ManagedPosition // position_id -> position
 	closeInFlight        map[string]bool
 	mu                   sync.RWMutex
+	statusMu             sync.RWMutex // protects lifecycle Status publication independently of broker/storage work
 	logger               *logrus.Logger
 	initializationErr    error
 	executionBlocked     bool
@@ -291,6 +292,8 @@ func NewPositionManager(
 
 func (pm *PositionManager) SetExecutionBlocked(blocked bool) {
 	pm.mu.Lock()
+	// This flag is the raw startup/storage gate. Managed protection state is
+	// derived separately so a successful bootstrap cannot erase it.
 	pm.executionBlocked = blocked
 	if blocked {
 		pm.executionBlockReason = "startup-reconciliation"
@@ -313,6 +316,8 @@ func (pm *PositionManager) clearExecutionBlockIfSafe() {
 	if pm.initializationErr != nil || !pm.executionBlocked {
 		return
 	}
+	pm.statusMu.RLock()
+	defer pm.statusMu.RUnlock()
 	for _, position := range pm.positions {
 		if position == nil || position.Status == "CLOSED" || position.Status == "STOPPED_OUT" {
 			continue
@@ -364,17 +369,53 @@ func hasExactlyOneExecutableProtectionLeg(position *ManagedPosition) bool {
 func (pm *PositionManager) ExecutionBlocked() bool {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	return pm.executionBlocked || pm.initializationErr != nil
+	pm.statusMu.RLock()
+	defer pm.statusMu.RUnlock()
+	return pm.executionBlocked || pm.initializationErr != nil || pm.hasUnresolvedManagedStateLocked()
+}
+
+func (pm *PositionManager) hasUnresolvedManagedStateLocked() bool {
+	for _, position := range pm.positions {
+		if position != nil && (position.Status == "PROTECTION_BLOCKED" || position.Status == "CLOSING") {
+			return true
+		}
+	}
+	return false
+}
+
+func (pm *PositionManager) setPositionStatus(position *ManagedPosition, status string) {
+	pm.statusMu.Lock()
+	position.Status = status
+	pm.statusMu.Unlock()
 }
 
 func (pm *PositionManager) ensureReady() error {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	if pm.executionBlocked {
+	pm.statusMu.RLock()
+	defer pm.statusMu.RUnlock()
+	if pm.executionBlocked || pm.hasUnresolvedManagedStateLocked() {
 		return fmt.Errorf("managed execution is blocked until startup order reconciliation succeeds")
 	}
 	if pm.initializationErr != nil {
 		return pm.initializationErr
+	}
+	return nil
+}
+
+// ensureMonitoringReady permits read-only monitoring and guarded recovery while
+// admission is blocked, but never after storage initialization failed.
+func (pm *PositionManager) ensureMonitoringReady() error {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	if pm.initializationErr != nil {
+		return pm.initializationErr
+	}
+	if pm.executionBlocked && pm.executionBlockReason != "protection" && pm.executionBlockReason != "" {
+		return fmt.Errorf("managed position monitoring disabled while %s is unresolved", pm.executionBlockReason)
+	}
+	if pm.executionBlocked && pm.executionBlockReason == "" {
+		return fmt.Errorf("managed position monitoring disabled while startup reconciliation is unresolved")
 	}
 	return nil
 }
@@ -462,10 +503,12 @@ func (pm *PositionManager) persistedManagedOrderQuantity(orderID string) float64
 func (pm *PositionManager) ensureCloseReady() error {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
+	pm.statusMu.RLock()
+	defer pm.statusMu.RUnlock()
 	if pm.initializationErr != nil {
 		return pm.initializationErr
 	}
-	if pm.executionBlocked && pm.executionBlockReason != "protection" {
+	if pm.executionBlocked && pm.executionBlockReason != "protection" || pm.hasUnresolvedManagedStateLocked() {
 		return fmt.Errorf("managed close is blocked until unresolved broker state is reconciled")
 	}
 	return nil
@@ -727,7 +770,7 @@ func (pm *PositionManager) placeEntryOrder(ctx context.Context, position *Manage
 	}
 
 	position.EntryOrderID = result.OrderID
-	position.Status = "PENDING"
+	pm.setPositionStatus(position, "PENDING")
 
 	return nil
 }
@@ -798,7 +841,7 @@ func (pm *PositionManager) ReconcilePersistedPositions(ctx context.Context) int 
 				break
 			}
 			projection, projectionErr := pm.storageService.GetManagedOrder(recovered.clientID)
-			if projectionErr != nil || projection == nil || projection.PositionID != position.ID || projection.Role == "" || projection.Purpose != recovered.purpose || projection.ClientOrderID != recovered.clientID || projection.Symbol != position.Symbol || projection.RequestedQty <= 0 {
+			if projectionErr != nil || projection == nil || projection.PositionID != position.ID || projection.Role != recovered.purpose || projection.Purpose != recovered.purpose || projection.ClientOrderID != recovered.clientID || projection.Symbol != position.Symbol || projection.RequestedQty <= 0 {
 				valid = false
 				break
 			}
@@ -875,7 +918,7 @@ func repairMissingManagedOrderProjectionFields(projection *models.DBManagedOrder
 }
 
 func (pm *PositionManager) MonitorPositions(ctx context.Context) {
-	if err := pm.ensureReady(); err != nil {
+	if err := pm.ensureMonitoringReady(); err != nil {
 		pm.logger.WithError(err).Error("Managed position monitoring disabled")
 		return
 	}
@@ -937,29 +980,48 @@ func (pm *PositionManager) processPosition(ctx context.Context, position *Manage
 		return
 	}
 	if position.Status == "PROTECTION_BLOCKED" {
-		if position.RemainingQty <= 0 {
-			position.Status = "CLOSED"
-			_ = pm.savePositionToDB(position)
+		if err := pm.validateCurrentRecoveryExposure(ctx, position); err != nil {
+			pm.logger.WithError(err).WithField("position_id", position.ID).Error("Protection recovery remains blocked; current exposure is not proven")
 			return
 		}
 		if position.StopLossOrderID != "" || position.TakeProfitOrderID != "" || len(position.PartialExitOrders) > 0 {
+			before, _ := json.Marshal(position)
 			if err := pm.reconcileSiblingExitOrders(ctx, position); err != nil {
 				pm.logger.WithError(err).Error("Protection recovery could not reconcile existing sibling orders")
+				pm.restorePositionSnapshot(position, before)
+				return
+			}
+			// Persist validated lifecycle and fill watermarks before changing the
+			// in-memory admission state or considering a replacement.
+			if err := pm.savePositionToDB(position); err != nil {
+				pm.logger.WithError(err).Error("Protection recovery evidence could not be persisted")
+				pm.restorePositionSnapshot(position, before)
+				pm.blockExecution("persistence")
 				return
 			}
 			if position.StopLossOrderID != "" || position.TakeProfitOrderID != "" || len(position.PartialExitOrders) > 0 {
-				_ = pm.savePositionToDB(position)
 				return
 			}
+		}
+		if err := pm.validateCurrentRecoveryExposure(ctx, position); err != nil {
+			pm.logger.WithError(err).WithField("position_id", position.ID).Error("Protection replacement remains blocked; exposure changed")
+			return
 		}
 		if err := pm.placeRiskOrders(ctx, position); err != nil {
 			pm.logger.WithError(err).Error("Protection recovery remains blocked")
 			return
 		}
-		position.Status = "ACTIVE"
-		if err := pm.savePositionToDB(position); err != nil {
+		// Persist the active snapshot while the shared in-memory state remains
+		// blocked. The storage call runs without statusMu held.
+		activeSnapshot := *position
+		activeSnapshot.Status = "ACTIVE"
+		if err := pm.savePositionToDB(&activeSnapshot); err != nil {
 			pm.logger.WithError(err).Error("Failed to persist recovered protection")
+			pm.blockExecution("persistence")
+			return
 		}
+		position.Revision = activeSnapshot.Revision
+		pm.setPositionStatus(position, "ACTIVE")
 		pm.clearExecutionBlockIfSafe()
 		return
 	}
@@ -982,6 +1044,73 @@ func (pm *PositionManager) processPosition(ctx context.Context, position *Manage
 	if position.TrailingStop {
 		pm.updateTrailingStop(ctx, position)
 	}
+}
+
+// restorePositionSnapshot restores recovery state while serializing the Status
+// write with readiness readers. JSON work happens on a private copy so no lock
+// is held during unmarshalling.
+func (pm *PositionManager) restorePositionSnapshot(position *ManagedPosition, snapshot []byte) {
+	restored := *position
+	if err := json.Unmarshal(snapshot, &restored); err != nil {
+		return
+	}
+	pm.statusMu.Lock()
+	*position = restored
+	pm.statusMu.Unlock()
+}
+
+func (pm *PositionManager) validateCurrentRecoveryExposure(ctx context.Context, managed *ManagedPosition) error {
+	if managed == nil || !managedIdentityComplete(managed.DurableIdentity) || !managedIdentityMatches(managed.DurableIdentity, pm.storageService.DurableIdentity()) || !isFinitePositive(managed.RemainingQty) {
+		return fmt.Errorf("managed position identity or remainder is not valid")
+	}
+	account, err := pm.tradingService.GetAccount(ctx)
+	if err != nil || account == nil {
+		if err == nil {
+			err = fmt.Errorf("broker returned no account")
+		}
+		return fmt.Errorf("current broker account could not be verified: %w", err)
+	}
+	accountIdentity := models.DurableIdentity{BrokerAccountID: account.BrokerAccountID, PaperLive: account.PaperLive, TenantID: account.TenantID, SandboxID: account.SandboxID}
+	if !managedIdentityMatches(accountIdentity, managed.DurableIdentity) {
+		return fmt.Errorf("current broker account identity does not match managed position")
+	}
+	positions, err := pm.tradingService.GetPositions(ctx)
+	if err != nil || positions == nil {
+		if err == nil {
+			err = fmt.Errorf("broker returned no positions snapshot")
+		}
+		return fmt.Errorf("complete broker positions could not be read: %w", err)
+	}
+	var match *interfaces.Position
+	for _, current := range positions {
+		if current == nil || !strings.EqualFold(strings.TrimSpace(current.Symbol), strings.TrimSpace(managed.Symbol)) {
+			continue
+		}
+		if match != nil {
+			return fmt.Errorf("broker has duplicate matching positions")
+		}
+		match = current
+	}
+	if match == nil {
+		return fmt.Errorf("broker position is missing; external exit identity is not associated")
+	}
+	currentIdentity := models.DurableIdentity{BrokerAccountID: match.BrokerAccountID, PaperLive: match.PaperLive, TenantID: match.TenantID, SandboxID: match.SandboxID}
+	if !managedIdentityMatches(currentIdentity, managed.DurableIdentity) || math.IsNaN(match.Qty) || math.IsInf(match.Qty, 0) || math.Abs(match.Qty) <= 0 || math.IsNaN(managed.RemainingQty) || math.IsInf(managed.RemainingQty, 0) || math.Abs(math.Abs(match.Qty)-managed.RemainingQty) > 1e-9 {
+		return fmt.Errorf("broker position identity or quantity does not match managed remainder")
+	}
+	long := strings.EqualFold(managed.Side, "buy") || strings.EqualFold(managed.Side, "long")
+	short := strings.EqualFold(managed.Side, "sell") || strings.EqualFold(managed.Side, "short")
+	if match.AssetClass != "" && match.AssetClass != "us_equity" {
+		return fmt.Errorf("broker position asset class %q is not supported for managed recovery", match.AssetClass)
+	}
+	if (!long && !short) || (long && (!strings.EqualFold(match.Side, "long") || match.Qty < 0)) || (short && (!strings.EqualFold(match.Side, "short") || match.Qty > 0)) {
+		return fmt.Errorf("broker position direction does not match managed position")
+	}
+	return nil
+}
+
+func isFinitePositive(value float64) bool {
+	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func clearProtectionIdentity(position *ManagedPosition, orderID string) {
@@ -1177,10 +1306,6 @@ func (pm *PositionManager) reconcileSiblingExitOrders(ctx context.Context, posit
 	remainingIDs := make([]string, 0, len(ids))
 	stopRemaining, takeRemaining := "", ""
 	for _, orderID := range ids {
-		order, err := pm.getManagedOrder(ctx, orderID)
-		if err != nil || order == nil {
-			return fmt.Errorf("protection order %s is unresolved: %w", orderID, err)
-		}
 		expectedClientOrderID := ""
 		if orderID == position.StopLossOrderID || orderID == position.StopLossClientOrderID {
 			expectedClientOrderID = position.StopLossClientOrderID
@@ -1188,6 +1313,17 @@ func (pm *PositionManager) reconcileSiblingExitOrders(ctx context.Context, posit
 			expectedClientOrderID = position.TakeProfitClientOrderID
 		} else if orderID == position.PartialExitClientOrderID {
 			expectedClientOrderID = position.PartialExitClientOrderID
+		}
+		if expectedClientOrderID == "" {
+			return fmt.Errorf("protection order %s has no durable client identity", orderID)
+		}
+		projection, err := pm.storageService.GetManagedOrder(expectedClientOrderID)
+		if err != nil || projection == nil || projection.PositionID != position.ID || projection.Role != "protection" || projection.Purpose != "protection" || projection.ClientOrderID != expectedClientOrderID || !managedIdentityMatches(projection.DurableIdentity, position.DurableIdentity) {
+			return fmt.Errorf("protection order %s has no matching durable projection: %v", orderID, err)
+		}
+		order, err := pm.getManagedOrder(ctx, orderID)
+		if err != nil || order == nil {
+			return fmt.Errorf("protection order %s is unresolved: %w", orderID, err)
 		}
 		brokerOrderID := ""
 		if expectedClientOrderID == "" {
@@ -1198,8 +1334,18 @@ func (pm *PositionManager) reconcileSiblingExitOrders(ctx context.Context, posit
 		if !managedOrderIdentityMatches(order, brokerOrderID, expectedClientOrderID) {
 			return fmt.Errorf("protection order %s returned mismatched broker/client identity", orderID)
 		}
-		if err := validateManagedBrokerOrder(position, order, expectedClientOrderID, true, "protection"); err != nil {
-			return fmt.Errorf("protection order %s failed identity validation: %w", orderID, err)
+		if err := validateManagedOrderProjection(projection, order); err != nil {
+			return fmt.Errorf("protection order %s failed durable identity validation: %w", orderID, err)
+		}
+		projection.BrokerOrderID = order.ID
+		projection.FilledQty = math.Max(projection.FilledQty, order.FilledQty)
+		projection.FillWatermark = math.Max(projection.FillWatermark, order.FilledQty)
+		projection.Lifecycle = strings.ToLower(order.Status)
+		if order.FilledAvgPrice != nil {
+			projection.FilledAvgPrice = order.FilledAvgPrice
+		}
+		if err := pm.storageService.SaveManagedOrder(projection); err != nil {
+			return fmt.Errorf("protection order %s lifecycle evidence could not be persisted: %w", orderID, err)
 		}
 		status := strings.ToLower(order.Status)
 		terminal := status == "filled" || status == "canceled" || status == "cancelled" || status == "rejected" || status == "expired" || status == "done_for_day" || status == "replaced"
@@ -1243,19 +1389,19 @@ func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, positio
 				return
 			}
 			if position.RemainingQty > 0 {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 				return
 			}
-			position.Status = "CLOSED"
+			pm.setPositionStatus(position, "CLOSED")
 			position.ClosedAt = func() *time.Time { now := time.Now(); return &now }()
 			_ = pm.savePositionToDB(position)
 			return
 		}
 		if position.EntryOrderID == "" {
 			if position.RemainingQty > 0 {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 			}
@@ -1271,7 +1417,7 @@ func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, positio
 		}
 		status := strings.ToLower(entry.Status)
 		if status == "filled" || status == "partially_filled" {
-			position.Status = "ACTIVE"
+			pm.setPositionStatus(position, "ACTIVE")
 			position.RemainingQty = entry.FilledQty
 			position.EntryRemainingQty = math.Max(0, entry.Qty-entry.FilledQty)
 			position.StopLossOrderID, position.TakeProfitOrderID = "", ""
@@ -1282,7 +1428,7 @@ func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, positio
 			}
 		} else if status == "canceled" || status == "cancelled" || status == "rejected" || status == "expired" || status == "done_for_day" || status == "replaced" {
 			if entry.FilledQty > 0 {
-				position.Status = "ACTIVE"
+				pm.setPositionStatus(position, "ACTIVE")
 				position.RemainingQty = entry.FilledQty
 				position.EntryRemainingQty = 0
 				position.StopLossOrderID, position.TakeProfitOrderID = "", ""
@@ -1321,7 +1467,7 @@ func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, positio
 	case "filled":
 		position.ExitFilledQty += newExitFill
 		position.RemainingQty = math.Max(0, position.RemainingQty-newExitFill)
-		position.Status = "CLOSED"
+		pm.setPositionStatus(position, "CLOSED")
 		position.StopLossOrderID = ""
 		position.TakeProfitOrderID = ""
 		position.PartialExitOrders = nil
@@ -1334,7 +1480,7 @@ func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, positio
 		position.ExitFilledQty += newExitFill
 		position.RemainingQty = math.Max(0, position.RemainingQty-newExitFill)
 		if position.RemainingQty == 0 {
-			position.Status = "CLOSED"
+			pm.setPositionStatus(position, "CLOSED")
 			position.StopLossOrderID = ""
 			position.TakeProfitOrderID = ""
 			position.PartialExitOrders = nil
@@ -1351,7 +1497,7 @@ func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, positio
 		position.ExitFilledQty += newExitFill
 		position.RemainingQty = math.Max(0, position.RemainingQty-newExitFill)
 		if position.RemainingQty == 0 {
-			position.Status = "CLOSED"
+			pm.setPositionStatus(position, "CLOSED")
 			position.StopLossOrderID = ""
 			position.TakeProfitOrderID = ""
 			position.PartialExitOrders = nil
@@ -1359,9 +1505,9 @@ func (pm *PositionManager) reconcileClosingPosition(ctx context.Context, positio
 			now := time.Now()
 			position.ClosedAt = &now
 		} else {
-			position.Status = "ACTIVE"
+			pm.setPositionStatus(position, "ACTIVE")
 			if position.RemainingQty < position.Quantity {
-				position.Status = "PARTIAL"
+				pm.setPositionStatus(position, "PARTIAL")
 			}
 			position.ExitOrderID = ""
 			position.ExitClientOrderID = ""
@@ -1443,9 +1589,9 @@ func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *Manage
 		filledQty := math.Max(0, math.Min(position.Quantity, order.FilledQty))
 		if filledQty > 0 {
 			position.EntryRemainingQty = math.Max(0, order.Qty-order.FilledQty)
-			position.Status = "ACTIVE"
+			pm.setPositionStatus(position, "ACTIVE")
 			if position.EntryRemainingQty > 0 && status == "partially_filled" {
-				position.Status = "PENDING"
+				pm.setPositionStatus(position, "PENDING")
 			}
 			position.RemainingQty = filledQty
 			if order.FilledAvgPrice != nil {
@@ -1453,13 +1599,13 @@ func (pm *PositionManager) checkEntryOrder(ctx context.Context, position *Manage
 			}
 			position.UpdatedAt = time.Now()
 			if err := pm.resizeProtectionForEntry(ctx, position); err != nil {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 				return
 			}
 			if err := pm.placeRiskOrders(ctx, position); err != nil {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 			}
 			if err := pm.savePositionToDB(position); err != nil {
@@ -1509,7 +1655,7 @@ func (pm *PositionManager) placeRiskOrders(ctx context.Context, position *Manage
 	if err := place(ctx, position); err != nil {
 		pm.logger.WithError(err).Error("Failed to place managed protection leg")
 		pm.blockExecution("protection")
-		position.Status = "PROTECTION_BLOCKED"
+		pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 		_ = pm.savePositionToDB(position)
 		return err
 	}
@@ -1942,7 +2088,7 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 		if err == nil && managedOrderIdentityMatches(order, position.StopLossOrderID, position.StopLossClientOrderID) {
 			fillDelta := pm.applyProtectionFillWatermark(position, order)
 			if fillDelta == 0 && isTerminalManagedStatus(order.Status) {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 				return
@@ -1950,14 +2096,14 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 			if fillDelta > 0 {
 				residualDelta, cancelErr := pm.cancelProtectionResidual(ctx, position, order)
 				if cancelErr != nil {
-					position.Status = "PROTECTION_BLOCKED"
+					pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 					pm.blockExecution("protection")
 					_ = pm.savePositionToDB(position)
 					return
 				}
 				fillDelta += residualDelta
 				if cancelErr := pm.cancelSiblingExitOrders(ctx, position, position.StopLossOrderID); cancelErr != nil {
-					position.Status = "PROTECTION_BLOCKED"
+					pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 					pm.blockExecution("protection")
 					_ = pm.savePositionToDB(position)
 					return
@@ -1971,16 +2117,16 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 				position.PartialExitOrders = nil
 				position.PartialExitClientOrderID = ""
 				if position.RemainingQty == 0 {
-					position.Status = "STOPPED_OUT"
+					pm.setPositionStatus(position, "STOPPED_OUT")
 					now := time.Now()
 					position.ClosedAt = &now
 				} else {
-					position.Status = "PARTIAL"
+					pm.setPositionStatus(position, "PARTIAL")
 				}
 				pm.savePositionToDB(position)
 				if position.RemainingQty > 0 {
 					if err := pm.placeRiskOrders(ctx, position); err != nil {
-						position.Status = "PROTECTION_BLOCKED"
+						pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 					}
 					_ = pm.savePositionToDB(position)
 				}
@@ -1995,7 +2141,7 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 		if err == nil && managedOrderIdentityMatches(order, position.TakeProfitOrderID, position.TakeProfitClientOrderID) {
 			fillDelta := pm.applyProtectionFillWatermark(position, order)
 			if fillDelta == 0 && isTerminalManagedStatus(order.Status) {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 				return
@@ -2003,14 +2149,14 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 			if fillDelta > 0 {
 				residualDelta, cancelErr := pm.cancelProtectionResidual(ctx, position, order)
 				if cancelErr != nil {
-					position.Status = "PROTECTION_BLOCKED"
+					pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 					pm.blockExecution("protection")
 					_ = pm.savePositionToDB(position)
 					return
 				}
 				fillDelta += residualDelta
 				if cancelErr := pm.cancelSiblingExitOrders(ctx, position, position.TakeProfitOrderID); cancelErr != nil {
-					position.Status = "PROTECTION_BLOCKED"
+					pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 					pm.blockExecution("protection")
 					_ = pm.savePositionToDB(position)
 					return
@@ -2024,16 +2170,16 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 				position.PartialExitOrders = nil
 				position.PartialExitClientOrderID = ""
 				if position.RemainingQty == 0 {
-					position.Status = "CLOSED"
+					pm.setPositionStatus(position, "CLOSED")
 					now := time.Now()
 					position.ClosedAt = &now
 				} else {
-					position.Status = "PARTIAL"
+					pm.setPositionStatus(position, "PARTIAL")
 				}
 				pm.savePositionToDB(position)
 				if position.RemainingQty > 0 {
 					if err := pm.placeRiskOrders(ctx, position); err != nil {
-						position.Status = "PROTECTION_BLOCKED"
+						pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 					}
 					_ = pm.savePositionToDB(position)
 				}
@@ -2050,7 +2196,7 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 		if err == nil && managedOrderIdentityMatches(order, orderID, position.PartialExitClientOrderID) {
 			fillDelta := pm.applyProtectionFillWatermark(position, order)
 			if fillDelta == 0 && isTerminalManagedStatus(order.Status) {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 				return
@@ -2058,7 +2204,7 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 			if fillDelta > 0 {
 				residualDelta, cancelErr := pm.cancelProtectionResidual(ctx, position, order)
 				if cancelErr != nil {
-					position.Status = "PROTECTION_BLOCKED"
+					pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 					pm.blockExecution("protection")
 					_ = pm.savePositionToDB(position)
 					return
@@ -2071,7 +2217,7 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 	}
 	if filledPartialQty > 0 {
 		if cancelErr := pm.cancelSiblingExitOrders(ctx, position, filledPartialID); cancelErr != nil {
-			position.Status = "PROTECTION_BLOCKED"
+			pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 			pm.blockExecution("protection")
 			_ = pm.savePositionToDB(position)
 			return
@@ -2079,14 +2225,14 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 		position.ExitFilledQty += filledPartialQty
 		position.RemainingQty = math.Max(0, position.Quantity-position.ExitFilledQty)
 		if position.RemainingQty == 0 {
-			position.Status = "CLOSED"
+			pm.setPositionStatus(position, "CLOSED")
 			position.StopLossOrderID, position.TakeProfitOrderID = "", ""
 			position.PartialExitOrders = nil
 			position.PartialExitClientOrderID = ""
 			now := time.Now()
 			position.ClosedAt = &now
 		} else {
-			position.Status = "PARTIAL"
+			pm.setPositionStatus(position, "PARTIAL")
 		}
 		pm.logger.WithFields(logrus.Fields{
 			"position_id":   position.ID,
@@ -2099,7 +2245,7 @@ func (pm *PositionManager) manageRiskOrders(ctx context.Context, position *Manag
 			position.PartialExitOrders = nil
 			position.PartialExitClientOrderID = ""
 			if err := pm.placeRiskOrders(ctx, position); err != nil {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 			}
 			if err := pm.savePositionToDB(position); err != nil {
@@ -2118,7 +2264,7 @@ func (pm *PositionManager) updateTrailingStop(ctx context.Context, position *Man
 			// Cancel old stop loss order
 			if position.StopLossOrderID != "" {
 				if err := pm.tradingService.CancelOrder(ctx, position.StopLossOrderID); err != nil {
-					position.Status = "CLOSING"
+					pm.setPositionStatus(position, "CLOSING")
 					pm.blockExecution("protection")
 					_ = pm.savePositionToDB(position)
 					return
@@ -2130,7 +2276,7 @@ func (pm *PositionManager) updateTrailingStop(ctx context.Context, position *Man
 			// Update stop price and place new order
 			position.StopLossPrice = newStopPrice
 			if err := pm.placeStopLossOrder(ctx, position); err != nil {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 				return
@@ -2147,7 +2293,7 @@ func (pm *PositionManager) updateTrailingStop(ctx context.Context, position *Man
 		if newStopPrice < position.StopLossPrice {
 			if position.StopLossOrderID != "" {
 				if err := pm.tradingService.CancelOrder(ctx, position.StopLossOrderID); err != nil {
-					position.Status = "CLOSING"
+					pm.setPositionStatus(position, "CLOSING")
 					pm.blockExecution("protection")
 					_ = pm.savePositionToDB(position)
 					return
@@ -2158,7 +2304,7 @@ func (pm *PositionManager) updateTrailingStop(ctx context.Context, position *Man
 
 			position.StopLossPrice = newStopPrice
 			if err := pm.placeStopLossOrder(ctx, position); err != nil {
-				position.Status = "PROTECTION_BLOCKED"
+				pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 				pm.blockExecution("protection")
 				_ = pm.savePositionToDB(position)
 				return
@@ -2212,6 +2358,8 @@ func (pm *PositionManager) GetManagedPosition(positionID string) (*ManagedPositi
 func (pm *PositionManager) ListManagedPositions(status string) []*ManagedPosition {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
+	pm.statusMu.RLock()
+	defer pm.statusMu.RUnlock()
 
 	positions := make([]*ManagedPosition, 0)
 	now := time.Now()
@@ -2287,7 +2435,7 @@ func (pm *PositionManager) closeManagedPosition(ctx context.Context, positionID 
 	if err != nil {
 		return err
 	}
-	position.Status = "CLOSING"
+	pm.setPositionStatus(position, "CLOSING")
 	if err := pm.savePositionToDB(position); err != nil {
 		return fmt.Errorf("failed to persist closing state: %w", err)
 	}
@@ -2312,7 +2460,7 @@ func (pm *PositionManager) closeManagedPosition(ctx context.Context, positionID 
 	}
 
 	if cancellationErr != nil {
-		position.Status = "PROTECTION_BLOCKED"
+		pm.setPositionStatus(position, "PROTECTION_BLOCKED")
 		pm.blockExecution("protection")
 		if saveErr := pm.savePositionToDB(position); saveErr != nil {
 			return fmt.Errorf("order cancellation unresolved: %w; failed to persist protection-blocked state: %v", cancellationErr, saveErr)
@@ -2385,7 +2533,7 @@ func (pm *PositionManager) closeManagedPosition(ctx context.Context, positionID 
 				}
 				_ = pm.saveManagedOrderProjection(position.ID, "close", order, order.Status)
 				pm.logger.WithError(err).Error("Failed to place exit order (market may be closed)")
-				position.Status = "CLOSING"
+				pm.setPositionStatus(position, "CLOSING")
 				pm.savePositionToDB(position)
 				return fmt.Errorf("failed to place market exit order: %w", err)
 			} else {
@@ -2415,13 +2563,13 @@ func (pm *PositionManager) closeManagedPosition(ctx context.Context, positionID 
 				if err := pm.storageService.SaveOrder(order); err != nil {
 					pm.logger.WithError(err).Error("Failed to save market exit order")
 					pm.blockExecution("protection")
-					position.Status = "CLOSING"
+					pm.setPositionStatus(position, "CLOSING")
 					_ = pm.savePositionToDB(position)
 					return fmt.Errorf("market exit persistence is unresolved: %w", err)
 				}
 				if err := pm.saveManagedOrderProjection(position.ID, "close", order, order.Status); err != nil {
 					pm.blockExecution("persistence")
-					position.Status = "CLOSING"
+					pm.setPositionStatus(position, "CLOSING")
 					_ = pm.savePositionToDB(position)
 					return fmt.Errorf("market exit projection is unresolved: %w", err)
 				}
@@ -2442,7 +2590,7 @@ func (pm *PositionManager) closeManagedPosition(ctx context.Context, positionID 
 			}
 			switch strings.ToLower(entry.Status) {
 			case "filled":
-				position.Status = "ACTIVE"
+				pm.setPositionStatus(position, "ACTIVE")
 				if entry.FilledQty > 0 {
 					position.RemainingQty = entry.FilledQty
 				}
@@ -2461,7 +2609,7 @@ func (pm *PositionManager) closeManagedPosition(ctx context.Context, positionID 
 		pm.logger.WithField("position_id", position.ID).Info("Closed pending position (entry order was never filled)")
 	}
 
-	position.Status = "CLOSED"
+	pm.setPositionStatus(position, "CLOSED")
 	position.RemainingQty = 0
 	position.StopLossOrderID, position.TakeProfitOrderID = "", ""
 	position.PartialExitOrders = nil

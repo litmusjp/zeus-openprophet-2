@@ -707,6 +707,7 @@ func (s *AlpacaTradingService) GetPositions(ctx context.Context) ([]*interfaces.
 			UnrealizedPLPC:  ap.UnrealizedPLPC.InexactFloat64(),
 			CurrentPrice:    ap.CurrentPrice.InexactFloat64(),
 			Side:            string(ap.Side),
+			AssetClass:      string(ap.AssetClass),
 		}
 	}
 

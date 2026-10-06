@@ -320,11 +320,11 @@ func main() {
 	}
 
 	// Start position monitor only after persisted order reconciliation clears the execution gate.
-	if storageService != nil && !orderController.ExecutionBlocked() {
+	if storageService != nil && brokerReady && reconcileSkipped == 0 {
 		go startPositionMonitor(ctx, orderController, storageService, logger)
 		go positionManager.MonitorPositions(ctx)
 	} else {
-		logger.Error("Position monitoring disabled because trading execution is blocked")
+		logger.Error("Position monitoring disabled because startup reconciliation or broker readiness failed")
 	}
 
 	// Setup graceful shutdown

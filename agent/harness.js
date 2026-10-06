@@ -976,11 +976,25 @@ ${userBlock}`;
         });
       }
 
+      // Keep CLI helpers on the explicitly selected model, never a paid default.
+      const invocationEnv = { ...process.env, ...this.opencodeEnv };
+      let inherited = {};
+      try {
+        inherited = invocationEnv.OPENCODE_CONFIG_CONTENT ? JSON.parse(invocationEnv.OPENCODE_CONFIG_CONTENT) : {};
+        const object = value => value && typeof value === 'object' && !Array.isArray(value);
+        if (!object(inherited) || (inherited.agent !== undefined && !object(inherited.agent))) throw new Error();
+        for (const value of Object.values(inherited.agent || {})) if (!object(value)) throw new Error();
+      } catch {
+        throw new Error('Invalid OpenCode configuration; provider invocation blocked');
+      }
+      const agents = Object.fromEntries(Object.entries(inherited.agent || {}).map(([name, value]) => [name, { ...value, ...(value.model !== undefined ? { model: ocModel } : {}) }]));
+      for (const name of ['title', 'summary', 'compaction']) agents[name] = { ...agents[name], model: ocModel };
+      invocationEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inherited, model: ocModel, small_model: ocModel, agent: agents });
+
       const proc = this.spawnFn('opencode', args, {
         cwd: process.cwd(),
         env: {
-          ...process.env,
-          ...this.opencodeEnv,
+          ...invocationEnv,
           OPENPROPHET_SANDBOX_ID: this.sandboxId || '',
           OPENPROPHET_ACCOUNT_ID: this.state.activeAccountId || this.accountId || '',
         },

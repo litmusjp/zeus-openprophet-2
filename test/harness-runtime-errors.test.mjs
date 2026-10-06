@@ -23,6 +23,27 @@ function fakeProcess(lines, exitCode = 0) {
   return proc;
 }
 
+test('pins primary and all auxiliary agent model overrides to selected free model', async () => {
+  let captured;
+  const harness = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: 'unapproved/paid', small_model: 'unapproved/paid', permission: { '*': 'ask' }, mcp: { isolated: { enabled: false } }, agent: { title: { model: 'unapproved/paid', hidden: true }, explore: { model: 'unapproved/paid', description: 'keep' } } }) }, spawnFn: (_cmd, _args, options) => { captured = options.env; return fakeProcess([{type:'text',part:{text:'OK'}}]); } });
+  await harness._runClaude('readonly test', 'opencode/big-pickle');
+  const c = JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
+  assert.equal(c.model, 'opencode/big-pickle'); assert.equal(c.small_model, 'opencode/big-pickle');
+  for (const name of ['title','summary','compaction','explore']) assert.equal(c.agent[name].model, 'opencode/big-pickle');
+  assert.equal(c.agent.title.hidden, true); assert.equal(c.agent.explore.description, 'keep');
+  assert.deepEqual(c.permission, {'*':'ask'}); assert.deepEqual(c.mcp, {isolated:{enabled:false}});
+});
+test('free auxiliary pins exist without an inherited overlay', async () => {
+  let captured; const harness = new AgentHarness({ opencodeEnv: {OPENCODE_CONFIG_CONTENT:''}, spawnFn: (_c,_a,o) => {captured=o.env;return fakeProcess([{type:'text',part:{text:'OK'}}]);} });
+  await harness._runClaude('readonly test','opencode/big-pickle'); const c=JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
+  assert.equal(c.small_model,'opencode/big-pickle'); assert.equal(c.agent.title.model,'opencode/big-pickle');
+});
+for (const bad of ['SECRET-do-not-echo', 'null', '[]', '{"agent":{"title":4}}']) test('invalid inherited model config prevents provider spawn '+bad.length, async () => {
+  let spawned=false;const h=new AgentHarness({opencodeEnv:{OPENCODE_CONFIG_CONTENT:bad},spawnFn:()=>{spawned=true;return fakeProcess([])}});
+  await assert.rejects(h._runClaude('readonly test','opencode/big-pickle'), e=>/Invalid OpenCode configuration/.test(e.message)&&!e.message.includes('SECRET-do-not-echo'));
+  assert.equal(spawned,false);
+});
+
 test('OpenCode error events become bounded actionable errors without token content', async () => {
   const formatted = formatOpenCodeError({
     type: 'error',

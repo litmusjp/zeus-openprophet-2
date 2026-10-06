@@ -42,6 +42,90 @@ test('runOpenCode propagates a JSON error event even when the child exits zero',
   assert.match(result.error, /APICallError: HTTP 403/);
 });
 
+test('structured stderr throttling split across chunks is sanitized and waits for child exit', async () => {
+  let proc;
+  let args;
+  const harness = new AgentHarness({ spawnFn: (_cmd, passedArgs) => {
+    args = passedArgs;
+    proc = new EventEmitter();
+    proc.stdin = { on() {}, write() {}, end() {} };
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
+    proc.kill = (signal) => { proc.killed = true; proc.sent = signal; };
+    return proc;
+  } });
+  const running = harness._runClaude('heartbeat', 'opencode/model');
+  while (!proc) await new Promise(resolve => setImmediate(resolve));
+  const secret = 'header-private-xyz';
+  const record = JSON.stringify({ level: 'error', error: { name: 'APICallError', statusCode: 429, message: 'rate limited', responseHeaders: { authorization: `Bearer ${secret}` }, responseBody: secret } });
+  proc.stderr.emit('data', record.slice(0, 34));
+  proc.stderr.emit('data', record.slice(34));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(proc.sent, 'SIGTERM');
+  let settled = false; running.then(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.ok(args.includes('--print-logs'));
+  assert.ok(args.includes('--log-level'));
+  proc.emit('exit', null, 'SIGTERM');
+  const result = await running;
+  assert.match(result.error, /HTTP 429/);
+  assert.doesNotMatch(result.error, /header-private-xyz/);
+});
+
+test('ordinary stderr text is not promoted to a provider failure', async () => {
+  const harness = new AgentHarness({ spawnFn: () => {
+    const proc = fakeProcess([{ type: 'text', part: { text: 'healthy' } }]);
+    queueMicrotask(() => proc.stderr.emit('data', 'rate limit maybe but ordinary diagnostic'));
+    return proc;
+  } });
+  const result = await harness._runClaude('heartbeat', 'opencode/model');
+  assert.equal(result.text, 'healthy');
+  assert.equal(result.error, undefined);
+});
+
+test('native OpenCode key-value stream error is recognized without exposing the raw record', async () => {
+  let proc;
+  const harness = new AgentHarness({ spawnFn: () => {
+    proc = new EventEmitter(); proc.stdin = { on() {}, write() {}, end() {} };
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
+    proc.kill = () => { proc.killed = true; };
+    return proc;
+  } });
+  const running = harness._runClaude('heartbeat', 'opencode/model');
+  while (!proc) await new Promise(resolve => setImmediate(resolve));
+  const line = 'timestamp=2026-10-05T23:34:46.656Z level=ERROR run=969eddf1 message="stream error" providerID=opencode modelID=ling-3.1-flash-free session.id=ses_ef1948d97ffeHsKvPIhYeSD3qJ small=false agent=build mode=primary error.error="AI_APICallError: Rate limit exceeded. Please try again later."';
+  proc.stderr.emit('data', line.slice(0, 130));
+  proc.stderr.emit('data', line.slice(130));
+  assert.equal(proc.killed, true);
+  proc.emit('exit', null, 'SIGTERM');
+  const result = await running;
+  assert.match(result.error, /AI_APICallError: Rate limit exceeded/);
+  assert.doesNotMatch(result.error, /969eddf1|ses_ef|providerID|modelID/);
+});
+
+test('hung child receives SIGKILL after SIGTERM even when killed flag is already true', async () => {
+  let proc;
+  const harness = new AgentHarness({ spawnFn: () => {
+    proc = new EventEmitter(); proc.stdin = { on() {}, write() {}, end() {} };
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
+    proc.signals = [];
+    proc.kill = signal => { proc.killed = true; proc.signals.push(signal); };
+    return proc;
+  } });
+  const running = harness._runClaude('heartbeat', 'opencode/model');
+  while (!proc) await new Promise(resolve => setImmediate(resolve));
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => originalSetTimeout(fn, ms === 5000 ? 0 : ms, ...args);
+  try {
+    proc.stderr.emit('data', JSON.stringify({ type: 'error', error: { name: 'APIError', statusCode: 429, message: 'limited' } }));
+    await new Promise(resolve => originalSetTimeout(resolve, 10));
+  } finally { globalThis.setTimeout = originalSetTimeout; }
+  assert.deepEqual(proc.signals, ['SIGTERM', 'SIGKILL']);
+  proc.emit('exit', null, 'SIGKILL');
+  const result = await running;
+  assert.match(result.error, /HTTP 429/);
+});
+
 test('nested runtime wire shape preserves data.message/status but no diagnostics secrets', () => {
   const formatted = formatOpenCodeError({ type: 'error', error: {
     name: 'APICallError', data: {

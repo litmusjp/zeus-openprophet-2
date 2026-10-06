@@ -150,6 +150,23 @@ function openCodeErrorMetadata(event) {
   return { message: formatOpenCodeError(event), status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null };
 }
 
+function parseOpenCodeStderrError(line) {
+  // Native OpenCode logs are key=value records. Recognize only the exact
+  // provider stream failure shape; never surface arbitrary stderr text.
+  if (/^timestamp=\S+\s+level=ERROR\s+run=\S+\s+message="stream error"\s+providerID=opencode\s+modelID=\S+\s+session\.id=\S+\s+small=(?:true|false)\s+agent=\S+\s+mode=\S+\s+error\.error="AI_APICallError: [^"\r\n]{1,1000}"\s*$/.test(line)) {
+    const match = line.match(/error\.error="(AI_APICallError): ([^"\r\n]{1,1000})"\s*$/);
+    if (!match) return null;
+    return { message: sanitizeOpenCodeError(`${match[1]}: ${match[2]}`), status: null };
+  }
+  let record;
+  try { record = JSON.parse(line); } catch { return null; }
+  const isError = record?.type === 'error'
+    || (String(record?.level || '').toLowerCase() === 'error' && (record.error || record.message));
+  if (!isError) return null;
+  const metadata = openCodeErrorMetadata(record);
+  return metadata.message ? metadata : null;
+}
+
 // ── System Prompt Builder ──────────────────────────────────────────
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
@@ -385,6 +402,7 @@ export class AgentHarness {
     this._pendingMessages = [];
     this._interrupted = false;
     this._beatTimeout = null;
+    this._killEscalationTimer = null;
     this._sessionEpoch = 0;
     this._consecutiveErrors = 0;
     this._marketSessionDates = new Set();
@@ -523,21 +541,24 @@ export class AgentHarness {
     this.state.running = false;
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
+    if (this._killEscalationTimer) { clearTimeout(this._killEscalationTimer); this._killEscalationTimer = null; }
     this._sessionEpoch += 1;
     this._sessionId = null;
 
     const procToKill = this._proc;
-    if (procToKill && !procToKill.killed) {
-      procToKill.kill('SIGTERM');
-      setTimeout(() => {
-        if (!procToKill.killed) procToKill.kill('SIGKILL');
+    if (procToKill && !procToKill._opExitObserved) {
+      if (procToKill._opKillTimer) { clearTimeout(procToKill._opKillTimer); procToKill._opKillTimer = null; }
+      if (!procToKill.killed) procToKill.kill('SIGTERM');
+      this._killEscalationTimer = setTimeout(() => {
+        this._killEscalationTimer = null;
+        if (!procToKill._opExitObserved) procToKill.kill('SIGKILL');
       }, 2000);
     }
 
     await new Promise((resolve) => {
       const started = Date.now();
       const check = () => {
-        if (!this._beating && (!procToKill || procToKill.killed || this._proc !== procToKill)) return resolve();
+        if (!this._beating && (!procToKill || procToKill._opExitObserved || this._proc !== procToKill)) return resolve();
         if (Date.now() - started > 5000) return resolve();
         setTimeout(check, 100);
       };
@@ -932,6 +953,8 @@ ${userBlock}`;
       const args = [
         'run',
         '--format', 'json',
+        '--print-logs',
+        '--log-level', 'ERROR',
         '--model', ocModel,
       ];
 
@@ -985,9 +1008,22 @@ ${userBlock}`;
       let totalCost = 0;
       let totalTokens = 0;
       let stderrText = '';
+      let bufferStderr = '';
       let streamError = '';
       let streamErrorStatus = null;
       let timedOut = false;
+      let exited = false;
+      let escalationTimer = null;
+
+      const terminateAfterError = () => {
+        if (!exited && !proc.killed) {
+          proc.kill('SIGTERM');
+          escalationTimer = proc._opKillTimer = setTimeout(() => {
+            proc._opKillTimer = null;
+            if (!exited) proc.kill('SIGKILL');
+          }, SIGKILL_GRACE_MS);
+        }
+      };
 
       proc.stdout.on('data', (chunk) => {
         buffer += chunk.toString();
@@ -1005,25 +1041,51 @@ ${userBlock}`;
               setSession: (id) => { sessionId = id; },
               addCost: (c) => { totalCost += c; },
               addTokens: (t) => { totalTokens += t; },
-              setError: (error) => { streamError = error.message; streamErrorStatus = error.status; },
+              setError: (error) => { streamError = error.message; streamErrorStatus = error.status; terminateAfterError(); },
             });
           } catch { /* skip unparseable lines */ }
         }
       });
 
       proc.stderr.on('data', (chunk) => {
-        const msg = sanitizeOpenCodeError(chunk.toString());
-        if (msg) {
-          stderrText = `${stderrText}${msg}\n`.slice(-2000);
-          this.state.emit('agent_log', { message: `[opencode] ${msg}`, level: 'info' });
+        bufferStderr = (bufferStderr + chunk.toString()).slice(-OPEN_CODE_ERROR_LIMIT * 2);
+        const lines = bufferStderr.split('\n');
+        bufferStderr = lines.pop().slice(-OPEN_CODE_ERROR_LIMIT);
+        let pending = lines;
+        if (lines.length === 0 && bufferStderr.trim()) {
+          const complete = parseOpenCodeStderrError(bufferStderr);
+          if (complete) { pending = [bufferStderr]; bufferStderr = ''; }
+        }
+        for (const line of pending) {
+          const record = parseOpenCodeStderrError(line);
+          if (record) {
+            streamError = record.message;
+            streamErrorStatus = record.status;
+            this.state.emit('agent_log', { message: `OpenCode error: ${record.message}`, level: 'error' });
+            terminateAfterError();
+          }
         }
       });
+      proc._opExitObserved = false;
 
       proc.on('error', (err) => {
+        if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
+        if (escalationTimer) clearTimeout(escalationTimer);
+        this._proc = null;
         reject(new Error(`Failed to spawn opencode: ${err.message}`));
       });
 
       proc.on('exit', (code, signal) => {
+        exited = true;
+        proc._opExitObserved = true;
+        if (escalationTimer) { clearTimeout(escalationTimer); escalationTimer = null; }
+        if (proc._opKillTimer) { clearTimeout(proc._opKillTimer); proc._opKillTimer = null; }
+        if (this._killEscalationTimer) { clearTimeout(this._killEscalationTimer); this._killEscalationTimer = null; }
+        if (bufferStderr.trim()) {
+          const record = parseOpenCodeStderrError(bufferStderr);
+          if (record) { streamError = record.message; streamErrorStatus = record.status; }
+          bufferStderr = '';
+        }
         // Clear proc reference and cancel safety timeout
         this._proc = null;
         if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
@@ -1081,13 +1143,14 @@ ${userBlock}`;
 
       // Safety timeout - 5 minutes max per beat
       this._beatTimeout = setTimeout(() => {
-        if (proc && !proc.killed) {
+        if (proc && !exited) {
           timedOut = true;
           this.state.emit('agent_log', { message: `Beat timed out (${BEAT_TIMEOUT_MS / 1000}s max), killing process with SIGTERM.`, level: 'warning' });
           proc.kill('SIGTERM');
           // Escalate to SIGKILL if the process ignores SIGTERM (otherwise the beat hangs forever).
-          setTimeout(() => {
-            if (proc && !proc.killed) {
+          escalationTimer = proc._opKillTimer = setTimeout(() => {
+            proc._opKillTimer = null;
+            if (proc && !exited) {
               this.state.emit('agent_log', { message: 'Process ignored SIGTERM after timeout — sending SIGKILL.', level: 'error' });
               proc.kill('SIGKILL');
             }

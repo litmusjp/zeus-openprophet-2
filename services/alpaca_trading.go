@@ -33,6 +33,8 @@ type AlpacaTradingService struct {
 	logger                  *logrus.Logger
 	executionMu             sync.RWMutex
 	executionBlocked        bool
+	managedBlockMu          sync.RWMutex
+	managedExecutionBlocked func() bool
 	policy                  *TradingPolicy
 	expectedAccountID       string
 	expectedPaper           bool
@@ -270,6 +272,24 @@ func (s *AlpacaTradingService) ExecutionBlocked() bool {
 	s.executionMu.RLock()
 	defer s.executionMu.RUnlock()
 	return s.executionBlocked
+}
+
+// SetManagedExecutionBlockCheck binds the managed-position reconciliation gate.
+// A nil check fails closed for the paper advisory opening lane.
+func (s *AlpacaTradingService) SetManagedExecutionBlockCheck(check func() bool) {
+	s.managedBlockMu.Lock()
+	s.managedExecutionBlocked = check
+	s.managedBlockMu.Unlock()
+}
+
+func (s *AlpacaTradingService) managedExecutionIsBlocked() (bool, bool) {
+	s.managedBlockMu.RLock()
+	check := s.managedExecutionBlocked
+	s.managedBlockMu.RUnlock()
+	if check == nil {
+		return true, false
+	}
+	return check(), true
 }
 
 func (s *AlpacaTradingService) ensureExecutionAllowed() error {
@@ -867,13 +887,20 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		if err := validateAlphaDeskExecutionMode(s.alphaDesk.ExecutionMode); err != nil {
 			return nil, err
 		}
-		if (s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" || s.alphaDesk.ExecutionMode == "STANDALONE_OP2") && !s.alphaDesk.Enabled {
+		if (s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" || s.alphaDesk.ExecutionMode == "STANDALONE_OP2" || s.alphaDesk.ExecutionMode == "PAPER_ADVISORY_OP2") && !s.alphaDesk.Enabled {
 			return nil, &AlphaDeskConfigurationError{Reason: "AlphaDesk must be enabled for OP2 signal execution mode"}
 		}
 	}
 	if strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil && s.alphaDesk.Enabled {
 		if s.alphaDesk.ExecutionMode == "STANDALONE_OP2" {
 			if err := s.requireStandaloneApproval(ctx, order); err != nil {
+				return nil, err
+			}
+		} else if s.alphaDesk.ExecutionMode == "PAPER_ADVISORY_OP2" {
+			if !s.expectedPaper || !s.alphaDesk.SignalQualityEnabled {
+				return nil, &AlphaDeskConfigurationError{Reason: "paper advisory mode requires enabled assessment and a verified paper account"}
+			}
+			if err := s.requirePaperAdvisoryQualification(ctx, order); err != nil {
 				return nil, err
 			}
 		} else {
@@ -919,7 +946,6 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 			}
 		}
 	}
-
 	s.logger.WithFields(logrus.Fields{
 		"symbol":          order.Symbol,
 		"side":            order.Side,
@@ -933,10 +959,52 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		placeOrder = s.client.PlaceOrder
 	}
 	if placeOrder == nil {
+		order.AlphaDeskAssessment = nil
 		return nil, fmt.Errorf("broker order submission is unavailable")
 	}
 	if err := s.markSubmissionBoundary(&interfaces.Order{ClientOrderID: order.ClientOrderID}); err != nil {
+		order.AlphaDeskAssessment = nil
 		return nil, err
+	}
+	// Markers can block or trigger cancellation. Complete all final freshness,
+	// session and managed-state checks after that work, directly before the RPC.
+	if err := ctx.Err(); err != nil {
+		order.AlphaDeskAssessment = nil
+		return nil, err
+	}
+	paperAdvisoryOpening := strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil && s.alphaDesk.ExecutionMode == "PAPER_ADVISORY_OP2"
+	if paperAdvisoryOpening {
+		if err := s.validatePaperAdvisoryAtSubmission(ctx, order); err != nil {
+			order.AlphaDeskAssessment = nil
+			return nil, err
+		}
+	}
+	if err := checkRegularSession(s.clockReader); err != nil {
+		order.AlphaDeskAssessment = nil
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		order.AlphaDeskAssessment = nil
+		return nil, err
+	}
+	if paperAdvisoryOpening {
+		blocked, known := s.managedExecutionIsBlocked()
+		if !known || blocked {
+			order.AlphaDeskAssessment = nil
+			return nil, fmt.Errorf("managed execution is blocked or unavailable at paper advisory order boundary")
+		}
+		if err := ctx.Err(); err != nil {
+			order.AlphaDeskAssessment = nil
+			return nil, err
+		}
+		if err := s.validatePaperAdvisoryReceipt(ctx, order); err != nil {
+			order.AlphaDeskAssessment = nil
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			order.AlphaDeskAssessment = nil
+			return nil, err
+		}
 	}
 	order.SubmissionAttempted = true
 	alpacaOrder, err := placeOrder(req)

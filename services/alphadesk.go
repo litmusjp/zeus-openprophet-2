@@ -54,7 +54,7 @@ func NewAlphaDeskClientFromEnv() *AlphaDeskClient {
 
 func validateAlphaDeskExecutionMode(mode string) error {
 	switch mode {
-	case "", "ACCOUNT_VERIFIED", "SIGNAL_QUALITY_OP2", "STANDALONE_OP2":
+	case "", "ACCOUNT_VERIFIED", "SIGNAL_QUALITY_OP2", "STANDALONE_OP2", "PAPER_ADVISORY_OP2":
 		return nil
 	default:
 		return &AlphaDeskConfigurationError{Reason: "unknown AlphaDesk execution mode"}

@@ -131,6 +131,9 @@ func TestAlphaDeskExecutionModeRequiresSeparateDeploymentOptIn(t *testing.T) {
 	if err := validateAlphaDeskExecutionMode("typo"); err == nil {
 		t.Fatal("unknown execution mode accepted")
 	}
+	if err := validateAlphaDeskExecutionMode("PAPER_ADVISORY_OP2"); err != nil {
+		t.Fatalf("paper advisory opt-in rejected: %v", err)
+	}
 }
 
 func TestValidateAlphaDeskSignalQualityRequiresExactContract(t *testing.T) {

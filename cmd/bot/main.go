@@ -262,6 +262,9 @@ func main() {
 	// Create position manager
 	positionManager := services.NewPositionManager(tradingService, dataService, storageService)
 	positionManager.SetExecutionBlocked(true)
+	if tradingService != nil {
+		tradingService.SetManagedExecutionBlockCheck(positionManager.ExecutionBlocked)
+	}
 	if brokerReady {
 		managedCtx, managedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		managedSkipped = positionManager.ReconcilePersistedPositions(managedCtx)

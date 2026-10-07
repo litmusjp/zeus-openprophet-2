@@ -1604,7 +1604,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	intent.TenantID = persistedIntent.TenantID
 	intent.SandboxID = persistedIntent.SandboxID
 	intent.Revision = persistedIntent.Revision
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
 	result, err := oc.tradingService.PlaceOptionsOrder(ctx, order)

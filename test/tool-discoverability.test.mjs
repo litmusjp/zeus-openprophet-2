@@ -23,8 +23,9 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   assert.match(prompt, /for the exact proposal/);
   assert.match(prompt, /Decision is PASS, FAIL or UNAVAILABLE/);
   assert.match(prompt, /signal scores are nullable provider-owned evidence/);
-  assert.match(prompt, /PASS is assessment-only, never account permission or broker authorization/);
-  assert.match(prompt, /independently refreshes evidence and reassesses at the final broker boundary/);
+  assert.match(prompt, /Assessment PASS is trade-quality evidence only, never account permission or broker authorization/);
+  assert.match(prompt, /independently refreshes the exact proposal at the final broker boundary/);
+  assert.match(prompt, /On PASS, attempt .*prophet_place_options_order/);
 });
 
 test('generated system prompt clarifies zero maxOrderValue semantics', async () => {
@@ -49,8 +50,8 @@ test('generated system prompt contains the approved evidence and privacy clarifi
   });
 
   assert.match(prompt, /heartbeat interval comes from heartbeat context|heartbeat context.*guardrails/i);
-  assert.match(prompt, /When its gate is enabled/);
-  assert.match(prompt, /final broker boundary.*OP2 paper, identity, permission, market, risk and reconciliation checks/);
+  assert.match(prompt, /when its gate is enabled/);
+  assert.match(prompt, /final broker boundary.*account, paper, identity, permission, market, risk and reconciliation checks/);
   assert.match(prompt, /stale MarketWatch.*informational only.*never current market evidence/i);
   assert.match(prompt, /daily loss.*broker account.*not from a dedicated status tool/i);
   assert.match(prompt, /find_similar_setups.*advisory.*materially relevant matches/i);

@@ -242,6 +242,16 @@ func standaloneProposalForOrder(order *interfaces.OptionsOrder) (StandaloneTrade
 // Existing local permission, account/buying-power/exposure/session/reservation
 // checks run before this helper; mandatory durable auditing runs before submission.
 func (s *AlpacaTradingService) requireStandaloneApproval(ctx context.Context, order *interfaces.OptionsOrder) error {
+	return s.requireStandaloneApprovalMode(ctx, order, false)
+}
+
+// requirePaperAdvisoryQualification treats a read-only PASS as a quality gate
+// for locally authorized PAPER orders; it grants no broker permission.
+func (s *AlpacaTradingService) requirePaperAdvisoryQualification(ctx context.Context, order *interfaces.OptionsOrder) error {
+	return s.requireStandaloneApprovalMode(ctx, order, true)
+}
+
+func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context, order *interfaces.OptionsOrder, allowPaperAdvisory bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if order != nil {
@@ -268,8 +278,11 @@ func (s *AlpacaTradingService) requireStandaloneApproval(ctx context.Context, or
 	if doc["decision"] != "PASS" {
 		return &AlphaDeskUnavailableError{Reason: "Standalone assessment is not PASS"}
 	}
-	if doc["advisory_policy_profile"] == "paper_advisory_greeks_v1" {
+	if doc["advisory_policy_profile"] == "paper_advisory_greeks_v1" && !allowPaperAdvisory {
 		return &AlphaDeskUnavailableError{Reason: "Paper advisory assessment cannot authorize an order"}
+	}
+	if allowPaperAdvisory && (doc["advisory_policy_profile"] != "paper_advisory_greeks_v1" || doc["execution_allowed"] != false || doc["paper_only"] != true || doc["human_approval_required"] != true) {
+		return &AlphaDeskUnavailableError{Reason: "Standalone receipt is not a paper-only advisory assessment"}
 	}
 	score, err := standaloneNumber(doc["signal_score"])
 	if err != nil {
@@ -317,5 +330,40 @@ func (s *AlpacaTradingService) requireStandaloneApproval(ctx context.Context, or
 	}
 	order.AlphaDeskAssessment = a
 	approved = true
+	return nil
+}
+
+func (s *AlpacaTradingService) validatePaperAdvisoryReceipt(ctx context.Context, order *interfaces.OptionsOrder) error {
+	a := order.AlphaDeskAssessment
+	if a == nil || !a.Pass || a.Decision != "PASS" || a.ExecutionAllowed || !a.HumanApprovalRequired || a.Scope != "TRADE_ASSESSMENT" {
+		return &AlphaDeskUnavailableError{Reason: "Paper advisory assessment is unavailable at submission boundary"}
+	}
+	doc, ok := a.Evidence.(map[string]any)
+	if !ok || doc["decision"] != "PASS" || doc["advisory_policy_profile"] != "paper_advisory_greeks_v1" || doc["execution_allowed"] != false || doc["paper_only"] != true || doc["human_approval_required"] != true || doc["policy_version"] != a.PolicyVersion {
+		return &AlphaDeskUnavailableError{Reason: "Trusted paper advisory receipt changed before submission"}
+	}
+	if err := s.alphaDesk.standaloneFresh(ctx, doc); err != nil {
+		return err
+	}
+	p, err := standaloneProposalForOrder(order)
+	if err != nil || OptionsOrderFingerprint(s.standaloneIdentity(), order) != a.Fingerprint || doc["trade_fingerprint"] != standaloneProposalFingerprint(p) {
+		return &AlphaDeskUnavailableError{Reason: "Paper advisory proposal changed before submission", Err: err}
+	}
+	return nil
+}
+
+// Recheck policy after durable submission-marker work. The caller follows this
+// potentially blocking read with the final session, context and receipt checks.
+func (s *AlpacaTradingService) validatePaperAdvisoryAtSubmission(ctx context.Context, order *interfaces.OptionsOrder) error {
+	if !s.expectedPaper || s.alphaDesk == nil || !s.alphaDesk.Enabled || !s.alphaDesk.SignalQualityEnabled {
+		return &AlphaDeskUnavailableError{Reason: "Paper advisory authorization is unavailable at submission boundary"}
+	}
+	if err := s.validatePaperAdvisoryReceipt(ctx, order); err != nil {
+		return err
+	}
+	version, err := s.alphaDesk.standalonePolicyVersion(ctx)
+	if err != nil || version != order.AlphaDeskAssessment.PolicyVersion {
+		return &AlphaDeskUnavailableError{Reason: "Standalone policy changed before paper order submission", Err: err}
+	}
 	return nil
 }

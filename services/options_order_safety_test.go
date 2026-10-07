@@ -502,13 +502,14 @@ func TestRiskReducingOptionsExitDoesNotCallAlphaDesk(t *testing.T) {
 		clockReader:          fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}},
 		logger:               logrus.New(),
 		submissionMarker:     func(string) error { return nil },
-		alphaDesk:            &AlphaDeskClient{Enabled: true, URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
+		alphaDesk:            &AlphaDeskClient{Enabled: true, ExecutionMode: "PAPER_ADVISORY_OP2", URL: alpha.URL, APIKey: "test", HTTP: alpha.Client(), Now: time.Now},
 		optionsChainProvider: freshAssessmentChainProvider,
 		placeOrderFn: func(alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
 			brokerCalls++
 			return &alpaca.Order{ID: "close-1", Status: "accepted", Qty: decimalPtr(decimal.NewFromInt(1)), Symbol: "TSLA251219C00400000", Side: alpaca.Sell, Type: alpaca.Limit, TimeInForce: alpaca.Day}, nil
 		},
 	}
+	service.SetManagedExecutionBlockCheck(func() bool { return true })
 	_, err := service.PlaceOptionsOrder(context.Background(), &interfaces.OptionsOrder{
 		ClientOrderID: "op-close", Symbol: "TSLA251219C00400000", Underlying: "TSLA", Qty: 1,
 		Side: "sell", PositionIntent: "sell_to_close", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),

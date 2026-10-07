@@ -17,7 +17,7 @@ function fakeProcess(lines, exitCode = 0) {
   proc.killed = false;
   proc.kill = () => { proc.killed = true; };
   queueMicrotask(() => {
-    for (const line of lines) proc.stdout.emit('data', `${JSON.stringify(line)}\n`);
+    for (const line of lines) proc.stdout.emit('data', `${JSON.stringify(line)}\r\n`);
     proc.emit('exit', exitCode, null);
   });
   return proc;
@@ -172,6 +172,47 @@ test('null-code exit with no text is not success', async () => {
   const harness = new AgentHarness({ spawnFn: () => fakeProcess([], null) });
   const result = await harness._runClaude('heartbeat', 'opencode/ling-3.1-flash-free');
   assert.match(result.error, /exited with code null signal null/);
+});
+
+test('deadline after partial text remains a timeout failure and retains output', async () => {
+  let proc;
+  const harness = new AgentHarness({ spawnFn: () => {
+    proc = new EventEmitter(); proc.stdin = { on() {}, write() {}, end() {} };
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
+    proc.kill = signal => { proc.killed = true; proc.signal = signal; queueMicrotask(() => proc.emit('exit', null, signal)); };
+    queueMicrotask(() => proc.stdout.emit('data', `${JSON.stringify({ type: 'text', sessionID: 'timeout-session', part: { text: 'partial answer' } })}\r\n`));
+    return proc;
+  } });
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => originalSetTimeout(fn, ms >= 300000 ? 0 : ms, ...args);
+  try {
+    const result = await harness._runClaude('heartbeat', 'opencode/model');
+    assert.match(result.error, /timed out/);
+    assert.equal(result.errorStatus, 'timeout');
+    assert.equal(result.text, 'partial answer');
+  } finally { globalThis.setTimeout = originalSetTimeout; }
+});
+
+test('failed message beat audits partial reply and completed tools with failure status', async () => {
+  const writes = [];
+  const chatStore = {
+    async getRecentContext() { return []; },
+    async startSession(account, session, metadata) { writes.push({ type: 'session', account, session, metadata }); },
+    async addMessage(account, session, message) { writes.push({ type: 'message', account, session, message }); },
+  };
+  const harness = new AgentHarness({ sandboxId: 'sbx_a', accountId: 'a', chatStore, getCurrentPhaseFn: () => 'closed', spawnFn: () => fakeProcess([
+    { type: 'tool_use', sessionID: 'message-session', part: { tool: 'prophet_get_account', state: { input: {}, output: 'ok' } } },
+    { type: 'text', sessionID: 'message-session', part: { text: 'partial reply' } },
+    { type: 'error', error: { name: 'APIError', data: { statusCode: 503, message: 'unavailable' } } },
+  ]) });
+  harness.state.running = true;
+  harness.state.activeAccountId = 'a';
+  harness.state.activeModel = 'opencode/model';
+  await harness._adHocBeat('question');
+  assert.equal(writes.find(w => w.message?.kind === 'message_partial')?.message.content, 'partial reply');
+  assert.equal(writes.find(w => w.message?.kind === 'tool_call')?.message.tool, 'get_account');
+  assert.equal(writes.find(w => w.message?.kind === 'message_failure')?.message.status, 503);
+  assert.equal(writes.some(w => w.message?.kind === 'message' && w.message.role === 'assistant'), false);
 });
 
 test('failed heartbeat persists one sanitized audit and completed tools, then shows recovery', async () => {

@@ -691,6 +691,8 @@ export class AgentHarness {
     const phase = this.getCurrentPhaseFn();
     this.state.phase = phase;
     const model = this.state.activeModel;
+    const beatEpoch = this._sessionEpoch;
+    const beatAccountId = this.state.activeAccountId;
 
     // Drain any queued messages
     const queued = this._pendingMessages || [];
@@ -717,8 +719,10 @@ ${renderPrefixedToolMenu()}
 
 ${userBlock}`;
 
+    let failedResult = null;
     try {
       const result = await this._runClaude(prompt, model);
+      if (result.error) failedResult = result;
       if (result.error) throw new Error(result.error);
       // Text already streamed via _handleOpenCodeEvent agent_text events
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
@@ -732,6 +736,28 @@ ${userBlock}`;
     } catch (err) {
       this.state.stats.errors++;
       this.state.emit('agent_log', { message: `Message beat error: ${err.message}`, level: 'error' });
+      if (beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
+        const sessionId = failedResult?.sessionId || this._sessionId || `heartbeat-failure-${randomUUID()}`;
+        const failure = {
+          time: new Date().toISOString(), beat: beatNum, sessionId, accountId: beatAccountId,
+          provider: typeof model === 'string' ? model.split('/')[0].replace(/[^a-z0-9_-]/gi, '').slice(0, 60) : null,
+          status: failedResult?.errorStatus ?? null,
+          message: sanitizeOpenCodeError(err?.message || err), recoveredAt: null, recoveredByBeat: null,
+        };
+        if (beatAccountId && this.chatStore) {
+          try {
+            await this._persistSession(sessionId, { mode: 'message' }, beatAccountId);
+            await this._persistMessages(sessionId, [
+              ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content })),
+              ...(failedResult?.toolEvents || []),
+              ...(failedResult?.text ? [{ role: 'assistant', kind: 'message_partial', beat: beatNum, content: failedResult.text }] : []),
+              { role: 'assistant', kind: 'message_failure', ...failure, content: failure.message },
+            ], beatAccountId);
+          } catch (auditErr) {
+            this.state.emit('agent_log', { message: `Message failure audit error: ${sanitizeOpenCodeError(auditErr?.message || auditErr)}`, level: 'error' });
+          }
+        }
+      }
     }
 
     this.state.emit('beat_end', { beat: beatNum, phase, isMessage: true });
@@ -1144,8 +1170,8 @@ ${userBlock}`;
 
         if (streamError) {
           resolve({ error: streamError, errorStatus: streamErrorStatus, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
-        } else if (timedOut && !fullText) {
-          resolve({ error: `opencode timed out after ${BEAT_TIMEOUT_MS / 1000}s; harness sent SIGTERM${stderrText ? `: ${stderrText.trim()}` : ''}`, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
+        } else if (timedOut) {
+          resolve({ error: `opencode timed out after ${BEAT_TIMEOUT_MS / 1000}s; harness sent SIGTERM${stderrText ? `: ${stderrText.trim()}` : ''}`, errorStatus: 'timeout', text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
         } else if ((code !== 0 || code === null) && !fullText) {
           resolve({ error: `opencode exited with code ${code} signal ${signal}${stderrText ? `: ${stderrText.trim()}` : ''}`, text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
         } else if (signal && !fullText) {

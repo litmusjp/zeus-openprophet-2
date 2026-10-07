@@ -1594,7 +1594,7 @@ function updateOperatorCard(s) {
   if (failureEl) {
     const when = failure?.time && !Number.isNaN(Date.parse(failure.time)) ? new Date(failure.time).toLocaleString() : 'time unknown';
     failureEl.textContent = failure
-      ? `Last heartbeat failure: #${failure.beat ?? '?'} at ${when}${failure.status ? ` · HTTP ${failure.status}` : ''} · ${failure.message || 'Unknown error'}${failure.recoveredAt ? ` · Recovered by heartbeat #${failure.recoveredByBeat ?? '?'}` : ' · Active'}`
+      ? `Last heartbeat failure: #${failure.beat ?? '?'} at ${when}${failure.status ? ` · ${typeof failure.status === 'number' ? `HTTP ${failure.status}` : failure.status}` : ''} · ${failure.message || 'Unknown error'}${failure.recoveredAt ? ` · Recovered by heartbeat #${failure.recoveredByBeat ?? '?'}` : ' · Active'}`
       : count ? 'Last heartbeat failure: details unavailable' : 'Last heartbeat failure: none recorded';
   }
 }

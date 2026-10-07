@@ -80,12 +80,13 @@ let _tradingBotUrl = TRADING_BOT_URL;
 let _lastPortCheck = 0;
 
 async function callTradingBot(endpoint, method = 'GET', data = null, options = {}) {
-  const safe = method === 'GET' || endpoint === '/options/assessment';
+  const safe = method === 'GET' || endpoint === '/options/assessment' || endpoint === '/options/trade-assessment';
+  const budgetMs = endpoint === '/options/trade-assessment' ? 6000 : 3000;
   const maxAttempts = safe ? 3 : 1;
   const started = Date.now();
   let attempt = 0;
   let lastError;
-  while (attempt < maxAttempts && Date.now() - started < 3000) {
+  while (attempt < maxAttempts && Date.now() - started < budgetMs) {
     attempt += 1;
     try {
     // Refresh port every 30 seconds
@@ -97,7 +98,7 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
     const config = {
       method,
       url: `${_tradingBotUrl}/api/v1${endpoint}`,
-      timeout: Math.max(1, 3000 - (Date.now() - started)),
+      timeout: Math.max(1, budgetMs - (Date.now() - started)),
       headers: {
         'Content-Type': 'application/json',
         'X-OpenProphet-Sandbox-ID': OPENPROPHET_SANDBOX_ID,

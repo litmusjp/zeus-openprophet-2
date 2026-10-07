@@ -20,6 +20,9 @@ test('operator heartbeat failure display separates history from active failure a
   ctx.updateOperatorCard({ sandboxId: 'l1', stats: { errors: 1 }, lastHeartbeatFailure: { beat: 3, time: '2026-10-05T00:00:00Z', status: 429, message: 'Endpoint unavailable', recoveredAt: null } });
   assert.match(element('operator-attention').textContent, /1 historical error.*active/);
   assert.match(element('operator-last-heartbeat-failure').textContent, /HTTP 429.*Active/);
+  ctx.updateOperatorCard({ sandboxId: 'l1', stats: { errors: 1 }, lastHeartbeatFailure: { beat: 4, time: '2026-10-05T00:02:00Z', status: 'timeout', message: 'Request timed out', recoveredAt: null } });
+  assert.match(element('operator-last-heartbeat-failure').textContent, /· timeout · Request timed out/);
+  assert.doesNotMatch(element('operator-last-heartbeat-failure').textContent, /HTTP timeout/);
   ctx.updateOperatorCard({ sandboxId: 'l1', stats: { errors: 1 }, lastHeartbeatFailure: { beat: 3, time: '2026-10-05T00:00:00Z', status: 429, message: 'Endpoint unavailable', recoveredAt: '2026-10-05T00:01:00Z', recoveredByBeat: 4 } });
   assert.equal(element('operator-attention').textContent, '1 historical error');
   assert.match(element('operator-last-heartbeat-failure').textContent, /Recovered by heartbeat #4/);

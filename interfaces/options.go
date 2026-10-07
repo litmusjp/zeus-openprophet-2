@@ -25,7 +25,9 @@ type OptionContract struct {
 	Gamma               float64
 	Theta               float64
 	Vega                float64
-	DTE                 int // Days to expiration
+	DTE                 int    // Days to expiration
+	MarketDataFeed      string `json:"market_data_feed,omitempty"`
+	MarketDataQuality   string `json:"market_data_quality,omitempty"`
 }
 
 // OptionPosition represents an open options position

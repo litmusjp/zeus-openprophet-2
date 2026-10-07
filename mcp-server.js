@@ -930,6 +930,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'assess_options_trade',
+        description: 'Assess your exact proposed options trade using standalone AlphaDesk market evidence, without a scanner/watchlist or caller-supplied score. Returns PASS/FAIL/UNAVAILABLE, score, criteria and remediation. PASS is not broker/account authorization; on FAIL or UNAVAILABLE skip this proposal and continue other work. No orders or approvals.',
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        inputSchema: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            legs: { type: 'array', minItems: 1, maxItems: 2, items: {
+              type: 'object', additionalProperties: false,
+              properties: { symbol: {type:'string',pattern:'^[A-Z0-9]{1,6}[0-9]{6}[CP][0-9]{8}$'},
+                side: {type:'string',enum:['buy','sell']},ratio_quantity: {type:'integer',minimum:1,maximum:10} },
+              required:['symbol','side'] } },
+            quantity: {type:'integer',minimum:1,maximum:10},
+            limit_price: {type:'number',exclusiveMinimum:0},
+            client_reference: {type:'string',maxLength:128},
+          }, required: ['legs','quantity','limit_price'],
+        },
+      },
+      {
         name: 'assess_options_strategy',
         description: 'Request deterministic AlphaDesk assessment for the exact proposed options trade. Provide the exact broker-derived option chain and quote/Greeks/max-loss evidence for every leg; client-supplied or fabricated evidence is not sufficient. Assessment-only and not broker authorization.',
         inputSchema: {
@@ -1957,6 +1975,14 @@ ${allNews.map((article, i) =>
           return { content: [{ type: 'text', text: JSON.stringify({ status: 'validation_error', error: 'client_order_id is required' }) }] };
         }
         const data = await callTradingBot(`/orders/planned-intents/${encodeURIComponent(clientOrderID)}`, 'DELETE');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'assess_options_trade': {
+        const { legs, quantity, limit_price, client_reference } = args;
+        const data = await callTradingBot('/options/trade-assessment', 'POST', {
+          legs, quantity, limit_price, ...(client_reference === undefined ? {} : {client_reference}),
+        });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

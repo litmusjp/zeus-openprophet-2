@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"prophet-trader/interfaces"
 	"time"
 
@@ -114,7 +115,7 @@ func (c *AlpacaOptionChainContract) UnmarshalJSON(data []byte) error {
 
 // GetOptionSnapshot gets the latest snapshot for an option
 func (s *AlpacaOptionsDataService) GetOptionSnapshot(ctx context.Context, optionSymbol string) (*interfaces.OptionContract, error) {
-	url := fmt.Sprintf("%s/v1beta1/options/snapshots/%s", s.baseURL, optionSymbol)
+	url := fmt.Sprintf("%s/v1beta1/options/snapshots?symbols=%s&feed=indicative", s.baseURL, url.QueryEscape(optionSymbol))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -154,6 +155,7 @@ func (s *AlpacaOptionsDataService) GetOptionSnapshot(ctx context.Context, option
 			Theta:             alpacaContract.Greeks.Theta,
 			Vega:              alpacaContract.Greeks.Vega,
 			ImpliedVolatility: alpacaContract.ImpliedVolatility,
+			MarketDataFeed:    "indicative", MarketDataQuality: "testing_only",
 		}
 
 		return contract, nil

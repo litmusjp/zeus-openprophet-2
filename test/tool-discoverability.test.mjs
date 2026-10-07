@@ -7,7 +7,7 @@ import { buildSystemPrompt } from '../agent/harness.js';
 const settingsHtml = fs.readFileSync(new URL('../agent/public/index.html', import.meta.url), 'utf8');
 
 test('curated tool catalog and rendered menu include AlphaDesk assessment', () => {
-  assert.match(renderToolMenu(), /\*\*Options\*\*: assess_options_strategy,/);
+  assert.match(renderToolMenu(), /\*\*Options\*\*: assess_options_trade,/);
 });
 
 test('generated system prompt documents the AlphaDesk assessment workflow', async () => {
@@ -18,11 +18,11 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
     customSystemPrompt: 'You are a test agent.',
   });
 
-  assert.match(prompt, /prophet_assess_options_strategy/);
+  assert.match(prompt, /prophet_assess_options_trade/);
   assert.match(prompt, /before opening or increasing exposure/i);
   assert.match(prompt, /for the exact proposal/);
   assert.match(prompt, /Decision is PASS, FAIL or UNAVAILABLE/);
-  assert.match(prompt, /signal scores and scanner features are nullable provider-owned evidence/);
+  assert.match(prompt, /signal scores are nullable provider-owned evidence/);
   assert.match(prompt, /PASS is assessment-only, never account permission or broker authorization/);
   assert.match(prompt, /independently refreshes evidence and reassesses at the final broker boundary/);
 });

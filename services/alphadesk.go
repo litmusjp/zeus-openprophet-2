@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"prophet-trader/interfaces"
@@ -38,6 +39,9 @@ type AlphaDeskClient struct {
 	APIKey               string
 	HTTP                 *http.Client
 	Now                  func() time.Time
+	standaloneMu         sync.Mutex
+	standaloneCache      map[string]standaloneCacheEntry
+	standaloneLocks      map[string]*standaloneLock
 }
 
 func NewAlphaDeskClientFromEnv() *AlphaDeskClient {
@@ -50,7 +54,7 @@ func NewAlphaDeskClientFromEnv() *AlphaDeskClient {
 
 func validateAlphaDeskExecutionMode(mode string) error {
 	switch mode {
-	case "", "ACCOUNT_VERIFIED", "SIGNAL_QUALITY_OP2":
+	case "", "ACCOUNT_VERIFIED", "SIGNAL_QUALITY_OP2", "STANDALONE_OP2":
 		return nil
 	default:
 		return &AlphaDeskConfigurationError{Reason: "unknown AlphaDesk execution mode"}

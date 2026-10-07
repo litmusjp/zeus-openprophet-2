@@ -45,6 +45,8 @@ type AlpacaTradingService struct {
 	managedSubmissionMarker func(string, string, string) error
 	alphaDesk               *AlphaDeskClient
 	optionsChainProvider    func(context.Context, string, time.Time) ([]*interfaces.OptionContract, error)
+	optionsSnapshotBaseURL  string
+	optionsSnapshotHTTP     *http.Client
 }
 
 const brokerQuoteMaxAge = 2 * time.Minute
@@ -865,50 +867,56 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		if err := validateAlphaDeskExecutionMode(s.alphaDesk.ExecutionMode); err != nil {
 			return nil, err
 		}
-		if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" && !s.alphaDesk.Enabled {
+		if (s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" || s.alphaDesk.ExecutionMode == "STANDALONE_OP2") && !s.alphaDesk.Enabled {
 			return nil, &AlphaDeskConfigurationError{Reason: "AlphaDesk must be enabled for OP2 signal execution mode"}
 		}
 	}
 	if strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil && s.alphaDesk.Enabled {
-		if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" && !s.alphaDesk.SignalQualityEnabled {
-			return nil, &AlphaDeskConfigurationError{Reason: "AlphaDesk signal quality is required for OP2 execution mode"}
-		}
-		if err := s.enrichOptionsAssessment(ctx, order); err != nil {
-			return nil, err
-		}
-		if s.alphaDesk.SignalQualityEnabled {
-			signal, err := s.alphaDesk.AssessAndValidateSignalQuality(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures)
-			if err != nil {
+		if s.alphaDesk.ExecutionMode == "STANDALONE_OP2" {
+			if err := s.requireStandaloneApproval(ctx, order); err != nil {
 				return nil, err
 			}
-			if signal.Decision != "PASS" {
-				return nil, &AlphaDeskUnavailableError{Reason: "AlphaDesk signal quality decision is not PASS"}
-			}
-			order.SignalQualityAssessment = signal
-		}
-		if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" {
-			if order.AssessmentAuditSink == nil {
-				return nil, &AlphaDeskUnavailableError{Reason: "AlphaDesk assessment audit is unavailable"}
-			}
-			if err := order.AssessmentAuditSink(order.SignalQualityAssessment); err != nil {
-				return nil, fmt.Errorf("persist AlphaDesk assessment: %w", err)
-			}
-			order.AlphaDeskAssessment = order.SignalQualityAssessment
 		} else {
-			audit := order.AssessmentAuditSink
-			if order.SignalQualityAssessment != nil && audit != nil {
-				signal := order.SignalQualityAssessment
-				audit = func(assessment *interfaces.AlphaDeskAssessment) error {
-					assessment.SignalQualityAssessment = signal
-					return order.AssessmentAuditSink(assessment)
-				}
+			if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" && !s.alphaDesk.SignalQualityEnabled {
+				return nil, &AlphaDeskConfigurationError{Reason: "AlphaDesk signal quality is required for OP2 execution mode"}
 			}
-			assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, audit)
-			if err != nil {
+			if err := s.enrichOptionsAssessment(ctx, order); err != nil {
 				return nil, err
 			}
-			assessment.SignalQualityAssessment = order.SignalQualityAssessment
-			order.AlphaDeskAssessment = assessment
+			if s.alphaDesk.SignalQualityEnabled {
+				signal, err := s.alphaDesk.AssessAndValidateSignalQuality(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures)
+				if err != nil {
+					return nil, err
+				}
+				if signal.Decision != "PASS" {
+					return nil, &AlphaDeskUnavailableError{Reason: "AlphaDesk signal quality decision is not PASS"}
+				}
+				order.SignalQualityAssessment = signal
+			}
+			if s.alphaDesk.ExecutionMode == "SIGNAL_QUALITY_OP2" {
+				if order.AssessmentAuditSink == nil {
+					return nil, &AlphaDeskUnavailableError{Reason: "AlphaDesk assessment audit is unavailable"}
+				}
+				if err := order.AssessmentAuditSink(order.SignalQualityAssessment); err != nil {
+					return nil, fmt.Errorf("persist AlphaDesk assessment: %w", err)
+				}
+				order.AlphaDeskAssessment = order.SignalQualityAssessment
+			} else {
+				audit := order.AssessmentAuditSink
+				if order.SignalQualityAssessment != nil && audit != nil {
+					signal := order.SignalQualityAssessment
+					audit = func(assessment *interfaces.AlphaDeskAssessment) error {
+						assessment.SignalQualityAssessment = signal
+						return order.AssessmentAuditSink(assessment)
+					}
+				}
+				assessment, err := s.alphaDesk.AssessAndValidateWithAudit(ctx, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}, order, order.MarketScannerFeatures, audit)
+				if err != nil {
+					return nil, err
+				}
+				assessment.SignalQualityAssessment = order.SignalQualityAssessment
+				order.AlphaDeskAssessment = assessment
+			}
 		}
 	}
 
@@ -994,11 +1002,19 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 	allSnapshots := make(map[string]alpacaOptionSnapshotData)
 	pageToken := ""
 	for page := 0; page < 20; page++ {
-		endpoint := fmt.Sprintf("https://data.alpaca.markets/v1beta1/options/snapshots/%s?expiration_date=%s&limit=1000", underlying, url.QueryEscape(expirationStr))
+		baseURL := s.optionsSnapshotBaseURL
+		if baseURL == "" {
+			baseURL = "https://data.alpaca.markets"
+		}
+		endpoint := fmt.Sprintf("%s/v1beta1/options/snapshots/%s?expiration_date=%s&limit=1000&feed=indicative", baseURL, url.PathEscape(underlying), url.QueryEscape(expirationStr))
 		if pageToken != "" {
 			endpoint += "&page_token=" + url.QueryEscape(pageToken)
 		}
-		body, _, requestErr := DoProviderRequest(ctx, &http.Client{Timeout: 30 * time.Second}, endpoint, true, func(reqCtx context.Context) (*http.Request, error) {
+		client := s.optionsSnapshotHTTP
+		if client == nil {
+			client = &http.Client{Timeout: 30 * time.Second}
+		}
+		body, _, requestErr := DoProviderRequest(ctx, client, endpoint, true, func(reqCtx context.Context) (*http.Request, error) {
 			retryReq, retryErr := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 			if retryErr != nil {
 				return nil, retryErr
@@ -1071,6 +1087,8 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 			Vega:              data.Greeks.Vega,
 			ExpirationDate:    parsedExpiration,
 			DTE:               dte,
+			MarketDataFeed:    "indicative",
+			MarketDataQuality: "testing_only",
 		}
 		contracts = append(contracts, contract)
 	}
@@ -1081,11 +1099,15 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 
 // GetOptionsQuote retrieves a quote for a specific options contract
 func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol string) (*interfaces.OptionsQuote, error) {
-	root, _, _, _, ok := parseOCCOptionSymbol(symbol)
+	_, _, _, _, ok := parseOCCOptionSymbol(symbol)
 	if !ok {
 		return nil, fmt.Errorf("invalid OCC option symbol %q", symbol)
 	}
-	endpoint := fmt.Sprintf("https://data.alpaca.markets/v1beta1/options/snapshots/%s?symbols=%s", root, url.QueryEscape(strings.TrimSpace(symbol)))
+	baseURL := s.optionsSnapshotBaseURL
+	if baseURL == "" {
+		baseURL = "https://data.alpaca.markets"
+	}
+	endpoint := fmt.Sprintf("%s/v1beta1/options/snapshots?symbols=%s&feed=indicative", baseURL, url.QueryEscape(strings.TrimSpace(symbol)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create options quote request: %w", err)
@@ -1093,7 +1115,11 @@ func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol strin
 	req.Header.Set("APCA-API-KEY-ID", s.apiKey)
 	req.Header.Set("APCA-API-SECRET-KEY", s.apiSecret)
 	req.Header.Set("Accept", "application/json")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	client := s.optionsSnapshotHTTP
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch options quote: %w", err)
 	}
@@ -1150,14 +1176,15 @@ func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol strin
 		return nil, fmt.Errorf("options quote is stale or invalid for %s", symbol)
 	}
 	return &interfaces.OptionsQuote{
-		Symbol:    symbol,
-		BidPrice:  data.LatestQuote.Bid,
-		BidSize:   int64(data.LatestQuote.BidSize),
-		AskPrice:  data.LatestQuote.Ask,
-		AskSize:   int64(data.LatestQuote.AskSize),
-		LastPrice: data.LatestTrade.Price,
-		Volume:    int64(data.LatestTrade.Size),
-		Timestamp: timestamp,
+		Symbol:         symbol,
+		BidPrice:       data.LatestQuote.Bid,
+		BidSize:        int64(data.LatestQuote.BidSize),
+		AskPrice:       data.LatestQuote.Ask,
+		AskSize:        int64(data.LatestQuote.AskSize),
+		LastPrice:      data.LatestTrade.Price,
+		Volume:         int64(data.LatestTrade.Size),
+		Timestamp:      timestamp,
+		MarketDataFeed: "indicative", MarketDataQuality: "testing_only",
 	}, nil
 }
 

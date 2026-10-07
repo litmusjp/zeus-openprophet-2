@@ -349,14 +349,16 @@ type AutonomousPaperStrategyLeg struct {
 }
 
 type OptionsQuote struct {
-	Symbol    string
-	BidPrice  float64
-	BidSize   int64
-	AskPrice  float64
-	AskSize   int64
-	LastPrice float64
-	Volume    int64
-	Timestamp time.Time
+	Symbol            string
+	BidPrice          float64
+	BidSize           int64
+	AskPrice          float64
+	AskSize           int64
+	LastPrice         float64
+	Volume            int64
+	Timestamp         time.Time
+	MarketDataFeed    string `json:"market_data_feed,omitempty"`
+	MarketDataQuality string `json:"market_data_quality,omitempty"`
 }
 
 type OptionsPosition struct {

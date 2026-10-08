@@ -1,9 +1,22 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import { buildSystemPrompt } from '../agent/harness.js';
 
 const mcp = fs.readFileSync(new URL('../mcp-server.js', import.meta.url), 'utf8');
 const harness = fs.readFileSync(new URL('../agent/harness.js', import.meta.url), 'utf8');
+
+test('shared heartbeat guidance separates current broker orders from application intents and avoids routine delegation', async () => {
+  const prompt = await buildSystemPrompt({ name: 'Test', systemPromptTemplate: 'custom', customSystemPrompt: 'test' });
+  assert.match(prompt, /prophet_get_orders\(status="active"\)/);
+  assert.match(prompt, /prophet_get_orders\(status="planned_for_next_session"\)/);
+  assert.match(prompt, /prophet_get_orders\(status="submission_uncertain"\)/);
+  assert.match(prompt, /Do not repeatedly fetch all historical orders/);
+  assert.match(prompt, /do not spawn native task or subagent workflows to summarize routine order history/i);
+  assert.match(prompt, /Your Strategy Rules above/);
+  assert.match(prompt, /Never retry .*submission_uncertain.*blindly/);
+  assert.match(prompt, /complete broker reconciliation/);
+});
 
 test('MCP exposes structured options-chain availability instead of converting market_closed to isError', () => {
   const chainStart = mcp.indexOf("case 'get_options_chain'");

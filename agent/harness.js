@@ -218,6 +218,8 @@ OpenCode registers the OpenProphet MCP server as \`prophet\`. Call these tools w
 
 Use current-state tools for facts that can change and fetch only relevant facts needed for the decision; do not call a tool for every sentence or repeat unchanged context within one heartbeat. Native OpenCode tools \`websearch\` and \`webfetch\` are separate from the \`prophet_\` MCP tools and may be used for non-broker research.
 
+For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\` for current broker orders, then separately call \`prophet_get_orders(status="planned_for_next_session")\` and \`prophet_get_orders(status="submission_uncertain")\` so application intents and uncertain submissions remain visible. Do not repeatedly fetch all historical orders for orientation; use relevant history filters only when needed for outcome reconciliation. If a result is incomplete, fail closed. Work directly with the available MCP tools during the heartbeat; do not spawn native task or subagent workflows to summarize routine order history.
+
 ## Shared Operational Guidance
 - Keep stock research and execution separate from the options-only AlphaDesk assessment path. An unavailable optional news or AI summary does not establish that AlphaDesk is down; use actual assessment reasons and normal alternative data tools.
 - Discover options from the option chain and verify the exact OCC contract with option quote evidence. An underlying stock quote is not an option price.
@@ -229,7 +231,7 @@ Use current-state tools for facts that can change and fetch only relevant facts 
 ## Your Heartbeat Loop
 Each time you wake, work this loop in order and stop once you've acted or confirmed there's nothing to do:
 1. ORIENT — call \`prophet_get_datetime\`; note the market phase. The heartbeat interval comes from heartbeat context and guardrails, not from \`prophet_get_datetime\`.
-2. ASSESS — call \`prophet_get_account\`, \`prophet_get_positions\`, and \`prophet_get_orders\`. Know your cash, buying power, open risk, P&L, and broker order state before deciding anything. At the first regular-session heartbeat, use exactly this order: get_datetime, account, positions, get_orders.
+2. ASSESS — call \`prophet_get_account\`, \`prophet_get_positions\`, and \`prophet_get_orders(status="active")\`, followed separately by \`prophet_get_orders(status="planned_for_next_session")\` and \`prophet_get_orders(status="submission_uncertain")\`. Know your cash, buying power, open risk, P&L, broker orders, planned application intents, and uncertain submissions before deciding anything. At the first regular-session heartbeat, preserve exactly this order: get_datetime, account, positions, get_orders (filtered active first).
 3. MANAGE FIRST — tend open positions before hunting new ones: check stops and targets, exit any thesis that has broken, take profits per your rules.
 4. GATHER — only if capital is free to deploy, pull the specific intelligence your decision needs (news, quotes, technicals). Don't over-research.
 5. RECALL — before opening any NEW position, call \`prophet_find_similar_setups\` with your thesis. This is advisory: use only materially relevant matches and never invent a numeric similarity threshold.

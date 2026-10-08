@@ -174,6 +174,72 @@ test('null-code exit with no text is not success', async () => {
   assert.match(result.error, /exited with code null signal null/);
 });
 
+test('tool audit retains critical outcomes with bounded truncation metadata and safe fields', () => {
+  const harness = new AgentHarness();
+  const captured = [];
+  const ctx = { addToolCall() {}, recordToolEvent: e => captured.push(e), addText() {}, setSession() {}, addCost() {}, addTokens() {} };
+  const assessment = `{"summary":"${'x'.repeat(1300)}","decision":"PASS","checks":["exact contract"],"score":88}`;
+  harness._handleOpenCodeEvent({ type: 'tool_use', callID: 'call-a', part: { id: 'part-a', tool: 'prophet_assess_options_trade', state: { input: { proposal_id: 'prop-1', authorization: 'Bearer abc' }, output: assessment, status: 'completed' } } }, ctx);
+  const event = captured[0];
+  assert.equal(event.callId, 'call-a');
+  assert.ok(event.completedAt);
+  assert.equal(event.status, 'completed');
+  assert.match(event.result, /"decision":"PASS"/);
+  assert.match(event.result, /"score":88/);
+  assert.doesNotMatch(JSON.stringify(event), /Bearer abc/);
+  assert.equal(event.args.proposal_id, 'prop-1');
+
+  harness._handleOpenCodeEvent({ type: 'tool_use', part: { tool: 'prophet_place_options_order', state: { input: {}, output: 'order accepted id=ord-2 filled_qty=0' } } }, ctx);
+  assert.match(captured[1].result, /ord-2.*filled_qty=0/);
+
+  harness._handleOpenCodeEvent({ type: 'tool_use', part: { tool: 'prophet_get_account', state: { input: {}, output: 'z'.repeat(140000) } } }, ctx);
+  assert.equal(captured[2].result.length, 128 * 1024);
+  assert.equal(captured[2].resultTruncated, true);
+  assert.equal(captured[2].resultLength, 140000);
+
+  harness._handleOpenCodeEvent({ type: 'tool_use', part: { tool: 'prophet_webfetch', state: { input: {}, output: 'r'.repeat(2000) } } }, ctx);
+  assert.equal(captured[3].result.length, 1200);
+  assert.equal(captured[3].resultTruncated, true);
+
+  harness._handleOpenCodeEvent({ type: 'tool_use', callID: 'call-error', part: { tool: 'prophet_get_orders', state: { input: {}, error: 'broker unavailable password=secret' } } }, ctx);
+  assert.equal(captured[4].status, 'error');
+  assert.match(captured[4].error, /broker unavailable/);
+  assert.doesNotMatch(captured[4].error, /secret/);
+});
+
+test('tool audit recursively redacts structured credentials and bounds errors without changing safe outcomes', async () => {
+  const harness = new AgentHarness();
+  const captured = [];
+  const ctx = { addToolCall() {}, recordToolEvent: e => captured.push(e), addText() {}, setSession() {}, addCost() {}, addTokens() {} };
+  const output = JSON.stringify({ decision: 'PASS', score: 87, checks: ['exact contract'], nested: { api_key: 'sensitive', secret_key: 'sensitive-2', client_secret: 'sensitive-3', result: 'https://svc.example/path?api_key=url-secret&credential=url-credential' }, order_id: 'order-exact', status: 'filled', filled_qty: 1, filled_avg_price: 2.5 });
+  harness._handleOpenCodeEvent({ type: 'tool_use', part: { tool: 'prophet_assess_options_trade', state: { input: {}, output, status: 'completed' } } }, ctx);
+  const parsed = JSON.parse(captured[0].result);
+  assert.equal(parsed.decision, 'PASS'); assert.equal(parsed.score, 87); assert.deepEqual(parsed.checks, ['exact contract']);
+  assert.equal(parsed.nested.api_key, '[REDACTED]'); assert.equal(parsed.nested.secret_key, '[REDACTED]'); assert.equal(parsed.nested.client_secret, '[REDACTED]');
+  assert.doesNotMatch(captured[0].result, /sensitive|url-secret|url-credential/);
+  assert.equal(parsed.order_id, 'order-exact'); assert.equal(parsed.status, 'filled'); assert.equal(parsed.filled_qty, 1); assert.equal(parsed.filled_avg_price, 2.5);
+
+  harness._handleOpenCodeEvent({ type: 'tool_use', part: { tool: 'prophet_get_orders', state: { input: {}, error: { message: `Bearer bearer-secret https://svc.example/?client_secret=url-secret ${'x'.repeat(1800)}`, details: { credential: 'structured-secret' } } } } }, ctx);
+  assert.doesNotMatch(captured[1].error, /bearer-secret|url-secret|structured-secret/);
+  assert.ok(captured[1].error.length <= 1200);
+});
+
+test('ChatStore round trip preserves long assessment and order audit outcomes', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'long-tool-audit-'));
+  try {
+    const store = new ChatStore(dir);
+    await store.startSession('a', 'long-session');
+    const assessment = { decision: 'PASS', checks: ['x'.repeat(1500), 'trailing-check'], score: 91 };
+    const order = { order_id: 'order-long', status: 'partially_filled', filled_qty: 2, filled_avg_price: 3.25, details: 'y'.repeat(1500) };
+    await store.addMessage('a', 'long-session', { role: 'assistant', kind: 'tool_call', tool: 'prophet_assess_options_trade', result: JSON.stringify(assessment) });
+    await store.addMessage('a', 'long-session', { role: 'assistant', kind: 'tool_call', tool: 'prophet_place_options_order', result: JSON.stringify(order) });
+    const messages = await new ChatStore(dir).getSessionMessages('a', 'long-session');
+    const savedAssessment = JSON.parse(messages[0].result), savedOrder = JSON.parse(messages[1].result);
+    assert.ok(messages[0].result.length > 1200); assert.equal(savedAssessment.checks[1], 'trailing-check'); assert.equal(savedAssessment.score, 91);
+    assert.ok(messages[1].result.length > 1200); assert.equal(savedOrder.order_id, 'order-long'); assert.equal(savedOrder.status, 'partially_filled'); assert.equal(savedOrder.filled_qty, 2); assert.equal(savedOrder.filled_avg_price, 3.25);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('deadline after partial text remains a timeout failure and retains output', async () => {
   let proc;
   const harness = new AgentHarness({ spawnFn: () => {

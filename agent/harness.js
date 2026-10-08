@@ -218,6 +218,14 @@ OpenCode registers the OpenProphet MCP server as \`prophet\`. Call these tools w
 
 Use current-state tools for facts that can change and fetch only relevant facts needed for the decision; do not call a tool for every sentence or repeat unchanged context within one heartbeat. Native OpenCode tools \`websearch\` and \`webfetch\` are separate from the \`prophet_\` MCP tools and may be used for non-broker research.
 
+## Shared Operational Guidance
+- Keep stock research and execution separate from the options-only AlphaDesk assessment path. An unavailable optional news or AI summary does not establish that AlphaDesk is down; use actual assessment reasons and normal alternative data tools.
+- Discover options from the option chain and verify the exact OCC contract with option quote evidence. An underlying stock quote is not an option price.
+- Use prophet_assess_options_trade as the standalone on-demand assessment path. Legacy prophet_assess_options_strategy accepts caller evidence and is not an interchangeable fallback.
+- Assessment currently supports long calls, long puts, and same-expiry 1:1 directional debit verticals. Agent execution is single-leg only; never claim an unsupported spread was executed.
+- Do not trade to test tools. Old reports and superseded test plans are historical context, not active mandates.
+- Do not use native shell or file tools to discover credentials, edit application/configuration files, or bypass broker controls. Use authorized MCP tools for trading.
+
 ## Your Heartbeat Loop
 Each time you wake, work this loop in order and stop once you've acted or confirmed there's nothing to do:
 1. ORIENT — call \`prophet_get_datetime\`; note the market phase. The heartbeat interval comes from heartbeat context and guardrails, not from \`prophet_get_datetime\`.
@@ -1238,7 +1246,8 @@ ${userBlock}`;
         const part = event.part || {};
         const toolName = (part.tool || '??').replace('prophet_', ''); // strip MCP prefix for display
         const toolInput = part.state?.input || {};
-        const toolOutput = part.state?.output || '';
+        const state = part.state || {};
+        const toolOutput = state.output ?? '';
         const fullToolName = part.tool || toolName;
 
         ctx.addToolCall();
@@ -1249,9 +1258,44 @@ ${userBlock}`;
 
         // Emit tool result
         const resultStr = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput);
+        const criticalTools = new Set([
+          'assess_options_trade', 'assess_options_strategy', 'place_buy_order', 'place_sell_order',
+          'place_options_order', 'place_managed_position', 'close_managed_position', 'cancel_order', 'withdraw_planned_intent',
+          'get_account', 'get_orders', 'get_positions', 'get_options_positions', 'get_options_position',
+          'get_managed_positions', 'get_managed_position',
+        ]);
+        const captureLimit = criticalTools.has(toolName) ? 128 * 1024 : 1200;
+        const secretKey = /^(?:authorization|api[_-]?key|(?:api|access|refresh)[_-]?token|(?:api|app|client)?[_-]?secret|secret[_-]?key|password|credential|credentials|(?:private|signing)[_-]?key)$/i;
+        const redactAuditText = (text) => text
+          .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+          .replace(/(\b(?:authorization|api[_-]?key|(?:api|access|refresh)[_-]?token|(?:api|app|client)?[_-]?secret|secret[_-]?key|password|credential|credentials)\b\s*[:=]\s*["']?)[^\s,"'}&]+/gi, '$1[REDACTED]')
+          .replace(/(https?:\/\/)[^/@\s:]+:[^/@\s]+@/gi, '$1[REDACTED]@')
+          .replace(/([?&](?:authorization|api[_-]?key|(?:api|access|refresh)[_-]?token|(?:api|app|client)?[_-]?secret|secret[_-]?key|password|credential|credentials)=)[^&#\s]+/gi, '$1[REDACTED]');
+        const safeAuditValue = (value) => {
+          if (Array.isArray(value)) return value.map(safeAuditValue);
+          if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+            secretKey.test(key) ? '[REDACTED]' : safeAuditValue(item)]));
+          if (typeof value !== 'string') return value;
+          try {
+            const parsed = JSON.parse(value);
+            const safe = safeAuditValue(parsed);
+            return JSON.stringify(safe) === JSON.stringify(parsed) ? value : JSON.stringify(safe);
+          } catch {
+            return redactAuditText(value);
+          }
+        };
+        const safeResult = safeAuditValue(resultStr);
+        const safeErrorValue = state.error == null ? undefined : safeAuditValue(typeof state.error === 'string' ? state.error : JSON.stringify(state.error));
+        const safeError = safeErrorValue == null ? undefined : String(safeErrorValue).substring(0, 1200);
+        const resultLength = safeResult?.length || 0;
+        const resultTruncated = resultLength > captureLimit;
         ctx.recordToolEvent?.({
-          eventType: 'tool_call', kind: 'tool_call', role: 'assistant',
-          tool: toolName, args: toolInput, result: resultStr?.substring(0, 1200), beat: beatNum,
+          eventType: 'tool_call', kind: 'tool_call', role: 'assistant', tool: toolName,
+          args: safeAuditValue(toolInput), result: safeResult?.substring(0, captureLimit), beat: beatNum,
+          callId: event.callID || event.callId || part.callID || part.id || undefined,
+          completedAt: new Date().toISOString(), status: state.status || (safeError ? 'error' : 'completed'),
+          ...(safeError ? { error: safeError } : {}),
+          ...(resultTruncated ? { resultTruncated: true, resultLength } : {}),
         });
         this.state.emit('tool_result', { name: toolName, result: resultStr.substring(0, 500), beat: beatNum });
 

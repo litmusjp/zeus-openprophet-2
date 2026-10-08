@@ -76,6 +76,11 @@ test('previews resolve identity and strategy per sandbox while sharing system in
   assert.match(l1Prompt, /Herald strategy rules/);
   assert.match(l2Prompt, /Pendulum identity/);
   assert.match(l2Prompt, /Pendulum strategy rules/);
+  assert.ok(l1Prompt.includes('Herald identity'));
+  assert.ok(l1Prompt.includes('Herald strategy rules'));
+  assert.ok(l2Prompt.includes('Pendulum identity'));
+  assert.ok(l2Prompt.includes('Pendulum strategy rules'));
+  assert.ok(l1Shared.includes('Use prophet_assess_options_trade as the standalone on-demand assessment path.'));
   assert.doesNotMatch(l2Prompt, /Test prompt update|test rules/);
   assert.equal(store.getResolvedAgentForSandbox('sbx_l2').heartbeatOverrides.midday, 777);
   assert.equal(l1Shared, l2Shared);

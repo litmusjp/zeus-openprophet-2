@@ -86,6 +86,19 @@ test('previews resolve identity and strategy per sandbox while sharing system in
   assert.equal(l1Shared, l2Shared);
 });
 
+test('shared operational instructions keep waits inside the heartbeat budget', async () => {
+  await store.loadConfig();
+  const config = store.getConfig();
+  const prompt = await buildSystemPrompt(store.getResolvedAgentForSandbox('sbx_l2'), {
+    getStrategyById: (id) => config.strategies.find(strategy => strategy.id === id),
+  });
+  assert.match(prompt, /wait.*maximum of 30 seconds/i);
+  assert.match(prompt, /finish the current beat/i);
+  assert.match(prompt, /existing next heartbeat/i);
+  assert.match(prompt, /avoid repeated or multi-minute waits/i);
+  assert.match(prompt, /a wait does not schedule a new heartbeat/i);
+});
+
 test('changing the selected agent clears stale overrides but preserves explicit customization for the new agent', async () => {
   await store.updateSandboxAgentSelection('sbx_l2', { activeAgentId: 'catalyst' });
   let resolved = store.getResolvedAgentForSandbox('sbx_l2');

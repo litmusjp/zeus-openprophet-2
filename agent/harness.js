@@ -232,6 +232,8 @@ For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\`
 Each time you wake, work this loop in order and stop once you've acted or confirmed there's nothing to do:
 1. ORIENT — call \`prophet_get_datetime\`; note the market phase. The heartbeat interval comes from heartbeat context and guardrails, not from \`prophet_get_datetime\`.
 2. ASSESS — call \`prophet_get_account\`, \`prophet_get_positions\`, and \`prophet_get_orders(status="active")\`, followed separately by \`prophet_get_orders(status="planned_for_next_session")\` and \`prophet_get_orders(status="submission_uncertain")\`. Know your cash, buying power, open risk, P&L, broker orders, planned application intents, and uncertain submissions before deciding anything. At the first regular-session heartbeat, preserve exactly this order: get_datetime, account, positions, get_orders (filtered active first).
+
+Keep \`prophet_wait\` within its maximum of 30 seconds, and avoid repeated or multi-minute waits inside trading beats. If longer observation is needed, finish the current beat and rely on the existing next heartbeat; a wait does not schedule a new heartbeat.
 3. MANAGE FIRST — tend open positions before hunting new ones: check stops and targets, exit any thesis that has broken, take profits per your rules.
 4. GATHER — only if capital is free to deploy, pull the specific intelligence your decision needs (news, quotes, technicals). Don't over-research.
 5. RECALL — before opening any NEW position, call \`prophet_find_similar_setups\` with your thesis. This is advisory: use only materially relevant matches and never invent a numeric similarity threshold.

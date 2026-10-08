@@ -1016,13 +1016,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'wait',
-        description: 'Wait for a specified duration in seconds. Useful for AI to pause between trading actions without blocking the user. Maximum 300 seconds (5 minutes).',
+        description: 'Wait for a specified duration during the current trading beat. Maximum 30 seconds; for longer observation, finish the current beat and rely on the existing next heartbeat.',
         inputSchema: {
           type: 'object',
           properties: {
             seconds: {
-              type: 'number',
-              description: 'Number of seconds to wait (1-300)',
+              type: 'integer',
+              description: 'Finite integer number of seconds to wait (1-30)',
+              minimum: 1,
+              maximum: 30,
             },
             reason: {
               type: 'string',
@@ -2040,7 +2042,15 @@ ${allNews.map((article, i) =>
       }
 
       case 'wait': {
-        const seconds = Math.min(Math.max(args.seconds, 1), 300); // Clamp between 1-300 seconds
+        if (!Number.isFinite(args.seconds) || !Number.isInteger(args.seconds) || args.seconds < 1 || args.seconds > 30) {
+          return {
+            content: [{
+              type: 'text',
+              text: 'Wait not performed: seconds must be a finite integer from 1 to 30. For longer observation, finish the current beat and rely on the existing next heartbeat.',
+            }],
+          };
+        }
+        const seconds = args.seconds;
         const reason = args.reason || 'Waiting';
 
         const startTime = Date.now();

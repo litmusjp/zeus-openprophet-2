@@ -7,6 +7,39 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
+export function isValidHistoryAccountId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value); }
+
+function hasStructuredFailure(record) {
+  if (String(record.kind || '').includes('failure') || record.isError === true) return true;
+  if (record.status && /^(error|failed)$/i.test(String(record.status))) return true;
+  const nonempty = value => value != null && value !== false && value !== '' && !(typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0);
+  if (nonempty(record.error)) return true;
+  const inspect = (value, depth = 0) => {
+    if (depth > 5 || value == null) return false;
+    if (typeof value === 'string') {
+      try { return inspect(JSON.parse(value), depth + 1); } catch { return false; }
+    }
+    if (Array.isArray(value)) return value.some(item => inspect(item, depth + 1));
+    if (typeof value !== 'object') return false;
+    if (value.isError === true || nonempty(value.error) || ['error', 'failed'].includes(String(value.status || '').toLowerCase())) return true;
+    return inspect(value.content, depth + 1) || inspect(value.result, depth + 1) || inspect(value.data, depth + 1) || inspect(value.text, depth + 1);
+  };
+  return inspect(record.result);
+}
+
+function recordedToolStatus(record) {
+  const accepted = new Set(['accepted', 'rejected', 'uncertain', 'filled', 'partially_filled', 'canceled', 'cancelled', 'expired', 'pending', 'submitted']);
+  let result = record.result;
+  for (let depth = 0; depth < 5; depth++) {
+    if (typeof result === 'string') { try { result = JSON.parse(result); } catch { break; } }
+    if (!result || typeof result !== 'object') break;
+    const status = typeof result.status === 'string' ? result.status.toLowerCase() : '';
+    if (accepted.has(status)) return status;
+    result = result.content || result.result || result.data;
+  }
+  const direct = String(record.status || '').toLowerCase();
+  return accepted.has(direct) ? direct : null;
+}
 
 export class ChatStore {
   constructor(dataDir = DATA_DIR) {
@@ -168,6 +201,82 @@ export class ChatStore {
       if (err.code === 'ENOENT') return [];
       throw err;
     }
+  }
+
+  /** List completed activity groups derived from append-only session records. */
+  async listActivities(accountId, { offset = 0, limit = 50, labels = [], query = '', account = '' } = {}) {
+    const index = await this._loadSessionIndex(accountId);
+    const groups = new Map();
+    for (const session of index.sessions) {
+      const records = await this.getSessionMessages(accountId, session.id, { limit: Number.MAX_SAFE_INTEGER });
+      for (const record of records) {
+        if (!record.activityId || record.accountId && record.accountId !== accountId) continue;
+        let group = groups.get(record.activityId);
+        if (!group) {
+          group = { activityId: record.activityId, accountId, sessionId: session.id, origin: record.origin || (record.kind?.startsWith('heartbeat') || record.kind === 'heartbeat' ? 'Heartbeat' : 'User'), timestamp: record.timestamp, records: [], labels: new Set(), session };
+          groups.set(record.activityId, group);
+        }
+        if (group.sessionId !== session.id) continue;
+        group.records.push(record);
+        group.timestamp = record.timestamp || group.timestamp;
+        const kind = String(record.kind || '');
+        if (record.origin === 'Heartbeat' || /^heartbeat/.test(kind)) group.labels.add('Heartbeat');
+        else if (record.origin === 'User' || kind === 'message' || kind === 'message_partial' || kind === 'message_failure') group.labels.add('User');
+        const tradeTools = new Set(['place_buy_order','place_sell_order','place_options_order','place_managed_position','close_managed_position','cancel_order','withdraw_planned_intent']);
+        if (tradeTools.has(record.tool)) group.labels.add('Trade');
+        const failure = hasStructuredFailure(record);
+        if (failure) group.labels.add('Error');
+      }
+    }
+    let result = [...groups.values()].map(g => {
+      const labels = [...g.labels];
+      const last = [...g.records].reverse().find(r => r.content);
+      const toolRecords = g.records.filter(r => r.kind === 'tool_call' || r.eventType === 'tool_call');
+      const recovery = g.records.some(r => r.kind === 'heartbeat_recovery');
+      const failure = g.records.some(hasStructuredFailure);
+      const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
+      const outcome = recovery ? 'Recovered' : status ? `Recorded: ${status}` : failure ? 'Failed' : 'Recorded';
+      return { activityId: g.activityId, accountId, sessionId: g.sessionId, timestamp: g.timestamp, origin: g.origin, labels, title: last?.content?.slice(0, 140) || `${g.origin} activity`, outcome, agentName: g.session.metadata?.agentName || g.session.metadata?.agentId || '--', sandboxName: g.session.metadata?.sandboxName || '--', recordCount: g.records.length, toolCount: toolRecords.length, _session: g.session, _records: g.records };
+    });
+    result = result.filter(a => (!account || a.accountId === account || a.sandboxName === account) && (!labels.length || labels.some(l => a.labels.includes(l))));
+    if (query) {
+      const lower = query.toLowerCase();
+      const matching = [];
+      for (const activity of result) {
+        const searchable = `${activity.title} ${activity.labels.join(' ')} ${JSON.stringify(activity._records)}`.toLowerCase();
+        if (searchable.includes(lower)) matching.push(activity);
+      }
+      result = matching;
+    }
+    result.sort((a,b) => String(b.timestamp).localeCompare(String(a.timestamp)) || a.activityId.localeCompare(b.activityId));
+    const activities = result.slice(offset, offset + limit).map(({ _records, _session, ...summary }) => summary);
+    return { activities, total: result.length };
+  }
+
+  async getActivity(accountId, activityId, opts = {}) {
+    const offset = Math.max(0, Number(opts.offset) || 0), limit = Math.min(500, Math.max(1, Number(opts.limit) || 100));
+    const index = await this._loadSessionIndex(accountId);
+    for (const session of index.sessions) {
+      const records = await this.getSessionMessages(accountId, session.id, { limit: Number.MAX_SAFE_INTEGER });
+      const activityRecords = records.filter(record => record.activityId === activityId && (!record.accountId || record.accountId === accountId));
+      if (!activityRecords.length) continue;
+      const labels = new Set();
+      const trades = new Set(['place_buy_order','place_sell_order','place_options_order','place_managed_position','close_managed_position','cancel_order','withdraw_planned_intent']);
+      for (const record of activityRecords) {
+        if (record.origin === 'Heartbeat' || String(record.kind || '').startsWith('heartbeat')) labels.add('Heartbeat');
+        else if (record.origin === 'User' || ['message','message_partial','message_failure','manager_message'].includes(record.kind)) labels.add('User');
+        if (trades.has(record.tool)) labels.add('Trade');
+        if (hasStructuredFailure(record)) labels.add('Error');
+      }
+      const toolRecords = activityRecords.filter(record => record.kind === 'tool_call' || record.eventType === 'tool_call');
+      const recovery = activityRecords.some(record => record.kind === 'heartbeat_recovery');
+      const failed = activityRecords.some(hasStructuredFailure);
+      const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
+      const last = [...activityRecords].reverse().find(record => record.content);
+      const summary = { activityId, accountId, sessionId: session.id, origin: activityRecords.find(record => record.origin)?.origin || 'User', timestamp: activityRecords[0].timestamp, labels: [...labels], title: last?.content?.slice(0, 140) || 'Activity', outcome: recovery ? 'Recovered' : status ? `Recorded: ${status}` : failed ? 'Failed' : 'Recorded', agentName: session.metadata?.agentName || session.metadata?.agentId || '--', sandboxName: session.metadata?.sandboxName || '--', recordCount: activityRecords.length, toolCount: toolRecords.length };
+      return { ...summary, totalRecords: activityRecords.length, records: activityRecords.slice(offset, offset + limit), offset, hasMore: offset + limit < activityRecords.length };
+    }
+    return null;
   }
 
   /**

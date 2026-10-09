@@ -812,7 +812,18 @@
         </div>
         <div class="section">
           <div class="section-title">Chat Sessions</div>
-          <div id="history-sessions"><div class="no-data">Open History to load old chat sessions.</div></div>
+          <p class="subtitle">Activity groups from saved user exchanges and heartbeats</p>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0">
+            <span id="history-label-controls"></span>
+            <select id="history-account" class="input" aria-label="History account"></select>
+            <input id="history-search" class="input" placeholder="Search activity" aria-label="Search activity" style="max-width:220px">
+            <button class="btn sm" onclick="loadActivities(true)">Search</button>
+          </div>
+          <div id="history-activities"><div class="no-data">Loading activity...</div></div>
+          <button class="btn sm" id="history-more" onclick="loadActivities(false)" style="display:none">Load more</button>
+          <details style="margin-top:16px"><summary class="section-title">Legacy sessions</summary>
+            <div id="history-legacy-sessions"><div class="no-data">Open History to load old chat sessions.</div></div>
+          </details>
         </div>
         <div class="section">
           <div class="section-title" id="history-session-title">Transcript</div>
@@ -1190,7 +1201,7 @@
 <script>
 // ── State ──────────────────────────────────
 let config = { accounts: [], agents: [], strategies: [], models: [] };
-let historyState = { sandboxes: [], chatSessions: [], chatMessages: [], selectedChatId: null, loaded: false };
+let historyState = { sandboxes: [], chatSessions: [], chatMessages: [], selectedChatId: null, loaded: false, activities: [], activityOffset: 0, activityTotal: 0, activityAccount: null, activityCursors: {}, accounts: [], selectedLabels: null, listRequest: 0, detailRequest: 0, selectedActivity: null, legacyRequest: 0 };
 let selectedSandboxId = null;
 let promptPreviewRequestId = 0;
 let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases: {}, permissions: {}, slack: {}, alphadesk: {} };
@@ -1784,23 +1795,35 @@ async function overrideHeartbeat() {
 
 async function loadHistoryPanel() {
   try {
-    const [sandboxesResp, chatsResp] = await Promise.all([
+    const [sandboxesResp, chatsResp, accountsResp] = await Promise.all([
       fetch('/api/sandboxes'),
       fetch('/api/chats/all?limit=100'),
+      fetch('/api/accounts'),
     ]);
     const sandboxesData = sandboxesResp.ok ? await sandboxesResp.json() : { sandboxes: [] };
     const chatsData = chatsResp.ok ? await chatsResp.json() : { sessions: [] };
     historyState.sandboxes = sandboxesData.sandboxes || [];
     historyState.chatSessions = chatsData.sessions || [];
+    const accountsData = accountsResp.ok ? await accountsResp.json() : {};
+    historyState.activityAccount = accountsData.activeId || null;
+    const accountOptions = [{ id: '__manager__', name: 'Manager' }, ...(accountsData.accounts || []).map(a => ({ id: a.id, name: a.name || a.id }))];
+    const sandboxOptions = historyState.sandboxes.map(s => ({ id: s.accountId, name: `${s.name || s.id} (${s.accountId})` }));
+    historyState.accounts = [...new Map([...accountOptions, ...sandboxOptions].filter(a => a.id).map(a => [a.id, a])).values()];
     historyState.loaded = true;
     renderHistorySandboxes();
     renderHistorySessions();
+    renderHistoryLegacySessions();
+    renderHistoryLabelControls();
+    renderHistoryAccountSelect();
+    loadActivities(true);
   } catch (e) {
     log('History load failed: ' + e.message, 'error');
   }
 }
 
-async function openChatSession(sessionId, accountId) {
+async function openChatSession(sessionId, accountId, offset = 0) {
+  const requestId = ++historyState.legacyRequest;
+  historyState.detailRequest++;
   const transcript = document.getElementById('history-transcript');
   const title = document.getElementById('history-session-title');
   if (transcript) transcript.innerHTML = '<div class="log-entry info"><span class="time">--:--:--</span>Loading session transcript...</div>';
@@ -1809,13 +1832,14 @@ async function openChatSession(sessionId, accountId) {
     const sessionMeta = historyState.chatSessions.find(s => s.id === sessionId);
     accountId = accountId || sessionMeta?.accountId || sessionMeta?.metadata?.accountId;
     if (!accountId) throw new Error('This session has no account identifier');
-    const r = await fetch('/api/chats/' + encodeURIComponent(sessionId) + '?accountId=' + encodeURIComponent(accountId));
+    const r = await fetch('/api/chats/' + encodeURIComponent(sessionId) + '?accountId=' + encodeURIComponent(accountId) + '&offset=' + offset + '&limit=500');
     const data = await r.json();
     if (!r.ok || data.error) throw new Error(data.error || 'HTTP ' + r.status);
+    if (requestId !== historyState.legacyRequest) return;
     historyState.selectedChatId = sessionId;
-    historyState.chatMessages = data.messages || [];
+    historyState.chatMessages = offset ? historyState.chatMessages.concat(data.messages || []) : (data.messages || []);
     renderHistorySessions();
-    renderHistoryTranscript(data.session, data.messages || []);
+    renderHistoryTranscript(data.session, historyState.chatMessages, offset + (data.messages || []).length, (data.messages || []).length === 500);
     document.getElementById('history-transcript')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     if (title) title.textContent = 'Transcript unavailable';
@@ -1847,23 +1871,35 @@ function renderHistorySandboxes() {
   }).join('');
 }
 
-function renderHistorySessions() {
-  const el = document.getElementById('history-sessions');
-  if (!historyState.chatSessions.length) {
-    el.innerHTML = '<div class="no-data">No saved chat sessions yet.</div>';
-    return;
+function renderHistorySessions() { renderHistoryLegacySessions(); }
+function renderHistoryLegacySessions() {
+  const el = document.getElementById('history-legacy-sessions');
+  el.replaceChildren();
+  if (!historyState.chatSessions.length) { el.textContent = 'No saved chat sessions yet.'; return; }
+  for (const s of historyState.chatSessions) {
+    const card = document.createElement('div'); card.className = 'config-card' + (s.id === historyState.selectedChatId ? ' active-card' : '');
+    const heading = document.createElement('div'); heading.className = 'config-card-header';
+    const name = document.createElement('span'); name.className = 'config-card-title'; name.textContent = s.metadata?.agentName || s.metadata?.agentId || (s.metadata?.mode === 'manager' ? 'Manager' : '--');
+    const account = document.createElement('span'); account.className = 'badge paper'; account.textContent = s.accountName || s.metadata?.accountName || s.accountId || '--'; heading.append(name, account);
+    const meta = document.createElement('div'); meta.className = 'config-card-meta'; meta.textContent = `Sandbox: ${s.sandboxName || s.metadata?.sandboxName || s.metadata?.sandboxId || '--'} | Session: ${s.id}`;
+    const preview = document.createElement('div'); preview.className = 'config-card-desc'; preview.textContent = s.lastMessage || 'No preview available';
+    const count = document.createElement('div'); count.className = 'config-card-meta'; count.textContent = `Messages: ${s.messageCount || 0} | Last active: ${s.lastActiveAt ? new Date(s.lastActiveAt).toLocaleString() : '--'}`;
+    const actions = document.createElement('div'); actions.className = 'config-card-actions';
+    const button = document.createElement('button'); button.className = 'btn sm'; button.textContent = 'Open'; button.addEventListener('click', () => openChatSession(s.id, s.accountId || s.metadata?.accountId || ''));
+    actions.append(button); card.append(heading, meta, preview, count, actions); el.append(card);
   }
-  el.innerHTML = historyState.chatSessions.map(s => {
-    const selected = s.id === historyState.selectedChatId;
-    const when = s.lastActiveAt ? new Date(s.lastActiveAt).toLocaleString() : '--';
-    const agentName = s.metadata?.agentName || s.metadata?.agentId || (s.metadata?.mode === 'manager' ? 'Manager' : '--');
-    const accountName = s.accountName || s.metadata?.accountName || s.accountId || '--';
-    const sandboxName = s.sandboxName || s.metadata?.sandboxName || s.metadata?.sandboxId || '--';
-    return '<div class="config-card' + (selected ? ' active-card' : '') + '"><div class="config-card-header"><span class="config-card-title">' + esc(agentName) + '</span><span class="badge paper">' + esc(accountName) + '</span></div><div class="config-card-meta">Sandbox: ' + esc(sandboxName) + ' | Session: ' + esc(s.id) + '</div><div class="config-card-desc">' + esc(s.lastMessage || 'No preview available') + '</div><div class="config-card-meta">Messages: ' + esc(String(s.messageCount || 0)) + ' | Last active: ' + esc(when) + '</div><div class="config-card-actions"><button class="btn sm" onclick="openChatSession(\'' + s.id + '\', \'' + s.accountId + '\'); return false;">Open</button></div></div>';
-  }).join('');
 }
-
-function renderHistoryTranscript(session, messages) {
+function renderHistoryRecord(msg) {
+  const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('en-US', { hour12: false }) : '--:--:--';
+  if (msg.kind === 'tool_call' || msg.eventType === 'tool_call') {
+    const details = { args: msg.args, result: msg.result, status: msg.status, error: msg.error, callId: msg.callId };
+    const notice = msg.resultTruncated ? `<div>Result truncated: retained ${Number(msg.result?.length || 0)} of ${Number(msg.resultLength || 0)} characters.</div>` : '';
+    return `<details class="log-entry info"><summary><span class="time">${esc(time)}</span>${esc(msg.tool || 'Tool')} · ${esc(msg.status || 'recorded')}</summary>${notice}<pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(details, null, 2))}</pre></details>`;
+  }
+  const level = msg.role === 'user' ? 'user' : (msg.role === 'assistant' ? 'text' : 'info');
+  return '<div class="log-entry ' + level + '"><span class="time">' + esc(time) + '</span>' + esc((msg.role ? '[' + msg.role + '] ' : '') + (msg.content || '')) + '</div>';
+}
+function renderHistoryTranscript(session, messages, nextOffset = 0, hasMore = false) {
   const title = document.getElementById('history-session-title');
   const el = document.getElementById('history-transcript');
   title.textContent = session ? 'Transcript - ' + session.id : 'Transcript';
@@ -1871,12 +1907,8 @@ function renderHistoryTranscript(session, messages) {
     el.innerHTML = '<div class="log-entry info"><span class="time">--:--:--</span>No messages saved for this session.</div>';
     return;
   }
-  el.innerHTML = messages.map(msg => {
-    const level = msg.role === 'user' ? 'user' : (msg.role === 'assistant' ? 'text' : 'info');
-    const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('en-US', { hour12: false }) : '--:--:--';
-    const label = msg.role ? '[' + msg.role + '] ' : '';
-    return '<div class="log-entry ' + level + '"><span class="time">' + esc(time) + '</span>' + esc(label + (msg.content || '')) + '</div>';
-  }).join('');
+  el.innerHTML = messages.map(renderHistoryRecord).join('') + (hasMore ? '<button class="btn sm" id="legacy-transcript-more">Load more records</button>' : '');
+  document.getElementById('legacy-transcript-more')?.addEventListener('click', () => openChatSession(session.id, session.accountId || session.metadata?.accountId, nextOffset));
 }
 
 async function startSandbox(id) {
@@ -2085,6 +2117,83 @@ function renderVerifiedTradeFeed() {
 
 function selectedTradeAccounts() {
   return new Set([...document.querySelectorAll('.trade-account-toggle input:checked')].map(input => input.value));
+}
+
+function historySelectedLabels() {
+  if (Array.isArray(historyState.selectedLabels)) return historyState.selectedLabels.slice();
+  try { const saved = JSON.parse(localStorage.getItem('op2-history-labels') || '["User","Trade","Error"]'); historyState.selectedLabels = Array.isArray(saved) ? saved.filter(x => ['User','Heartbeat','Trade','Error'].includes(x)) : ['User','Trade','Error']; }
+  catch { historyState.selectedLabels = ['User','Trade','Error']; }
+  return historyState.selectedLabels.slice();
+}
+function saveHistoryLabels(labels) { historyState.selectedLabels = labels.slice(); try { localStorage.setItem('op2-history-labels', JSON.stringify(labels)); } catch {} }
+function renderHistoryLabelControls() {
+  const host = document.getElementById('history-label-controls'); if (!host) return;
+  const selected = historySelectedLabels();
+  host.innerHTML = ['All','User','Heartbeat','Trade','Error'].map(label => '<label style="margin-right:8px;white-space:nowrap"><input type="checkbox" data-history-label="'+label+'" '+(label === 'All' ? (selected.length === 4 ? 'checked' : '') : (selected.includes(label) ? 'checked' : ''))+'>'+label+'</label>').join('') + '<button class="btn sm" id="history-clear-labels" type="button">Clear</button>';
+  host.querySelector('#history-clear-labels')?.addEventListener('click', clearHistoryLabels);
+  host.querySelectorAll('input').forEach(input => input.addEventListener('change', () => {
+    let values = historySelectedLabels();
+    if (input.dataset.historyLabel === 'All') values = input.checked ? ['User','Heartbeat','Trade','Error'] : [];
+    else { values = values.filter(x => x !== input.dataset.historyLabel); if (input.checked) values.push(input.dataset.historyLabel); }
+    saveHistoryLabels(values); renderHistoryLabelControls(); loadActivities(true);
+  }));
+}
+function renderHistoryAccountSelect() {
+  const select = document.getElementById('history-account'); if (!select) return;
+  select.innerHTML = '<option value="*">All accounts</option>' + historyState.accounts.map(a => '<option value="'+esc(a.id)+'">'+esc(a.name)+'</option>').join('');
+  select.value = historyState.activityAccount || '*';
+  select.addEventListener('change', () => loadActivities(true));
+}
+function clearHistoryLabels() { saveHistoryLabels([]); renderHistoryLabelControls(); loadActivities(true); }
+async function loadActivities(reset = false) {
+  const host = document.getElementById('history-activities'); if (!host) return;
+  const requestId = ++historyState.listRequest;
+  historyState.detailRequest++;
+  if (reset) historyState.selectedActivity = null;
+  if (reset) { historyState.activities = []; historyState.activityOffset = 0; historyState.activityCursors = {}; }
+  const more = document.getElementById('history-more'); if (more) more.style.display = 'none';
+  const selected = historySelectedLabels();
+  if (!selected.length) { renderHistoryActivities(); return; }
+  const q = document.getElementById('history-search')?.value || '';
+  const selectedAccount = document.getElementById('history-account')?.value || historyState.activityAccount || '*';
+  const accountIds = selectedAccount === '*' ? historyState.accounts.map(a => a.id) : [selectedAccount];
+  if (!accountIds.length) { host.innerHTML = '<div class="no-data">No accounts available.</div>'; return; }
+  host.innerHTML = '<div class="no-data">Loading activity...</div>';
+  try {
+    const pages = await Promise.all(accountIds.map(async accountId => {
+      const cursor = historyState.activityCursors[accountId] || 0;
+      const params = new URLSearchParams({ accountId, offset: String(cursor), limit: '50', labels: selected.join(','), q });
+      const r = await fetch('/api/activities?' + params); const data = await r.json(); if (!r.ok) throw new Error(data.error || 'Activity load failed'); return data;
+    }));
+    if (requestId !== historyState.listRequest) return;
+    const items = pages.flatMap(p => p.activities || []).sort((a,b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+    historyState.activities = [...new Map([...historyState.activities, ...items].map(a => [a.accountId + ':' + a.activityId, a])).values()].sort((a,b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+    accountIds.forEach((accountId, i) => { historyState.activityCursors[accountId] = (historyState.activityCursors[accountId] || 0) + (pages[i]?.activities?.length || 0); });
+    historyState.activityOffset += items.length; historyState.activityTotal = pages.reduce((n,p) => n + (p.total || 0), 0);
+    renderHistoryActivities();
+    const more = document.getElementById('history-more'); if (more) more.style.display = historyState.activities.length < historyState.activityTotal ? '' : 'none';
+  } catch (e) { if (requestId !== historyState.listRequest) return; host.innerHTML = '<div class="no-data">Activity load failed: '+esc(e.message)+'</div>'; }
+}
+function renderHistoryActivities() {
+  const host = document.getElementById('history-activities'); if (!host) return;
+  if (!historySelectedLabels().length) { host.innerHTML = '<div class="no-data">No activity matches your filters</div>'; return; }
+  if (!historyState.activities.length) { host.innerHTML = '<div class="no-data">No activity matches your filters</div>'; return; }
+  host.innerHTML = historyState.activities.map(a => '<div class="config-card"><div class="config-card-header"><span class="config-card-title">'+esc(a.title)+'</span><span>'+a.labels.map(l=>'<span class="badge paper">'+esc(l)+'</span> ').join('')+'</span></div><div class="config-card-meta">'+esc(a.agentName)+' · '+esc(a.accountId)+' · '+esc(new Date(a.timestamp).toLocaleString())+' · '+esc(a.outcome)+'</div><div class="config-card-actions"><button class="btn sm" data-activity="'+esc(encodeURIComponent(a.activityId))+'" data-account="'+esc(encodeURIComponent(a.accountId))+'">Details</button></div></div>').join('');
+  host.querySelectorAll('[data-activity]').forEach(button => button.addEventListener('click', () => openActivity(decodeURIComponent(button.dataset.activity), decodeURIComponent(button.dataset.account))));
+}
+async function openActivity(activityId, accountId, offset = 0) {
+  historyState.legacyRequest++;
+  const requestId = ++historyState.detailRequest;
+  const title = document.getElementById('history-session-title'), host = document.getElementById('history-transcript');
+  if (offset === 0) { historyState.selectedActivity = { activityId, accountId, records: [] }; title.textContent = 'Activity details'; host.innerHTML = '<div class="no-data">Loading activity...</div>'; }
+  try {
+    const r = await fetch('/api/activities/'+encodeURIComponent(activityId)+'?accountId='+encodeURIComponent(accountId)+'&offset='+offset+'&limit=100'); const data = await r.json(); if (!r.ok) throw new Error(data.error || 'Load failed');
+    if (requestId !== historyState.detailRequest || historyState.selectedActivity?.activityId !== activityId || historyState.selectedActivity?.accountId !== accountId) return;
+    const a = data.activity; historyState.selectedActivity.records = historyState.selectedActivity.records.concat(a.records);
+    title.textContent = a.origin+' · '+a.activityId+' · '+a.accountId;
+    host.innerHTML = historyState.selectedActivity.records.map(renderHistoryRecord).join('') + (a.hasMore ? '<button class="btn sm" id="history-record-more">Load more records</button>' : '');
+    document.getElementById('history-record-more')?.addEventListener('click', () => openActivity(activityId, accountId, offset + a.records.length));
+  } catch(e) { if (requestId === historyState.detailRequest) host.innerHTML='<div class="no-data">'+esc(e.message)+'</div>'; }
 }
 
 function filteredVerifiedTrades() {
@@ -3042,6 +3151,7 @@ async function previewAgentPrompt(agentId) {
       + '<div class="modal-actions" style="margin-top:12px"><button class="btn sm" onclick="closeModal()">Close</button></div>';
     document.getElementById('modal-overlay').classList.add('visible');
   } catch (e) {
+    if (requestId !== historyState.legacyRequest) return;
     if (requestId !== promptPreviewRequestId || getEffectiveSandboxId() !== sid) return;
     alert('Error loading prompt: ' + e.message);
   }

@@ -15,7 +15,7 @@ import { testAlphaDeskAssessmentCapability } from './alphadesk-connection.js';
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { buildTradeLedger } from './trade-ledger.js';
-import ChatStore from './chat-store.js';
+import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
 import { enqueueProphetBotBinaryOperation } from './binary-operation-lock.js';
@@ -885,16 +885,17 @@ ${message.trim()}${customPromptAddition}`;
       if (_managerProc === proc) _managerProc = null;
       // Persist Manager sessions outside process memory so restarts retain context.
       if (_managerSessionId) {
+        const activityId = randomBytes(16).toString('hex');
         await chatStore.startSession(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
           mode: 'manager', agentId: 'manager', agentName: 'Manager',
           accountId: MANAGER_HISTORY_ACCOUNT, accountName: 'Manager',
           sandboxId: null, sandboxName: 'Manager', model: ocModel,
         });
         await chatStore.addMessage(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
-          role: 'user', kind: 'manager_message', content: _managerCurrentUserMessage,
+          role: 'user', kind: 'manager_message', content: _managerCurrentUserMessage, activityId, origin: 'User',
         });
         await chatStore.addMessage(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
-          role: 'assistant', kind: 'manager_response', content: _managerCurrentText,
+          role: 'assistant', kind: 'manager_response', content: _managerCurrentText, activityId, origin: 'User',
         });
       }
       // Update session tracking
@@ -1350,6 +1351,29 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
 });
 
 // Chat history
+app.get('/api/activities', async (req, res) => {
+  try {
+    const accountId = req.query.accountId;
+    if (!isValidHistoryAccountId(accountId)) return res.status(400).json({ error: 'A valid accountId is required' });
+    const labels = String(req.query.labels || '').split(',').filter(Boolean);
+    const result = await chatStore.listActivities(accountId, {
+      offset: Math.max(0, Number(req.query.offset) || 0), limit: Math.min(100, Math.max(1, Number(req.query.limit) || 50)),
+      labels, query: String(req.query.q || ''), account: String(req.query.account || ''),
+    });
+    res.json({ accountId, ...result });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/activities/:activityId', async (req, res) => {
+  try {
+    const accountId = req.query.accountId;
+    if (!isValidHistoryAccountId(accountId)) return res.status(400).json({ error: 'A valid accountId is required' });
+    const activity = await chatStore.getActivity(accountId, req.params.activityId, { offset: req.query.offset, limit: req.query.limit });
+    if (!activity) return res.status(404).json({ error: 'Activity not found' });
+    res.json({ accountId, activity });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/chats', async (req, res) => {
   try {
     const accountId = req.query.accountId || getActiveAccount()?.id;

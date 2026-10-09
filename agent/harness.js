@@ -740,12 +740,13 @@ ${userBlock}`;
       if (result.error) throw new Error(result.error);
       // Text already streamed via _handleOpenCodeEvent agent_text events
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
+      const activityId = randomUUID();
       if (effectiveSessionId) this._sessionId = effectiveSessionId;
       await this._persistSession(effectiveSessionId, { mode: 'message' });
       await this._persistMessages(effectiveSessionId, [
-        ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content })),
-        { role: 'assistant', kind: 'message', beat: beatNum, toolCalls: result.toolCalls || 0, content: result.text || '' },
-        ...(result.toolEvents || []),
+        ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content, activityId, origin: 'User' })),
+        { role: 'assistant', kind: 'message', beat: beatNum, toolCalls: result.toolCalls || 0, content: result.text || '', activityId, origin: 'User' },
+        ...(result.toolEvents || []).map(event => ({ ...event, activityId, origin: 'User' })),
       ]);
     } catch (err) {
       this.state.stats.errors++;
@@ -753,7 +754,7 @@ ${userBlock}`;
       if (beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
         const sessionId = failedResult?.sessionId || this._sessionId || `heartbeat-failure-${randomUUID()}`;
         const failure = {
-          time: new Date().toISOString(), beat: beatNum, sessionId, accountId: beatAccountId,
+          time: new Date().toISOString(), beat: beatNum, sessionId, accountId: beatAccountId, activityId: randomUUID(), origin: 'User',
           provider: typeof model === 'string' ? model.split('/')[0].replace(/[^a-z0-9_-]/gi, '').slice(0, 60) : null,
           status: failedResult?.errorStatus ?? null,
           message: sanitizeOpenCodeError(err?.message || err), recoveredAt: null, recoveredByBeat: null,
@@ -762,9 +763,9 @@ ${userBlock}`;
           try {
             await this._persistSession(sessionId, { mode: 'message' }, beatAccountId);
             await this._persistMessages(sessionId, [
-              ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content })),
-              ...(failedResult?.toolEvents || []),
-              ...(failedResult?.text ? [{ role: 'assistant', kind: 'message_partial', beat: beatNum, content: failedResult.text }] : []),
+              ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content, activityId: failure.activityId, origin: 'User' })),
+              ...(failedResult?.toolEvents || []).map(event => ({ ...event, activityId: failure.activityId, origin: 'User' })),
+              ...(failedResult?.text ? [{ role: 'assistant', kind: 'message_partial', beat: beatNum, content: failedResult.text, activityId: failure.activityId, origin: 'User' }] : []),
               { role: 'assistant', kind: 'message_failure', ...failure, content: failure.message },
             ], beatAccountId);
           } catch (auditErr) {
@@ -905,11 +906,12 @@ ${userBlock}`;
       // Text already streamed via _handleOpenCodeEvent agent_text events
       // Save session ID for continuation
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
+      const activityId = randomUUID();
       if (effectiveSessionId) this._sessionId = effectiveSessionId;
       await this._persistSession(effectiveSessionId, { mode: 'heartbeat' });
       await this._persistMessages(effectiveSessionId, [
-        { role: 'assistant', kind: 'heartbeat', beat: beatNum, phase, toolCalls: result.toolCalls || 0, content: result.text || '' },
-        ...(result.toolEvents || []),
+        { role: 'assistant', kind: 'heartbeat', beat: beatNum, phase, toolCalls: result.toolCalls || 0, content: result.text || '', activityId, origin: 'Heartbeat' },
+        ...(result.toolEvents || []).map(event => ({ ...event, activityId, origin: 'Heartbeat' })),
       ]);
 
       if (beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId && this.state.lastHeartbeatFailure && !this.state.lastHeartbeatFailure.recoveredAt) {
@@ -918,7 +920,7 @@ ${userBlock}`;
         try {
           await this._persistMessages(failure.sessionId, [{
             role: 'assistant', kind: 'heartbeat_recovery', beat: beatNum, time: recoveredAt,
-            failureSessionId: failure.sessionId, failureBeat: failure.beat,
+            failureSessionId: failure.sessionId, failureBeat: failure.beat, activityId: failure.activityId, origin: 'Heartbeat',
             content: `Heartbeat #${beatNum} recovered from failure on heartbeat #${failure.beat}`,
           }], beatAccountId);
           failure.recoveredAt = recoveredAt;
@@ -933,7 +935,7 @@ ${userBlock}`;
     } catch (err) {
       if (executionFailed && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
         const failure = {
-          time: new Date().toISOString(), beat: beatNum,
+          time: new Date().toISOString(), beat: beatNum, activityId: randomUUID(), origin: 'Heartbeat',
           sessionId: failedResult?.sessionId || this._sessionId || `heartbeat-failure-${randomUUID()}`,
           accountId: beatAccountId,
           provider: typeof model === 'string' ? model.split('/')[0].replace(/[^a-z0-9_-]/gi, '').slice(0, 60) : null,
@@ -946,7 +948,7 @@ ${userBlock}`;
           try {
             await this._persistSession(failure.sessionId, { mode: 'heartbeat' }, beatAccountId);
             await this._persistMessages(failure.sessionId, [
-              ...(failedResult?.toolEvents || []),
+              ...(failedResult?.toolEvents || []).map(event => ({ ...event, activityId: failure.activityId, origin: 'Heartbeat' })),
               { role: 'assistant', kind: 'heartbeat_failure', ...failure, content: failure.message },
             ], beatAccountId);
           } catch (auditErr) {

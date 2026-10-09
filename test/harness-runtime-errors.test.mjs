@@ -17,8 +17,10 @@ function fakeProcess(lines, exitCode = 0) {
   proc.killed = false;
   proc.kill = () => { proc.killed = true; };
   queueMicrotask(() => {
-    for (const line of lines) proc.stdout.emit('data', `${JSON.stringify(line)}\r\n`);
+    for (const line of lines) proc.stdout.emit('data', `${JSON.stringify(line)}
+`);
     proc.emit('exit', exitCode, null);
+    proc.emit('close', exitCode, null);
   });
   return proc;
 }
@@ -37,6 +39,62 @@ test('free auxiliary pins exist without an inherited overlay', async () => {
   let captured; const harness = new AgentHarness({ opencodeEnv: {OPENCODE_CONFIG_CONTENT:''}, spawnFn: (_c,_a,o) => {captured=o.env;return fakeProcess([{type:'text',part:{text:'OK'}}]);} });
   await harness._runClaude('readonly test','opencode/big-pickle'); const c=JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
   assert.equal(c.small_model,'opencode/big-pickle'); assert.equal(c.agent.title.model,'opencode/big-pickle');
+});
+test('selected provider and model get finite request budgets while preserving scoped config', async () => {
+  let captured;
+  const inherited = { provider: { opencode: { options: { apiKey: 'keep-secret', headers: { 'X-Test': 'keep' }, timeout: false }, models: { 'big-pickle': { name: 'Keep identity', options: { headerTimeout: 12000, chunkTimeout: 90000, temperature: 0.2 } } }, baseURL: 'https://example.invalid' }, other: { options: { timeout: 999999 } } } };
+  const harness = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify(inherited) }, spawnFn: (_c, _a, o) => { captured = o.env; return fakeProcess([{type:'text',part:{text:'OK'}}]); } });
+  await harness._runClaude('prompt', 'opencode/big-pickle');
+  const c = JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(c.provider.other, inherited.provider.other);
+  assert.equal(c.provider.opencode.options.timeout, 120000);
+  assert.equal(c.provider.opencode.options.headerTimeout, 60000);
+  assert.equal(c.provider.opencode.options.chunkTimeout, 60000);
+  assert.equal(c.provider.opencode.options.apiKey, 'keep-secret');
+  assert.deepEqual(c.provider.opencode.options.headers, { 'X-Test': 'keep' });
+  assert.equal(c.provider.opencode.baseURL, 'https://example.invalid');
+  assert.equal(c.provider.opencode.models['big-pickle'].name, 'Keep identity');
+  assert.equal(c.provider.opencode.models['big-pickle'].options.headerTimeout, 12000);
+  assert.equal(c.provider.opencode.models['big-pickle'].options.chunkTimeout, 60000);
+  assert.equal(c.provider.opencode.models['big-pickle'].options.timeout, 120000);
+  assert.equal(c.provider.opencode.models['big-pickle'].options.temperature, 0.2);
+});
+test('selected provider without options receives caps and malformed provider config blocks spawn', async () => {
+  let captured; const h = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { opencode: { models: {} } } }) }, spawnFn: (_c, _a, o) => { captured = o.env; return fakeProcess([{type:'text',part:{text:'OK'}}]); } });
+  await h._runClaude('prompt', 'opencode/model');
+  assert.deepEqual(JSON.parse(captured.OPENCODE_CONFIG_CONTENT).provider.opencode.options, { timeout: 120000, headerTimeout: 60000, chunkTimeout: 60000 });
+  let spawned = false; const bad = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { opencode: { options: 'bad' } } }) }, spawnFn: () => { spawned = true; return fakeProcess([]); } });
+  await assert.rejects(bad._runClaude('prompt', 'opencode/model'), /Invalid OpenCode configuration/);
+  assert.equal(spawned, false);
+});
+for (const malformedProvider of [null, false, 0, '']) test(`malformed selected provider ${JSON.stringify(malformedProvider)} blocks spawn`, async () => {
+  let spawned = false;
+  const h = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { opencode: malformedProvider } }) }, spawnFn: () => { spawned = true; return fakeProcess([]); } });
+  await assert.rejects(h._runClaude('prompt', 'opencode/model'), /Invalid OpenCode configuration/);
+  assert.equal(spawned, false);
+});
+test('selected provider defaults budgets without overlay and preserves slash model id options', async () => {
+  for (const inherited of [{}, { provider: { other: { options: { timeout: 7 } } } }]) {
+    let captured;
+    const h = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify(inherited) }, spawnFn: (_c, _a, o) => { captured = o.env; return fakeProcess([]); } });
+    await h._runClaude('prompt', 'opencode/org/model/with/slashes');
+    const c = JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
+    assert.deepEqual(c.provider.opencode.options, { timeout: 120000, headerTimeout: 60000, chunkTimeout: 60000 });
+    assert.deepEqual(c.provider.other, inherited.provider?.other);
+    assert.equal(c.model, 'opencode/org/model/with/slashes');
+  }
+  let captured;
+  const slashConfig = { provider: { opencode: { models: { 'org/model/with/slashes': { options: { temperature: 0.4, headerTimeout: 12000 } } } } } };
+  const h = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify(slashConfig) }, spawnFn: (_c, _a, o) => { captured = o.env; return fakeProcess([]); } });
+  await h._runClaude('prompt', 'opencode/org/model/with/slashes');
+  const options = JSON.parse(captured.OPENCODE_CONFIG_CONTENT).provider.opencode.models['org/model/with/slashes'].options;
+  assert.equal(options.temperature, 0.4); assert.equal(options.headerTimeout, 12000); assert.equal(options.timeout, 120000); assert.equal(options.chunkTimeout, 60000);
+});
+for (const badTimeout of ['120', { value: 120 }]) test('invalid selected provider timeout blocks spawn', async () => {
+  let spawned = false;
+  const h = new AgentHarness({ opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { opencode: { options: { timeout: badTimeout } } } }) }, spawnFn: () => { spawned = true; return fakeProcess([]); } });
+  await assert.rejects(h._runClaude('prompt', 'opencode/model'), /Invalid OpenCode configuration/);
+  assert.equal(spawned, false);
 });
 for (const bad of ['SECRET-do-not-echo', 'null', '[]', '{"agent":{"title":4}}']) test('invalid inherited model config prevents provider spawn '+bad.length, async () => {
   let spawned=false;const h=new AgentHarness({opencodeEnv:{OPENCODE_CONFIG_CONTENT:bad},spawnFn:()=>{spawned=true;return fakeProcess([])}});
@@ -61,6 +119,93 @@ test('runOpenCode propagates a JSON error event even when the child exits zero',
   ]) });
   const result = await harness._runClaude('heartbeat', 'opencode/ling-3.0-flash-fin-free');
   assert.match(result.error, /APICallError: HTTP 403/);
+});
+
+test('runOpenCode drains trailing text, tool completion, and terminal error between child exit and close', async () => {
+  let proc;
+  const harness = new AgentHarness({ spawnFn: () => {
+    proc = new EventEmitter(); proc.stdin = { on() {}, write() {}, end() {} };
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
+    proc.kill = () => {};
+    return proc;
+  } });
+  const running = harness._runClaude('heartbeat', 'opencode/model');
+  while (!proc) await new Promise(resolve => setImmediate(resolve));
+  proc.emit('exit', 0, null);
+  proc.stdout.emit('data', `${JSON.stringify({ type: 'text', part: { text: 'trailing output' } })}
+`);
+  proc.stdout.emit('data', `${JSON.stringify({ type: 'tool_use', part: { tool: 'prophet_get_options_position', state: { input: { symbol: 'AAPL261106C00200000' }, output: { qty: 1 } } } })}
+`);
+  proc.stdout.emit('data', `${JSON.stringify({ type: 'error', error: { message: 'terminal provider error' } })}
+`);
+  proc.emit('close', 0, null);
+  const result = await running;
+  assert.equal(result.text, 'trailing output');
+  assert.equal(result.toolCalls, 1);
+  assert.equal(result.toolEvents.length, 1);
+  assert.match(result.error, /terminal provider error/);
+});
+
+test('exit without close is a bounded stdio drain failure retaining evidence and finalizing once', async () => {
+  const procs = [];
+  const harness = new AgentHarness({ spawnFn: () => {
+    const proc = new EventEmitter(); proc.stdin = { on() {}, write() {}, end() {} };
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
+    proc.kill = () => {};
+    procs.push(proc);
+    return proc;
+  } });
+  const first = harness._runClaude('first', 'opencode/model');
+  while (procs.length < 1) await new Promise(resolve => setImmediate(resolve));
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => originalSetTimeout(fn, ms === 5000 ? 5 : ms, ...args);
+  try {
+    procs[0].emit('exit', 0, null);
+    procs[0].stdout.emit('data', `${JSON.stringify({ type: 'text', part: { text: 'captured before drain cap' } })}
+`);
+    procs[0].stdout.emit('data', `${JSON.stringify({ type: 'tool_use', part: { tool: 'prophet_get_options_position', state: { input: { symbol: 'AAPL261106C00200000' }, output: { qty: 1 } } } })}
+`);
+    const second = harness._runClaude('second', 'opencode/model');
+    while (procs.length < 2) await new Promise(resolve => setImmediate(resolve));
+    const secondBeatTimeout = harness._beatTimeout;
+    const result = await first;
+    assert.equal(result.errorStatus, 'stdio_drain_incomplete');
+    assert.equal(result.text, 'captured before drain cap');
+    assert.equal(result.toolCalls, 1);
+    assert.equal(result.toolEvents.length, 1);
+    assert.equal(harness._proc, procs[1]);
+    assert.ok(secondBeatTimeout);
+    procs[0].emit('close', 0, null);
+    assert.equal(harness._proc, procs[1]);
+    assert.equal(harness._beatTimeout, secondBeatTimeout);
+    procs[1].emit('exit', 0, null); procs[1].emit('close', 0, null);
+    assert.equal((await second).error, undefined);
+    assert.equal(harness._beatTimeout, null);
+  } finally { globalThis.setTimeout = originalSetTimeout; }
+});
+
+test('old child exit cannot clear newer child stop escalation timer', async () => {
+  const procs = [];
+  const harness = new AgentHarness({ spawnFn: () => {
+    const proc = new EventEmitter(); proc.stdin = { on() {}, write() {}, end() {} };
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
+    proc.kill = () => { proc.killed = true; };
+    procs.push(proc); return proc;
+  } });
+  const first = harness._runClaude('first', 'opencode/model');
+  while (procs.length < 1) await new Promise(resolve => setImmediate(resolve));
+  const second = harness._runClaude('second', 'opencode/model');
+  while (procs.length < 2) await new Promise(resolve => setImmediate(resolve));
+  const stopping = harness.stop();
+  const newerTimer = procs[1]._opStopKillTimer;
+  assert.ok(newerTimer);
+  procs[0].emit('exit', 0, null); procs[0].emit('close', 0, null);
+  await first;
+  assert.equal(harness._killEscalationTimer, newerTimer);
+  assert.equal(procs[1]._opStopKillTimer, newerTimer);
+  procs[1].emit('exit', 0, null); procs[1].emit('close', 0, null);
+  await second; await stopping;
+  assert.equal(harness._killEscalationTimer, null);
 });
 
 test('structured stderr throttling split across chunks is sanitized and waits for child exit', async () => {
@@ -88,6 +233,7 @@ test('structured stderr throttling split across chunks is sanitized and waits fo
   assert.ok(args.includes('--print-logs'));
   assert.ok(args.includes('--log-level'));
   proc.emit('exit', null, 'SIGTERM');
+  proc.emit('close', null, 'SIGTERM');
   const result = await running;
   assert.match(result.error, /HTTP 429/);
   assert.doesNotMatch(result.error, /header-private-xyz/);
@@ -119,6 +265,7 @@ test('native OpenCode key-value stream error is recognized without exposing the 
   proc.stderr.emit('data', line.slice(130));
   assert.equal(proc.killed, true);
   proc.emit('exit', null, 'SIGTERM');
+  proc.emit('close', null, 'SIGTERM');
   const result = await running;
   assert.match(result.error, /AI_APICallError: Rate limit exceeded/);
   assert.doesNotMatch(result.error, /969eddf1|ses_ef|providerID|modelID/);
@@ -143,6 +290,7 @@ test('hung child receives SIGKILL after SIGTERM even when killed flag is already
   } finally { globalThis.setTimeout = originalSetTimeout; }
   assert.deepEqual(proc.signals, ['SIGTERM', 'SIGKILL']);
   proc.emit('exit', null, 'SIGKILL');
+  proc.emit('close', null, 'SIGKILL');
   const result = await running;
   assert.match(result.error, /HTTP 429/);
 });
@@ -245,8 +393,9 @@ test('deadline after partial text remains a timeout failure and retains output',
   const harness = new AgentHarness({ spawnFn: () => {
     proc = new EventEmitter(); proc.stdin = { on() {}, write() {}, end() {} };
     proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false;
-    proc.kill = signal => { proc.killed = true; proc.signal = signal; queueMicrotask(() => proc.emit('exit', null, signal)); };
-    queueMicrotask(() => proc.stdout.emit('data', `${JSON.stringify({ type: 'text', sessionID: 'timeout-session', part: { text: 'partial answer' } })}\r\n`));
+    proc.kill = signal => { proc.killed = true; proc.signal = signal; queueMicrotask(() => { proc.emit('exit', null, signal); proc.emit('close', null, signal); }); };
+    queueMicrotask(() => proc.stdout.emit('data', `${JSON.stringify({ type: 'text', sessionID: 'timeout-session', part: { text: 'partial answer' } })}
+`));
     return proc;
   } });
   const originalSetTimeout = globalThis.setTimeout;

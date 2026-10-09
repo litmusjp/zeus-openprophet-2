@@ -19,6 +19,7 @@ func TestPaperAdvisoryModePassReachesBrokerThroughFinalOrderBoundary(t *testing.
 	now := time.Now().UTC()
 	minimum := "65"
 	alphaCalls, legacyCalls, brokerCalls, auditCalls := 0, 0, 0, 0
+	brokerPositions := `[]`
 	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			snapshot, version := standaloneFixturePolicyAt(minimum)
@@ -44,7 +45,9 @@ func TestPaperAdvisoryModePassReachesBrokerThroughFinalOrderBoundary(t *testing.
 		switch r.URL.Path {
 		case "/v2/account":
 			_, _ = w.Write([]byte(`{"id":"fixture","equity":"10000","last_equity":"10000","cash":"10000","portfolio_value":"10000","buying_power":"10000","daytrade_count":0}`))
-		case "/v2/positions", "/v2/orders":
+		case "/v2/positions":
+			_, _ = w.Write([]byte(brokerPositions))
+		case "/v2/orders":
 			_, _ = w.Write([]byte(`[]`))
 		default:
 			http.NotFound(w, r)
@@ -65,7 +68,7 @@ func TestPaperAdvisoryModePassReachesBrokerThroughFinalOrderBoundary(t *testing.
 	s.SetManagedExecutionBlockCheck(func() bool { return false })
 	s.SetOpeningReservationLock(filepath.Join(t.TempDir(), "reservation.lock"))
 	price := 2.0
-	order := &interfaces.OptionsOrder{ClientOrderID: "paper-advisory-test", Symbol: "AAPL261106C00200000", Underlying: "AAPL", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: &price}
+	order := &interfaces.OptionsOrder{ClientOrderID: "paper-advisory-test", Symbol: "AAPL261106C00200000", Underlying: "AAPL", Qty: 2, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: &price}
 	order.AssessmentAuditSink = func(a *interfaces.AlphaDeskAssessment) error {
 		auditCalls++
 		if a == nil || a.ExecutionAllowed || !a.HumanApprovalRequired || a.Scope != "TRADE_ASSESSMENT" {
@@ -78,6 +81,31 @@ func TestPaperAdvisoryModePassReachesBrokerThroughFinalOrderBoundary(t *testing.
 	}
 	if alphaCalls != 1 || legacyCalls != 0 || auditCalls != 1 || brokerCalls != 1 {
 		t.Fatalf("standalone=%d legacy=%d audit=%d broker=%d; want 1/0/1/1", alphaCalls, legacyCalls, auditCalls, brokerCalls)
+	}
+	// Simulate broker reconciliation independently from the accepted opening
+	// acknowledgement, then route a close for the exact remaining quantity.
+	brokerPositions = `[{"symbol":"AAPL261106C00200000","qty":"1","avg_entry_price":"2","market_value":"100","cost_basis":"100","unrealized_pl":"0","unrealized_plpc":"0","current_price":"2","side":"long","asset_class":"us_option"}]`
+	position, err := s.GetOptionsPosition(context.Background(), order.Symbol)
+	if err != nil || position == nil || position.Qty != 1 || position.Symbol != order.Symbol {
+		t.Fatalf("broker options position=%#v err=%v; want exact OCC symbol and 1 remaining", position, err)
+	}
+	closePrice := 1.9
+	closeOrder := &interfaces.OptionsOrder{ClientOrderID: "paper-advisory-close", Symbol: order.Symbol, Underlying: order.Underlying, Qty: position.Qty, Side: "sell", PositionIntent: "sell_to_close", Type: "limit", TimeInForce: "day", LimitPrice: &closePrice}
+	if _, err := s.PlaceOptionsOrder(context.Background(), closeOrder); err != nil {
+		t.Fatalf("PlaceOptionsOrder rejected existing long option reduction: %v", err)
+	}
+	if alphaCalls != 1 || brokerCalls != 2 {
+		t.Fatalf("after close: standalone=%d broker=%d; want assessment only for entry and two broker routes", alphaCalls, brokerCalls)
+	}
+	// The accepted close is not proof of closure; broker-zero reconciliation is.
+	position, err = s.GetOptionsPosition(context.Background(), order.Symbol)
+	if err != nil || position == nil || position.Qty != 1 {
+		t.Fatalf("close acknowledgement incorrectly implied closure: position=%#v err=%v", position, err)
+	}
+	brokerPositions = `[]`
+	position, err = s.GetOptionsPosition(context.Background(), order.Symbol)
+	if err == nil || position != nil || !strings.Contains(err.Error(), "options position not found") {
+		t.Fatalf("broker-zero reconciliation position=%#v err=%v; want broker-confirmed position not found", position, err)
 	}
 }
 

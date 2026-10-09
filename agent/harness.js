@@ -241,6 +241,7 @@ Keep \`prophet_wait\` within its maximum of 30 seconds, and avoid repeated or mu
 7. RECORD — call \`prophet_log_decision\` with the reasoning behind every trade; when a position closes, call \`prophet_store_trade_setup\` with the realized result so your memory compounds.
 
 ## Execution Contract (strict)
+- For options, reconcile with \`prophet_get_options_positions\`/\`prophet_get_options_position\`, then use \`prophet_get_options_chain\` for the exact underlying, expiry and call/put type without entry delta or minimum-bid filters; verify the same OCC contract's timestamped bid, ask and sizes. Missing quote evidence blocks entry: never invent a premium or treat \`position.current_price\` as executable. Managed-position tools are equities-only. Open long options with \`buy_to_open\`; close with \`sell_to_close\` on the same OCC symbol and actual broker-reconciled remaining quantity. Reconcile active and uncertain entry/exit orders; never retry uncertain submissions. An accepted order is not a fill, and a position is not closed until broker reconciliation confirms zero remaining. Record exit thesis, stop, target and expiry using existing history and strategy. Broker-held option stops/OCO are unavailable with the current market/limit-only tool. FAIL or UNAVAILABLE blocks new exposure but does not require AlphaDesk approval to reduce a long option; backend controls still apply.
 - Every NEW direct buy/sell/options or managed-entry intent must include a fresh caller-generated \`client_order_id\`. Reuse that ID with immutable fields ONLY for an eligible persisted planned retry after reconciliation. An uncertain submission requires broker reconciliation and must never be blindly retried. Managed exits use their persisted per-position identity.
 - Every options submission is checked against the broker-authoritative regular-session clock immediately before the broker call. A closed-session response is saved as \`planned_for_next_session\`; it is an application intent, NOT a broker order.
 - A written plan, intention, watchlist item, or statement that you "will place" a trade is NOT an order and must never be reported as queued, submitted, or placed unless the tool returns the explicit planned status.
@@ -553,7 +554,6 @@ export class AgentHarness {
     this.state.running = false;
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
-    if (this._killEscalationTimer) { clearTimeout(this._killEscalationTimer); this._killEscalationTimer = null; }
     this._sessionEpoch += 1;
     this._sessionId = null;
 
@@ -561,10 +561,12 @@ export class AgentHarness {
     if (procToKill && !procToKill._opExitObserved) {
       if (procToKill._opKillTimer) { clearTimeout(procToKill._opKillTimer); procToKill._opKillTimer = null; }
       if (!procToKill.killed) procToKill.kill('SIGTERM');
-      this._killEscalationTimer = setTimeout(() => {
-        this._killEscalationTimer = null;
+      procToKill._opStopKillTimer = setTimeout(() => {
+        if (this._killEscalationTimer === procToKill._opStopKillTimer) this._killEscalationTimer = null;
+        procToKill._opStopKillTimer = null;
         if (!procToKill._opExitObserved) procToKill.kill('SIGKILL');
       }, 2000);
+      this._killEscalationTimer = procToKill._opStopKillTimer;
     }
 
     await new Promise((resolve) => {
@@ -1022,6 +1024,41 @@ ${userBlock}`;
         const object = value => value && typeof value === 'object' && !Array.isArray(value);
         if (!object(inherited) || (inherited.agent !== undefined && !object(inherited.agent))) throw new Error();
         for (const value of Object.values(inherited.agent || {})) if (!object(value)) throw new Error();
+        const slash = ocModel.indexOf('/');
+        const selectedProvider = slash < 0 ? '' : ocModel.slice(0, slash);
+        const selectedModel = slash < 0 ? '' : ocModel.slice(slash + 1);
+        if (!selectedProvider || !selectedModel) throw new Error();
+        if (inherited.provider !== undefined && !object(inherited.provider)) throw new Error();
+        {
+          inherited.provider ||= {};
+          if (inherited.provider[selectedProvider] === undefined) inherited.provider[selectedProvider] = {};
+          const selected = inherited.provider[selectedProvider];
+          if (!object(selected)) throw new Error();
+          if (selected) {
+            for (const key of ['options', 'models']) if (selected[key] !== undefined && !object(selected[key])) throw new Error();
+            if (selected.models?.[selectedModel] !== undefined && !object(selected.models[selectedModel])) throw new Error();
+            const cap = (options, key, maximum) => {
+              const value = options[key];
+              if (value === undefined || value === false) options[key] = maximum;
+              else if (!Number.isSafeInteger(value) || value <= 0) throw new Error();
+              else if (value > maximum) options[key] = maximum;
+            };
+            const providerOptions = { ...(selected.options || {}) };
+            cap(providerOptions, 'timeout', 120000);
+            cap(providerOptions, 'headerTimeout', 60000);
+            cap(providerOptions, 'chunkTimeout', 60000);
+            selected.options = providerOptions;
+            const model = selected.models?.[selectedModel];
+            if (model?.options !== undefined) {
+              if (!object(model.options)) throw new Error();
+              const modelOptions = { ...model.options };
+              cap(modelOptions, 'timeout', 120000);
+              cap(modelOptions, 'headerTimeout', 60000);
+              cap(modelOptions, 'chunkTimeout', 60000);
+              model.options = modelOptions;
+            }
+          }
+        }
       } catch {
         throw new Error('Invalid OpenCode configuration; provider invocation blocked');
       }
@@ -1065,10 +1102,15 @@ ${userBlock}`;
       let streamErrorStatus = null;
       let timedOut = false;
       let exited = false;
+      let beatTimeout = null;
       let escalationTimer = null;
+      let exitDrainTimer = null;
+      let exitCode = null;
+      let exitSignal = null;
+      let finalized = false;
 
       const terminateAfterError = () => {
-        if (!exited && !proc.killed) {
+        if (!exited && !escalationTimer) {
           proc.kill('SIGTERM');
           escalationTimer = proc._opKillTimer = setTimeout(() => {
             proc._opKillTimer = null;
@@ -1121,26 +1163,30 @@ ${userBlock}`;
       proc._opExitObserved = false;
 
       proc.on('error', (err) => {
-        if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
+        if (beatTimeout) { clearTimeout(beatTimeout); if (this._beatTimeout === beatTimeout) this._beatTimeout = null; beatTimeout = null; }
         if (escalationTimer) clearTimeout(escalationTimer);
         this._proc = null;
         reject(new Error(`Failed to spawn opencode: ${err.message}`));
       });
 
-      proc.on('exit', (code, signal) => {
-        exited = true;
-        proc._opExitObserved = true;
+      const finalize = (code, signal, drainIncomplete = false) => {
+        if (finalized) return;
+        finalized = true;
+        if (exitDrainTimer) { clearTimeout(exitDrainTimer); exitDrainTimer = null; }
         if (escalationTimer) { clearTimeout(escalationTimer); escalationTimer = null; }
         if (proc._opKillTimer) { clearTimeout(proc._opKillTimer); proc._opKillTimer = null; }
-        if (this._killEscalationTimer) { clearTimeout(this._killEscalationTimer); this._killEscalationTimer = null; }
+        if (proc._opStopKillTimer) { clearTimeout(proc._opStopKillTimer); if (this._killEscalationTimer === proc._opStopKillTimer) this._killEscalationTimer = null; proc._opStopKillTimer = null; }
+        if (drainIncomplete && !streamError) { streamError = 'OpenCode stdio drain incomplete after process exit'; streamErrorStatus = 'stdio_drain_incomplete'; }
         if (bufferStderr.trim()) {
           const record = parseOpenCodeStderrError(bufferStderr);
           if (record) { streamError = record.message; streamErrorStatus = record.status; }
           bufferStderr = '';
         }
         // Clear proc reference and cancel safety timeout
-        this._proc = null;
-        if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
+        if (this._proc === proc) {
+          this._proc = null;
+        }
+        if (beatTimeout) { clearTimeout(beatTimeout); if (this._beatTimeout === beatTimeout) this._beatTimeout = null; beatTimeout = null; }
 
         // Process remaining buffer
         if (buffer.trim()) {
@@ -1191,10 +1237,27 @@ ${userBlock}`;
         } else {
           resolve({ text: fullText, toolCalls, toolEvents, sessionId, sessionEpoch });
         }
+      };
+
+      proc.on('exit', (code, signal) => {
+        exited = true;
+        proc._opExitObserved = true;
+        exitCode = code;
+        exitSignal = signal;
+        if (escalationTimer) { clearTimeout(escalationTimer); escalationTimer = null; }
+        if (proc._opKillTimer) { clearTimeout(proc._opKillTimer); proc._opKillTimer = null; }
+        if (proc._opStopKillTimer) { clearTimeout(proc._opStopKillTimer); if (this._killEscalationTimer === proc._opStopKillTimer) this._killEscalationTimer = null; proc._opStopKillTimer = null; }
+        exitDrainTimer = setTimeout(() => finalize(exitCode, exitSignal, true), 5000);
+      });
+
+      proc.on('close', (code, signal) => {
+        exited = true;
+        finalize(exitCode, exitSignal, false);
       });
 
       // Safety timeout - 5 minutes max per beat
-      this._beatTimeout = setTimeout(() => {
+      beatTimeout = setTimeout(() => {
+        if (this._beatTimeout === beatTimeout) this._beatTimeout = null;
         if (proc && !exited) {
           timedOut = true;
           this.state.emit('agent_log', { message: `Beat timed out (${BEAT_TIMEOUT_MS / 1000}s max), killing process with SIGTERM.`, level: 'warning' });
@@ -1209,6 +1272,7 @@ ${userBlock}`;
           }, SIGKILL_GRACE_MS);
         }
       }, BEAT_TIMEOUT_MS);
+      this._beatTimeout = beatTimeout;
     });
   }
 

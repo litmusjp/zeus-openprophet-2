@@ -857,7 +857,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place one single-leg OCC options order. Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. AlphaDesk assessment is options-only: provider-owned nullable scores/features, PASS is necessary where enabled but never execution authorization, and UNAVAILABLE (including missing, stale, closed-market or provider evidence) blocks opening. The broker clock is checked before submission; market_closed creates a local planned intent, not a broker order. Accepted/new/open acknowledge only; positive filled quantity confirms execution.',
+        description: 'Place one single-leg OCC options order. Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. Reconcile option positions first; long entries use buy_to_open and reductions use sell_to_close on the same OCC contract for the broker-reconciled remaining quantity. Supply exact-contract timestamped bid/ask and sizes from the chain; missing evidence blocks entry. Managed-position tools are equities-only and do not provide broker-held option stops or OCO. AlphaDesk assessment applies only to new exposure; FAIL/UNAVAILABLE blocks openings but not reducing a long. Backend controls still apply. Accepted/new/open acknowledge only; positive filled quantity confirms execution.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -959,7 +959,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_options_positions',
-        description: 'Get all open options positions',
+        description: 'Get broker-reconciled open options positions and remaining quantities by exact OCC contract. Use this before any option reduction; close the same contract with sell_to_close for the actual remaining quantity. Managed-position tools are equities-only.',
         inputSchema: {
           type: 'object',
           properties: {},
@@ -967,7 +967,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_options_position',
-        description: 'Get a specific options position by symbol',
+        description: 'Get the broker-reconciled position and remaining quantity for this exact OCC symbol. Use it to size a same-contract sell_to_close; managed-position tools are equities-only.',
         inputSchema: {
           type: 'object',
           properties: {

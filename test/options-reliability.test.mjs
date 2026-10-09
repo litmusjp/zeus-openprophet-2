@@ -83,3 +83,20 @@ test('MCP get_orders accepts safe status filters and defaults to all', () => {
   assert.match(handler, /status \|\| 'all'/);
   assert.match(handler, /`\/orders\?status=\$\{encodeURIComponent\(status\)\}`/);
 });
+
+test('options execution contract requires exact broker evidence and same-contract reductions', async () => {
+  const prompt = await buildSystemPrompt({ name: 'Test', systemPromptTemplate: 'custom', customSystemPrompt: 'test' });
+  assert.match(prompt, /prophet_get_options_positions.*prophet_get_options_position/);
+  assert.match(prompt, /prophet_get_options_chain.*exact underlying, expiry and call\/put type/);
+  assert.match(prompt, /timestamped bid, ask and sizes/);
+  assert.match(prompt, /never invent a premium/);
+  assert.match(prompt, /broker-reconciled remaining quantity/);
+  assert.match(prompt, /until broker reconciliation confirms zero remaining/);
+  assert.match(prompt, /does not require AlphaDesk approval to reduce a long option/);
+  assert.match(mcp, /name: 'get_options_positions',[\s\S]{0,280}broker-reconciled open options positions/);
+  assert.match(mcp, /name: 'get_options_position',[\s\S]{0,280}broker-reconciled position/);
+  assert.match(mcp, /name: 'place_options_order',[\s\S]{0,700}reductions use sell_to_close/);
+  const lifecycle = prompt.slice(prompt.indexOf('## Execution Contract'), prompt.indexOf('## Phase Playbook'));
+  const registered = new Set([...mcp.matchAll(/name:\s*['\"]([^'\"]+)['\"]/g)].map(([, name]) => `prophet_${name}`));
+  for (const match of lifecycle.matchAll(/\bprophet_[a-z0-9_]+\b/g)) assert.ok(registered.has(match[0]), `lifecycle guidance references unregistered tool ${match[0]}`);
+});

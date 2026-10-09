@@ -467,6 +467,11 @@
     .trade-chart-tooltip { position:absolute; pointer-events:none; z-index:2; padding:8px 10px; background:var(--bg-dark); color:var(--text); border:1px solid var(--border); border-radius:4px; font-size:11px; line-height:1.5; box-shadow:0 3px 12px rgba(0,0,0,.2); }
     .trade-section-heading { display:flex; justify-content:space-between; align-items:center; font-size:12px; font-weight:700; color:var(--ink); margin:12px 0 8px; }
     .trade-ledger-status { font-size:10px; font-weight:400; color:var(--ink-faint); }
+    .verified-filter-bar { border:1px solid var(--rule); background:var(--paper); padding:10px; margin-bottom:10px; display:flex; flex-wrap:wrap; gap:10px; align-items:end; font-size:11px; color:var(--ink-muted); }
+    .verified-filter-group { display:flex; flex-wrap:wrap; gap:7px; align-items:center; }
+    .verified-filter-group strong { color:var(--ink); }
+    .verified-filter-bar input[type="date"], .verified-filter-bar input[type="search"], .verified-filter-bar select { max-width:180px; padding:5px; }
+    .verified-filter-note { flex-basis:100%; color:var(--ink-faint); }
 
     /* ── Modal ───────────────────────────── */
     .modal-overlay {
@@ -797,6 +802,15 @@
           <div id="trade-chart-empty" class="no-data" hidden>No verified realized fills.</div>
         </div>
         <div class="trade-section-heading"><span>Verified Trade History</span><span id="trade-ledger-status" class="trade-ledger-status"></span></div>
+        <div class="verified-filter-bar" id="verified-trade-filters" aria-label="Filters applying only to verified trade history">
+          <strong>Filters apply only to history</strong>
+          <div class="verified-filter-group" id="verified-account-filters"></div><div class="verified-filter-group" id="verified-agent-filters"></div>
+          <div class="verified-filter-group" id="verified-asset-filters"></div><div class="verified-filter-group" id="verified-right-filters"></div><div class="verified-filter-group" id="verified-side-filters"></div>
+          <div class="verified-filter-group"><strong>Fill date</strong><select id="verified-date-preset"><option value="all">All dates</option><option value="today">Today</option><option value="7">Past 7 days</option><option value="30">Past 30 days</option><option value="custom">Custom</option></select><input type="date" id="verified-date-from" aria-label="From fill date"><input type="date" id="verified-date-to" aria-label="To fill date"><span id="verified-timezone"></span><span id="verified-date-error" role="alert"></span></div>
+          <input type="search" id="verified-trade-search" placeholder="Ticker, underlying, or exact contract" aria-label="Search verified fills">
+          <button class="btn sm" type="button" id="verified-filter-reset">Reset filters</button><span id="verified-trade-count"></span><button class="btn sm" type="button" id="verified-trade-more" hidden>Load more</button>
+          <div class="verified-filter-note">Agent (current assignment). Agent labels reflect current account assignment, not independently verified historical ownership. Unassigned includes missing agent metadata.</div>
+        </div>
         <div id="trades-feed"><div class="no-data">Loading verified trades...</div></div>
       </div>
     </div>
@@ -2065,6 +2079,7 @@ let verifiedOrders = [];
 let verifiedTradesLoading = false;
 let verifiedReconciliationComplete = false;
 let verifiedAccountStates = new Map();
+let verifiedTradeFilterState = { accounts: null, agents: null, pageSize: 50, preset: 'all', from: '', to: '', search: '', assets: null, rights: null, sides: null };
 
 function fmtPnl(value) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return 'P/L pending';
@@ -2086,22 +2101,172 @@ function isBrokerConfirmedFill(order) {
   return Boolean(brokerID) && ['filled', 'canceled', 'cancelled', 'rejected', 'expired', 'done_for_day', 'replaced'].includes(status) && Number.isFinite(qty) && qty > 0 && Number.isFinite(price) && price > 0;
 }
 
-function renderVerifiedTradeFeed() {
-  const feed = clearTradeFeed();
-  const filled = verifiedOrders.filter(isBrokerConfirmedFill);
-  if (!filled.length) {
-    feed.innerHTML = '<div class="no-data">No broker-confirmed fills yet.</div>';
-    return;
+function tradeAccountKey(item) { return item.accountId || item.accountName || ''; }
+function tradeAgentKey(item) { return item.agentId || '__unassigned__'; }
+function tradeOrderKey(item) { return tradeAccountKey(item) + '\u0000' + (item.ID || item.id || item.orderId || item.BrokerOrderID || item.brokerOrderId || ''); }
+function tradeAssetInfo(order) {
+  const symbol = String(order.Symbol || order.symbol || '').trim().toUpperCase();
+  const explicit = String(order.AssetClass || order.assetClass || order.asset_class || '').toLowerCase();
+  const occ = symbol.match(/^([A-Z0-9.]+)(\d{6})([CP])(\d{8})$/);
+  const optionClass = /^(option|options)$/.test(explicit);
+  const stockClass = /^(stock|equity)$/.test(explicit);
+  const ordinaryTicker = /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol);
+  const asset = occ || optionClass ? 'option' : stockClass || (!explicit && ordinaryTicker) ? 'stock' : 'unclassified';
+  const explicitRight = String(order.OptionType || order.optionType || order.Right || order.right || '').toLowerCase();
+  const right = occ ? (occ[3] === 'C' ? 'call' : 'put') : /^(call|put|c|p)$/.test(explicitRight) ? (explicitRight === 'c' ? 'call' : explicitRight === 'p' ? 'put' : explicitRight) : null;
+  return { asset, right, underlying: occ ? occ[1] : symbol };
+}
+function tradeSide(order) {
+  const side = String(order.Side || order.side || '').toLowerCase();
+  return side === 'buy' || side === 'sell' ? side : 'unknown';
+}
+function tradeFillDate(order) {
+  const raw = order.FilledAt || order.filledAt;
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+function localTradeDate(date) {
+  return date ? `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}` : '';
+}
+function tradeFilterOptions() {
+  const fills = verifiedOrders.filter(isBrokerConfirmedFill);
+  const assets = [...new Set(fills.map(order => tradeAssetInfo(order).asset))];
+  const rights = [...new Set(fills.filter(order => tradeAssetInfo(order).asset === 'option').map(order => tradeAssetInfo(order).right || 'unknown'))];
+  const sides = [...new Set(fills.map(tradeSide))];
+  return { assets, rights, sides };
+}
+function filteredVerifiedOrders() {
+  const filter = verifiedTradeFilterState;
+  const accountSet = filter.accounts === null ? null : new Set(filter.accounts);
+  const agentSet = filter.agents === null ? null : new Set(filter.agents);
+  const text = String(filter.search || '').trim().toLowerCase();
+  return verifiedOrders.filter(order => {
+    if (!isBrokerConfirmedFill(order)) return false;
+    const account = tradeAccountKey(order), agent = tradeAgentKey(order), info = tradeAssetInfo(order), side = tradeSide(order);
+    if (accountSet && !accountSet.has(account) || agentSet && !agentSet.has(agent)) return false;
+    if (filter.assets && !filter.assets.includes(info.asset) || filter.sides && !filter.sides.includes(side)) return false;
+    if (info.asset === 'option' && filter.rights && !filter.rights.includes(info.right || 'unknown')) return false;
+    const stamp = tradeFillDate(order), day = localTradeDate(stamp);
+    if ((filter.from || filter.to) && !stamp) return false;
+    if (filter.from && day < filter.from || filter.to && day > filter.to) return false;
+    if (text && ![order.Symbol || order.symbol, info.underlying, order.accountName, order.agentName].some(value => String(value || '').toLowerCase().includes(text))) return false;
+    return true;
+  }).sort((a,b) => (tradeFillDate(b)?.getTime() || 0) - (tradeFillDate(a)?.getTime() || 0));
+}
+function renderTradeFilterGroup(id, title, values, selected, names = {}) {
+  const host = document.getElementById(id);
+  if (!host) return;
+  const inputs = values.map(value => {
+    const label = names[value] || value;
+    return `<label><input type="checkbox" data-vfilter="${id}" value="${esc(value)}" ${selected === null || selected.includes(value) ? 'checked' : ''}>${esc(label)}</label>`;
+  }).join('');
+  host.innerHTML = `<strong>${title}</strong>${inputs}<button type="button" class="btn sm" data-vall="${id}">All</button><button type="button" class="btn sm" data-vclear="${id}">Clear</button>`;
+}
+function tradeFilterValues(root, group) {
+  return [...root.querySelectorAll(`[data-vfilter="${group}"]:checked`)].map(input => input.value);
+}
+function applyTradeFilterChange(event, root) {
+  const target = event.target, group = target.dataset.vfilter;
+  const filter = verifiedTradeFilterState;
+  if (group === 'verified-account-filters') filter.accounts = tradeFilterValues(root, group);
+  else if (group === 'verified-agent-filters') filter.agents = tradeFilterValues(root, group);
+  else if (group === 'verified-asset-filters') filter.assets = tradeFilterValues(root, group);
+  else if (group === 'verified-right-filters') filter.rights = tradeFilterValues(root, group);
+  else if (group === 'verified-side-filters') filter.sides = tradeFilterValues(root, group);
+  else if (target.id === 'verified-date-preset') applyTradeDatePreset(target.value);
+  else if (target.id === 'verified-date-from' || target.id === 'verified-date-to') {
+    filter[target.id === 'verified-date-from' ? 'from' : 'to'] = target.value;
+    filter.preset = 'custom';
+    document.getElementById('verified-date-preset').value = 'custom';
   }
+  renderVerifiedTradeFeed();
+}
+function applyTradeDatePreset(preset) {
+  const filter = verifiedTradeFilterState;
+  filter.preset = preset;
+  if (preset === 'custom') return;
+  const now = new Date(), today = localTradeDate(now);
+  filter.to = preset === 'all' ? '' : today;
+  filter.from = preset === 'today' ? today : preset === 'all' ? '' : localTradeDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - Number(preset) + 1));
+  document.getElementById('verified-date-from').value = filter.from;
+  document.getElementById('verified-date-to').value = filter.to;
+}
+function resetVerifiedTradeFilters() {
+  Object.assign(verifiedTradeFilterState, { accounts: null, agents: null, pageSize: 50, preset: 'all', from: '', to: '', search: '', assets: null, rights: null, sides: null });
+  document.getElementById('verified-trade-search').value = '';
+  document.getElementById('verified-date-from').value = '';
+  document.getElementById('verified-date-to').value = '';
+  document.getElementById('verified-date-preset').value = 'all';
+  renderVerifiedTradeFeed();
+}
+function handleVerifiedTradeFilterClick(event) {
+  const target = event.target, filter = verifiedTradeFilterState;
+  const group = target.dataset.vclear || target.dataset.vall;
+  if (group) {
+    const fields = {
+      'verified-account-filters': 'accounts',
+      'verified-agent-filters': 'agents',
+      'verified-asset-filters': 'assets',
+      'verified-right-filters': 'rights',
+      'verified-side-filters': 'sides',
+    };
+    const field = fields[group];
+    if (!field) return;
+    filter[field] = target.dataset.vall ? null : [];
+  }
+  else if (target.id === 'verified-filter-reset') return resetVerifiedTradeFilters();
+  else if (target.id === 'verified-trade-more') filter.pageSize += 50;
+  else return;
+  renderVerifiedTradeFeed();
+}
+function handleVerifiedTradeSearch(event) {
+  if (event.target.id !== 'verified-trade-search') return;
+  verifiedTradeFilterState.search = event.target.value;
+  renderVerifiedTradeFeed();
+}
+function renderVerifiedTradeFilters() {
+  const accountOptions = [...verifiedAccountStates].map(([id,account]) => [id, account.accountName || id]);
+  const agentOptions = [...new Map([
+    ...[...verifiedAccountStates.values()].filter(account => account.agentId).map(account => [tradeAgentKey(account), account.agentName || 'Unassigned']),
+    ...verifiedOrders.map(order => [tradeAgentKey(order), order.agentId ? order.agentName || order.agentId : 'Unassigned']),
+  ])];
+  const f = verifiedTradeFilterState, available = tradeFilterOptions();
+  renderTradeFilterGroup('verified-account-filters', 'Account', accountOptions.map(row => row[0]), f.accounts, Object.fromEntries(accountOptions));
+  renderTradeFilterGroup('verified-agent-filters', 'Agent (current assignment)', agentOptions.map(row => row[0]), f.agents, Object.fromEntries(agentOptions));
+  renderTradeFilterGroup('verified-asset-filters', 'Type', available.assets, f.assets, {stock:'Stocks',option:'Options',unclassified:'Unclassified'});
+  renderTradeFilterGroup('verified-right-filters', 'Option right', available.rights, f.rights, {call:'Calls',put:'Puts',unknown:'Unknown right'});
+  renderTradeFilterGroup('verified-side-filters', 'Side', available.sides, f.sides, {buy:'Buy',sell:'Sell',unknown:'Unknown'});
+  const timezone = document.getElementById('verified-timezone');
+  if (timezone) timezone.textContent = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+  const root = document.getElementById('verified-trade-filters');
+  if (root && !root.dataset.bound) {
+    root.dataset.bound = '1';
+    root.addEventListener('change', event => applyTradeFilterChange(event, root));
+    root.addEventListener('input', handleVerifiedTradeSearch);
+    root.addEventListener('click', handleVerifiedTradeFilterClick);
+  }
+}
+function renderVerifiedTradeFeed() {
+  renderVerifiedTradeFilters();
+  const feed = clearTradeFeed();
+  const allFilled = verifiedOrders.filter(isBrokerConfirmedFill), matching = filteredVerifiedOrders();
+  const count=document.getElementById('verified-trade-count'), more=document.getElementById('verified-trade-more');
+  if(count) count.textContent=`${matching.length} matching / ${Math.min(matching.length,verifiedTradeFilterState.pageSize)} displayed`;
+  if(more) more.hidden=matching.length<=verifiedTradeFilterState.pageSize;
+  const dateError=document.getElementById('verified-date-error');
+  const invalidRange=Boolean(verifiedTradeFilterState.from && verifiedTradeFilterState.to && verifiedTradeFilterState.from>verifiedTradeFilterState.to);
+  if(dateError) dateError.textContent=invalidRange?'From date must be on or before To date.':'';
+  if(invalidRange) { feed.innerHTML='<div class="no-data">Invalid fill date range.</div>'; return; }
+  if (!allFilled.length) { feed.innerHTML = verifiedReconciliationComplete ? '<div class="no-data">No verified fills.</div>' : '<div class="no-data">Verified ledger unavailable or incomplete; complete account data is shown only when available.</div>'; return; }
+  if (!matching.length) { feed.innerHTML='<div class="no-data">No verified fills match these filters.</div>'; return; }
   const realizedByOrder = new Map();
-  verifiedTrades.forEach(t => realizedByOrder.set(t.orderId, t));
-  filled.sort((a,b) => new Date(b.FilledAt || b.SubmittedAt || b.filledAt || b.submittedAt || 0) - new Date(a.FilledAt || a.SubmittedAt || a.filledAt || a.submittedAt || 0));
-  filled.slice(0, 100).forEach(order => {
+  verifiedTrades.forEach(t => realizedByOrder.set(tradeOrderKey(t), t));
+  matching.slice(0, verifiedTradeFilterState.pageSize).forEach(order => {
     const side = String(order.Side || order.side || '').toLowerCase();
     const price = Number(order.FilledAvgPrice ?? order.filledAvgPrice);
     const quantity = Number(order.FilledQty ?? order.filledQty);
-    const time = order.FilledAt || order.SubmittedAt || order.filledAt || order.submittedAt;
-    const trade = realizedByOrder.get(order.ID || order.id);
+    const trade = realizedByOrder.get(tradeOrderKey(order));
     const card = document.createElement('div');
     card.className = 'trade-card';
     const header = document.createElement('div'); header.className = 'trade-header';
@@ -2110,7 +2275,7 @@ function renderVerifiedTradeFeed() {
     header.append(symbol, sideEl); card.appendChild(header);
     const details = document.createElement('div'); details.className = 'trade-details';
     details.textContent = `${order.accountName || 'Unknown account'} / ${order.agentName || 'Unassigned'} | ${quantity || '?'} @ ${Number.isFinite(price) ? '$' + price.toFixed(2) : 'price pending'} | ${trade ? fmtPnl(trade.pnl) : 'P/L pending'}`;
-    const stamp = document.createElement('div'); stamp.className = 'trade-time'; stamp.textContent = time ? new Date(time).toLocaleString() : '--';
+    const stamp = document.createElement('div'); stamp.className = 'trade-time'; stamp.textContent = tradeFillDate(order) ? tradeFillDate(order).toLocaleString() : 'Fill date unknown';
     card.append(details, stamp); feed.appendChild(card);
   });
 }
@@ -2263,6 +2428,9 @@ async function loadVerifiedTrades() {
     verifiedReconciliationComplete = false;
     verifiedTrades = []; verifiedOrders = [];
     const summary=document.getElementById('trade-chart-summary'); if(summary) summary.textContent='Unable to load the verified trade ledger: '+err.message;
+    const count=document.getElementById('verified-trade-count'), more=document.getElementById('verified-trade-more');
+    if(count) count.textContent='0 matching / 0 displayed';
+    if(more) more.hidden=true;
     const feed=clearTradeFeed(); if(feed) feed.innerHTML='<div class="no-data">Trade ledger unavailable.</div>';
   } finally { verifiedTradesLoading=false; }
 }

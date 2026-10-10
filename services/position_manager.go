@@ -795,6 +795,9 @@ func (pm *PositionManager) ReconcilePersistedPositions(ctx context.Context) int 
 		if position.Status == "CLOSED" || position.Status == "CANCELLED" {
 			continue
 		}
+		if position.Status == "PROTECTION_BLOCKED" && pm.reconcileStartupFilledClose(ctx, position) {
+			continue
+		}
 		valid := true
 		type recoveredManagedOrder struct {
 			identifier string
@@ -881,6 +884,175 @@ func (pm *PositionManager) ReconcilePersistedPositions(ctx context.Context) int 
 		}
 	}
 	return skipped
+}
+
+// reconcileStartupFilledClose repairs only the narrow case where one untouched
+// blocked equity position has an exact, already-filled generic close order.
+func (pm *PositionManager) reconcileStartupFilledClose(ctx context.Context, position *ManagedPosition) bool {
+	if position == nil {
+		return false
+	}
+	_, _, _, _, optionSymbol := parseOCCOptionSymbol(position.Symbol)
+	if optionSymbol || !isFinitePositive(position.Quantity) || position.RemainingQty != position.Quantity || position.EntryRemainingQty != 0 || position.ExitFilledQty != 0 || position.ExitOrderID != "" || position.ExitClientOrderID != "" || position.PartialExitClientOrderID != "" || len(position.PartialExitOrders) != 0 || !managedIdentityComplete(position.DurableIdentity) || !managedIdentityMatches(position.DurableIdentity, pm.storageService.DurableIdentity()) {
+		return false
+	}
+	storedPositions, err := pm.storageService.GetAllManagedPositions("")
+	if err != nil {
+		return false
+	}
+	sameSymbol := 0
+	for _, candidate := range storedPositions {
+		if candidate != nil && strings.EqualFold(candidate.Symbol, position.Symbol) {
+			sameSymbol++
+		}
+	}
+	if sameSymbol != 1 {
+		return false
+	}
+
+	account, err := pm.tradingService.GetAccount(ctx)
+	if err != nil || account == nil || !managedIdentityMatches(models.DurableIdentity{BrokerAccountID: account.BrokerAccountID, PaperLive: account.PaperLive, TenantID: account.TenantID, SandboxID: account.SandboxID}, position.DurableIdentity) {
+		return false
+	}
+	positions, err := pm.tradingService.GetPositions(ctx)
+	if err != nil || positions == nil {
+		return false
+	}
+	for _, current := range positions {
+		if current == nil {
+			return false
+		}
+		if strings.EqualFold(strings.TrimSpace(current.Symbol), strings.TrimSpace(position.Symbol)) {
+			return false
+		}
+		if current.BrokerAccountID != position.BrokerAccountID || current.PaperLive != position.PaperLive || current.TenantID != position.TenantID || current.SandboxID != position.SandboxID {
+			return false
+		}
+	}
+	working, err := pm.tradingService.ListOrders(ctx, "open")
+	if err != nil {
+		return false
+	}
+	for _, order := range working {
+		if order == nil {
+			return false
+		}
+		if order.BrokerAccountID != position.BrokerAccountID || order.PaperLive != position.PaperLive || order.TenantID != position.TenantID || order.SandboxID != position.SandboxID {
+			return false
+		}
+		if strings.EqualFold(order.Symbol, position.Symbol) {
+			return false
+		}
+	}
+
+	entryProjection, err := pm.storageService.GetManagedOrder(position.EntryClientOrderID)
+	if err != nil || entryProjection == nil || entryProjection.PositionID != position.ID || entryProjection.Role != "entry" || entryProjection.Purpose != "entry" || entryProjection.DurableIdentity != position.DurableIdentity || entryProjection.Symbol != position.Symbol || entryProjection.RequestedQty != position.Quantity || entryProjection.BrokerOrderID != position.EntryOrderID {
+		return false
+	}
+	entry, err := pm.getManagedOrder(ctx, preferredManagedOrderID(position.EntryOrderID, position.EntryClientOrderID))
+	if err != nil || entry == nil || validateManagedOrderProjection(entryProjection, entry) != nil || entry.Status != "filled" || entry.FilledQty != position.Quantity || entry.FilledAvgPrice == nil || !isFinitePositive(*entry.FilledAvgPrice) || entry.FilledAt == nil || entry.FilledAt.IsZero() {
+		return false
+	}
+
+	orders, err := pm.storageService.GetOrders("")
+	if err != nil {
+		return false
+	}
+	var candidates []*interfaces.Order
+	for _, order := range orders {
+		if order != nil && order.Purpose == "close" && (order.AssetClass == "" || order.AssetClass == "us_equity") && strings.EqualFold(order.Symbol, position.Symbol) && order.Qty == position.Quantity && oppositeManagedSide(position.Side, order.Side) && (order.ID != "" || order.SubmissionAttempted && order.Status != "withdrawn" && order.Status != "submit_failed") && managedIdentityMatches(models.DurableIdentity{BrokerAccountID: order.BrokerAccountID, PaperLive: order.PaperLive, TenantID: order.TenantID, SandboxID: order.SandboxID}, position.DurableIdentity) {
+			candidates = append(candidates, order)
+		}
+	}
+	if len(candidates) != 1 {
+		return false
+	}
+	closeRow := candidates[0]
+	if closeRow.ClientOrderID == "" || closeRow.ID != "" && closeRow.ID == position.EntryOrderID {
+		return false
+	}
+	bound, err := pm.storageService.GetManagedOrder(closeRow.ClientOrderID)
+	if err != nil || bound != nil {
+		return false
+	}
+	brokerClose, err := pm.tradingService.GetOrderByClientOrderID(ctx, closeRow.ClientOrderID)
+	if err != nil || brokerClose == nil {
+		return false
+	}
+	if brokerClose.ID == "" || brokerClose.ClientOrderID != closeRow.ClientOrderID || brokerClose.Status != "filled" || brokerClose.Symbol != position.Symbol || brokerClose.Qty != position.Quantity || brokerClose.FilledQty != position.Quantity || !oppositeManagedSide(position.Side, brokerClose.Side) || !equityCloseIntentMatches(brokerClose.Side, brokerClose.PositionIntent) || brokerClose.Purpose != "" && brokerClose.Purpose != "close" || brokerClose.AssetClass != "us_equity" || brokerClose.FilledAvgPrice == nil || !isFinitePositive(*brokerClose.FilledAvgPrice) || brokerClose.FilledAt == nil || brokerClose.FilledAt.IsZero() || !brokerClose.FilledAt.After(*entry.FilledAt) {
+		return false
+	}
+	if !managedIdentityMatches(models.DurableIdentity{BrokerAccountID: brokerClose.BrokerAccountID, PaperLive: brokerClose.PaperLive, TenantID: brokerClose.TenantID, SandboxID: brokerClose.SandboxID}, position.DurableIdentity) {
+		return false
+	}
+	if closeRow.Revision <= 0 || closeRow.Qty != brokerClose.Qty || closeRow.Side != brokerClose.Side || closeRow.Type != brokerClose.Type || closeRow.TimeInForce != brokerClose.TimeInForce || closeRow.LimitPrice != nil && (brokerClose.LimitPrice == nil || *closeRow.LimitPrice != *brokerClose.LimitPrice) || closeRow.StopPrice != nil && (brokerClose.StopPrice == nil || *closeRow.StopPrice != *brokerClose.StopPrice) {
+		return false
+	}
+	brokerClose.Revision = closeRow.Revision
+	// Every existing protection sibling must either be broker-terminal with no
+	// fill, or prove its non-submission through both durable rows and explicit 404.
+	protection := []struct{ id, client string }{{position.StopLossOrderID, position.StopLossClientOrderID}, {position.TakeProfitOrderID, position.TakeProfitClientOrderID}}
+	for _, id := range position.PartialExitOrders {
+		protection = append(protection, struct{ id, client string }{id, position.PartialExitClientOrderID})
+	}
+	for _, sibling := range protection {
+		if sibling.id == "" && sibling.client == "" {
+			continue
+		}
+		if sibling.client == "" {
+			return false
+		}
+		projection, e := pm.storageService.GetManagedOrder(sibling.client)
+		if e != nil || projection == nil || projection.PositionID != position.ID || projection.Role != "protection" || projection.Purpose != "protection" || projection.DurableIdentity != position.DurableIdentity || projection.Symbol != position.Symbol || projection.RequestedQty != position.Quantity {
+			return false
+		}
+		generic, e := pm.storageService.GetOrderByClientOrderID(sibling.client)
+		if e != nil || generic == nil || generic.Purpose != "protection" || generic.Symbol != position.Symbol || generic.Qty != position.Quantity || generic.Side != brokerClose.Side || generic.FilledQty != 0 || !managedIdentityMatches(models.DurableIdentity{BrokerAccountID: generic.BrokerAccountID, PaperLive: generic.PaperLive, TenantID: generic.TenantID, SandboxID: generic.SandboxID}, position.DurableIdentity) {
+			return false
+		}
+		if projection.SubmissionAttempted {
+			if projection.BrokerOrderID == "" || sibling.id != projection.BrokerOrderID || generic.ID != projection.BrokerOrderID || !generic.SubmissionAttempted {
+				return false
+			}
+			brokerSibling, e := pm.tradingService.GetOrder(ctx, projection.BrokerOrderID)
+			if e != nil || brokerSibling == nil || validateManagedOrderProjection(projection, brokerSibling) != nil || brokerSibling.FilledQty != 0 {
+				return false
+			}
+			switch strings.ToLower(brokerSibling.Status) {
+			case "canceled", "cancelled", "rejected", "expired":
+			default:
+				return false
+			}
+		} else {
+			if projection.Lifecycle != "submit_failed" || projection.BrokerOrderID != "" || generic.SubmissionAttempted || generic.ID != "" || generic.Status != "submit_failed" || generic.FilledQty != 0 {
+				return false
+			}
+			_, e := pm.tradingService.GetOrderByClientOrderID(ctx, sibling.client)
+			if !IsOrderNotFound(e) {
+				return false
+			}
+		}
+	}
+
+	dbPosition := pm.managedPositionToDB(position)
+	if err := pm.storageService.CommitRecoveredManagedClose(dbPosition, brokerClose, *brokerClose.FilledAt); err != nil {
+		return false
+	}
+	position.Revision = dbPosition.Revision
+	position.ExitOrderID, position.ExitClientOrderID = brokerClose.ID, brokerClose.ClientOrderID
+	position.ExitFilledQty, position.RemainingQty = brokerClose.FilledQty, 0
+	position.ExitFillWatermarks = map[string]float64{brokerClose.ID: brokerClose.FilledQty}
+	position.ClosedAt = brokerClose.FilledAt
+	pm.setPositionStatus(position, "CLOSED")
+	return true
+}
+
+func oppositeManagedSide(positionSide, orderSide string) bool {
+	return strings.EqualFold(positionSide, "buy") && strings.EqualFold(orderSide, "sell") || strings.EqualFold(positionSide, "sell") && strings.EqualFold(orderSide, "buy")
+}
+
+func equityCloseIntentMatches(side, intent string) bool {
+	return strings.EqualFold(side, "sell") && strings.EqualFold(intent, "sell_to_close") || strings.EqualFold(side, "buy") && strings.EqualFold(intent, "buy_to_close")
 }
 
 // repairMissingManagedOrderProjectionFields repairs only legacy blank fields

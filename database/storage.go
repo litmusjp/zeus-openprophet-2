@@ -1059,6 +1059,96 @@ func (s *LocalStorage) SaveManagedPosition(position *models.DBManagedPosition) e
 	return nil
 }
 
+// CommitRecoveredManagedClose atomically binds a previously generic filled close
+// to a blocked managed equity position and records its terminal broker evidence.
+func (s *LocalStorage) CommitRecoveredManagedClose(position *models.DBManagedPosition, close *interfaces.Order, closedAt time.Time) error {
+	if position == nil || close == nil || position.PositionID == "" || close.ClientOrderID == "" || close.ID == "" || closedAt.IsZero() {
+		return fmt.Errorf("managed position, filled close identity, and close time are required")
+	}
+	if err := s.requireCurrentIdentity(position.DurableIdentity); err != nil {
+		return err
+	}
+	if !durableIdentityComplete(s.identity) {
+		return fmt.Errorf("storage has incomplete durable execution identity")
+	}
+	if close.Purpose != "" && close.Purpose != "close" || close.Status != "filled" || close.Qty <= 0 || math.IsNaN(close.Qty) || math.IsInf(close.Qty, 0) || close.FilledQty != close.Qty || close.FilledAvgPrice == nil || *close.FilledAvgPrice <= 0 || math.IsNaN(*close.FilledAvgPrice) || math.IsInf(*close.FilledAvgPrice, 0) || close.FilledAt == nil || !close.FilledAt.Equal(closedAt) {
+		return fmt.Errorf("recovered close lacks exact full-fill evidence")
+	}
+	intentMatches := strings.EqualFold(close.Side, "sell") && strings.EqualFold(close.PositionIntent, "sell_to_close") || strings.EqualFold(close.Side, "buy") && strings.EqualFold(close.PositionIntent, "buy_to_close")
+	oppositeSide := strings.EqualFold(position.Side, "buy") && strings.EqualFold(close.Side, "sell") || strings.EqualFold(position.Side, "sell") && strings.EqualFold(close.Side, "buy")
+	if close.Symbol != position.Symbol || close.Qty != position.Quantity || !oppositeSide || !intentMatches || close.AssetClass != "us_equity" {
+		return fmt.Errorf("recovered close does not match managed equity contract")
+	}
+	if close.BrokerAccountID != s.identity.BrokerAccountID || close.PaperLive != s.identity.PaperLive || close.TenantID != s.identity.TenantID || close.SandboxID != s.identity.SandboxID {
+		return fmt.Errorf("recovered close durable identity does not match storage")
+	}
+	updatedPosition := *position
+	updatedPosition.ExitOrderID, updatedPosition.ExitClientOrderID = close.ID, close.ClientOrderID
+	updatedPosition.ExitFilledQty, updatedPosition.RemainingQty = close.FilledQty, 0
+	updatedPosition.ExitFillWatermarks = fmt.Sprintf("{\"%s\":%.12g}", close.ID, close.FilledQty)
+	updatedPosition.Status, updatedPosition.ClosedAt = "CLOSED", &closedAt
+	updatedPosition.Revision = position.Revision + 1
+	updatedPosition.UpdatedAt = time.Now()
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var current models.DBManagedPosition
+		if err := s.identityQuery(tx.Where("position_id = ?", position.PositionID)).First(&current).Error; err != nil {
+			return fmt.Errorf("load managed position for recovered close: %w", err)
+		}
+		partialExitOrders := strings.TrimSpace(current.PartialExitOrders)
+		if !durableIdentityMatches(current.DurableIdentity, s.identity) || current.Revision != position.Revision || current.Status != "PROTECTION_BLOCKED" || current.Quantity <= 0 || math.IsNaN(current.Quantity) || math.IsInf(current.Quantity, 0) || current.RemainingQty != current.Quantity || current.EntryRemainingQty != 0 || current.ExitFilledQty != 0 || current.ExitOrderID != "" || current.ExitClientOrderID != "" || current.PartialExitClientOrderID != "" || partialExitOrders != "" && partialExitOrders != "[]" && partialExitOrders != "null" {
+			return fmt.Errorf("managed position changed before recovered close commit")
+		}
+		var generic models.DBOrder
+		if err := s.identityQuery(tx.Where("client_order_id = ?", close.ClientOrderID)).First(&generic).Error; err != nil {
+			return fmt.Errorf("load generic close source row: %w", err)
+		}
+		if generic.Revision != close.Revision || generic.Purpose != "close" || generic.Symbol != close.Symbol || generic.Side != close.Side || generic.Qty != close.Qty || generic.Type != close.Type || generic.TimeInForce != close.TimeInForce || generic.AssetClass != "" && generic.AssetClass != close.AssetClass || generic.Underlying != "" && generic.Underlying != close.Underlying || generic.PositionIntent != "" && generic.PositionIntent != close.PositionIntent || generic.LimitPrice != nil && (close.LimitPrice == nil || *generic.LimitPrice != *close.LimitPrice) || generic.StopPrice != nil && (close.StopPrice == nil || *generic.StopPrice != *close.StopPrice) || generic.OrderID != "" && generic.OrderID != close.ID {
+			return fmt.Errorf("generic close source identity or revision changed")
+		}
+		var existing models.DBManagedOrder
+		if err := tx.Where("client_order_id = ?", close.ClientOrderID).First(&existing).Error; err == nil {
+			return fmt.Errorf("recovered close is already bound to a managed order")
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("check recovered close binding: %w", err)
+		}
+		var linked int64
+		if err := tx.Model(&models.DBManagedOrder{}).Where("broker_order_id = ?", close.ID).Count(&linked).Error; err != nil {
+			return err
+		}
+		if linked != 0 {
+			return fmt.Errorf("broker close is already bound to another managed position")
+		}
+		result := s.identityQuery(tx.Model(&models.DBOrder{})).Where("id = ? AND revision = ?", generic.ID, generic.Revision).Updates(map[string]interface{}{
+			"order_id": close.ID, "status": "filled", "filled_qty": close.FilledQty, "filled_avg_price": close.FilledAvgPrice,
+			"filled_at": close.FilledAt, "revision": generic.Revision + 1,
+		})
+		if result.Error != nil {
+			return fmt.Errorf("update recovered generic close: %w", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("stale generic close source revision")
+		}
+		projection := &models.DBManagedOrder{DurableIdentity: s.identity, PositionID: current.PositionID, Role: "close", Purpose: "close", ClientOrderID: close.ClientOrderID, BrokerOrderID: close.ID, Symbol: close.Symbol, Side: close.Side, AssetClass: close.AssetClass, Underlying: close.Underlying, PositionIntent: close.PositionIntent, OrderType: close.Type, TimeInForce: close.TimeInForce, RequestedQty: close.Qty, LimitPrice: close.LimitPrice, StopPrice: close.StopPrice, FilledQty: close.FilledQty, FilledAvgPrice: close.FilledAvgPrice, FillWatermark: close.FilledQty, Lifecycle: "filled", SubmissionAttempted: generic.SubmissionAttempted, Revision: 1, SubmittedAt: &generic.SubmittedAt, FilledAt: close.FilledAt}
+		if err := tx.Create(projection).Error; err != nil {
+			return fmt.Errorf("create recovered managed close projection: %w", err)
+		}
+		result = s.identityQuery(tx.Model(&models.DBManagedPosition{})).Where("id = ? AND position_id = ? AND revision = ?", current.ID, current.PositionID, current.Revision).Updates(managedPositionAssignments(&updatedPosition))
+		if result.Error != nil {
+			return fmt.Errorf("close managed position: %w", result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("stale managed-position revision during close recovery")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	*position = updatedPosition
+	close.Revision++
+	return nil
+}
+
 // GetManagedPosition retrieves a managed position by ID
 func (s *LocalStorage) GetManagedPosition(positionID string) (*models.DBManagedPosition, error) {
 	if !durableIdentityComplete(s.identity) {

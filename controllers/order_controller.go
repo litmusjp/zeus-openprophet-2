@@ -1064,12 +1064,16 @@ func durableOrderIdentityMatches(local, broker *interfaces.Order) bool {
 	if !brokerOrderMatchesLocal(local, broker) {
 		return false
 	}
+	closeIntentMatches := strings.EqualFold(local.Side, "sell") && strings.EqualFold(broker.PositionIntent, "sell_to_close") ||
+		strings.EqualFold(local.Side, "buy") && strings.EqualFold(broker.PositionIntent, "buy_to_close")
+	purposeMatches := local.Purpose == "" || broker.Purpose == "" || broker.Purpose == local.Purpose ||
+		(local.Purpose == "protection" && broker.Purpose == "close" && closeIntentMatches)
 	return (local.BrokerAccountID == "" || broker.BrokerAccountID == local.BrokerAccountID) &&
 		(local.PaperLive == "" || broker.PaperLive == local.PaperLive) &&
 		(local.TenantID == "" || broker.TenantID == local.TenantID) &&
 		(local.SandboxID == "" || broker.SandboxID == local.SandboxID) &&
 		(local.Underlying == "" || broker.Underlying == local.Underlying) &&
-		(local.Purpose == "" || broker.Purpose == "" || broker.Purpose == local.Purpose) &&
+		purposeMatches &&
 		(local.LimitPrice == nil || (broker.LimitPrice != nil && *local.LimitPrice == *broker.LimitPrice)) &&
 		(local.StopPrice == nil || (broker.StopPrice != nil && *local.StopPrice == *broker.StopPrice))
 }
@@ -1123,6 +1127,10 @@ func (oc *OrderController) listVisibleOrders(ctx context.Context, status string)
 				local = candidate
 				break
 			}
+		}
+		if local != nil && (!durableOrderIdentityMatches(local, broker) || services.ValidateBrokerOrderState(broker, local.Qty) != nil) {
+			complete = false
+			continue
 		}
 		merged := mergeBrokerOrder(local, broker)
 		for _, key := range orderIdentityKeys(merged) {

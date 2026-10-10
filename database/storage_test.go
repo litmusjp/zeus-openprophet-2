@@ -645,6 +645,113 @@ func TestSaveManagedPositionRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestCommitRecoveredManagedCloseIsAtomicAndRevisionGuarded(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "recovered-close.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	identity := storage.DurableIdentity()
+	position := &models.DBManagedPosition{DurableIdentity: identity, PositionID: "blocked-xom", Symbol: "XOM", Side: "buy", Status: "PROTECTION_BLOCKED", Quantity: 1, RemainingQty: 1, EntryRemainingQty: 0, EntryClientOrderID: "xom-entry"}
+	if err := storage.SaveManagedPosition(position); err != nil {
+		t.Fatal(err)
+	}
+	failureCase := func(stale bool) {
+		t.Helper()
+		clientID := "xom-exit-good"
+		if stale {
+			clientID = "xom-exit-stale"
+		}
+		avg := 165.25
+		filledAt := time.Now().UTC().Add(-time.Minute)
+		close := &interfaces.Order{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, ClientOrderID: clientID, Symbol: "XOM", Qty: 1, Side: "sell", Type: "market", TimeInForce: "day", Status: "accepted", AssetClass: "us_equity", Underlying: "XOM", Purpose: "close", PositionIntent: "sell_to_close", SubmissionAttempted: true}
+		if err := storage.SaveOrder(close); err != nil {
+			t.Fatal(err)
+		}
+		close.ID, close.Status, close.FilledQty, close.FilledAvgPrice, close.FilledAt = "broker-"+clientID, "filled", 1, &avg, &filledAt
+		candidate := *position
+		if stale {
+			candidate.Revision--
+		}
+		err := storage.CommitRecoveredManagedClose(&candidate, close, filledAt)
+		if stale {
+			if err == nil {
+				t.Fatal("stale position revision was accepted")
+			}
+			if got, e := storage.GetManagedPosition(position.PositionID); e != nil || got.Status != "PROTECTION_BLOCKED" {
+				t.Fatalf("failed CAS partially changed position: %#v err=%v", got, e)
+			}
+			if got, e := storage.GetManagedOrder(clientID); e != nil || got != nil {
+				t.Fatalf("failed CAS left projection: %#v err=%v", got, e)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := storage.GetManagedPosition(position.PositionID)
+		if err != nil || got.Status != "CLOSED" || got.ExitOrderID != close.ID || got.ExitFilledQty != 1 || got.RemainingQty != 0 || got.ClosedAt == nil || !got.ClosedAt.Equal(filledAt) {
+			t.Fatalf("recovered position=%#v err=%v", got, err)
+		}
+		projection, err := storage.GetManagedOrder(clientID)
+		if err != nil || projection == nil || projection.PositionID != position.PositionID || projection.Role != "close" || projection.FilledQty != 1 || projection.FilledAvgPrice == nil || *projection.FilledAvgPrice != avg {
+			t.Fatalf("projection=%#v err=%v", projection, err)
+		}
+	}
+	failureCase(true)
+	failureCase(false)
+}
+
+func TestCommitRecoveredManagedCloseRollsBackAfterProjectionWrite(t *testing.T) {
+	setManagedIdentity(t, "broker-account-1")
+	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "recovered-close-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	identity := storage.DurableIdentity()
+	position := &models.DBManagedPosition{DurableIdentity: identity, PositionID: "rollback-xom", Symbol: "XOM", Side: "buy", Status: "PROTECTION_BLOCKED", Quantity: 40, RemainingQty: 40}
+	if err := storage.SaveManagedPosition(position); err != nil {
+		t.Fatal(err)
+	}
+	limitPrice := 167.0
+	close := &interfaces.Order{BrokerAccountID: identity.BrokerAccountID, PaperLive: identity.PaperLive, TenantID: identity.TenantID, SandboxID: identity.SandboxID, ClientOrderID: "rollback-xom-close", Symbol: "XOM", Qty: 40, Side: "sell", Type: "limit", TimeInForce: "day", LimitPrice: &limitPrice, Status: "pending_new", Purpose: "close", SubmissionAttempted: true}
+	if err := storage.SaveOrder(close); err != nil {
+		t.Fatal(err)
+	}
+	sourceRevision := close.Revision
+	avg, fillTime := 168.07, time.Now().UTC()
+	close.ID, close.Status, close.FilledQty, close.FilledAvgPrice, close.FilledAt = "broker-rollback-close", "filled", 40, &avg, &fillTime
+	close.AssetClass, close.Underlying, close.PositionIntent = "us_equity", "XOM", "sell_to_close"
+	close.Revision--
+	if err := storage.CommitRecoveredManagedClose(position, close, fillTime); err == nil {
+		t.Fatal("stale source revision was accepted")
+	}
+	close.Revision = sourceRevision
+	if err := storage.db.Exec("CREATE TRIGGER fail_recovered_position_update BEFORE UPDATE ON managed_positions BEGIN SELECT RAISE(ABORT, 'test rollback'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.CommitRecoveredManagedClose(position, close, fillTime); err == nil {
+		t.Fatal("triggered final position update unexpectedly succeeded")
+	}
+	source, err := storage.GetOrderByClientOrderID(close.ClientOrderID)
+	if err != nil || source.Revision != sourceRevision || source.Status != "pending_new" || source.ID != "" {
+		t.Fatalf("generic source not rolled back: %#v err=%v", source, err)
+	}
+	projection, err := storage.GetManagedOrder(close.ClientOrderID)
+	if err != nil || projection != nil {
+		t.Fatalf("projection survived rollback: %#v err=%v", projection, err)
+	}
+	stored, err := storage.GetManagedPosition(position.PositionID)
+	if err != nil || stored.Status != "PROTECTION_BLOCKED" || stored.Revision != position.Revision {
+		t.Fatalf("position changed after rollback: %#v err=%v", stored, err)
+	}
+	if position.Status != "PROTECTION_BLOCKED" || close.Revision != sourceRevision || close.Status != "filled" {
+		t.Fatalf("memory values changed unexpectedly: position=%s close=%#v", position.Status, close)
+	}
+}
+
 func TestSavePositionAllowsMultipleSnapshotsForSameSymbol(t *testing.T) {
 	setManagedIdentity(t, "broker-account-1")
 	storage, err := NewLocalStorage(filepath.Join(t.TempDir(), "positions.db"))

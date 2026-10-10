@@ -233,6 +233,70 @@ func TestStockTerminalProjectionWithoutPurposeResolvesStaleLocalExit(t *testing.
 	}
 }
 
+func TestActiveProtectionStopAllowsBrokerClosePurposeWithoutWeakeningIdentity(t *testing.T) {
+	local := &interfaces.Order{ID: "stop-id", ClientOrderID: "stop-client", Symbol: "XOM", Qty: 40, Side: "sell", Type: "stop", TimeInForce: "gtc", StopPrice: floatPtr(165), Status: "pending_cancel", Purpose: "protection", BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+	working := *local
+	working.Status, working.Purpose, working.PositionIntent = "accepted", "close", "sell_to_close"
+	conflict := working
+	conflict.Qty = 39
+	for _, tc := range []struct {
+		name         string
+		broker       *interfaces.Order
+		wantCount    int
+		wantComplete bool
+	}{
+		{name: "working protection is broker authoritative", broker: &working, wantCount: 1, wantComplete: true},
+		{name: "terminal canceled protection is removed", broker: func() *interfaces.Order { o := working; o.Status = "canceled"; return &o }(), wantCount: 0, wantComplete: true},
+		{name: "conflicting quantity remains unresolved", broker: &conflict, wantCount: 1, wantComplete: false},
+		{name: "missing close intent remains unresolved", broker: func() *interfaces.Order { o := working; o.PositionIntent = ""; return &o }(), wantCount: 1, wantComplete: false},
+		{name: "wrong open intent remains unresolved", broker: func() *interfaces.Order { o := working; o.PositionIntent = "sell_to_open"; return &o }(), wantCount: 1, wantComplete: false},
+		{name: "wrong account remains unresolved", broker: func() *interfaces.Order { o := working; o.BrokerAccountID = "other"; return &o }(), wantCount: 1, wantComplete: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, brokerOrders: []*interfaces.Order{tc.broker}}
+			if tc.broker.Status == "canceled" {
+				service.lookups = map[string]*interfaces.Order{local.ClientOrderID: tc.broker}
+			}
+			storage := &visibleOrdersStorage{orders: []*interfaces.Order{local}}
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status=active", nil)
+			NewOrderController(service, nil, storage).HandleGetOrders(ctx)
+			var response struct {
+				Orders   []*interfaces.Order `json:"orders"`
+				Complete bool                `json:"complete"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Orders) != tc.wantCount || response.Complete != tc.wantComplete {
+				t.Fatalf("response = %s, want count %d complete %v", rec.Body.String(), tc.wantCount, tc.wantComplete)
+			}
+		})
+	}
+}
+
+func TestDurableOrderIdentityRequiresSideMatchingExplicitCloseIntent(t *testing.T) {
+	for _, tc := range []struct {
+		side, intent string
+		want         bool
+	}{
+		{"sell", "sell_to_close", true}, {"sell", "buy_to_close", false}, {"sell", "sell_to_open", false}, {"sell", "", false},
+		{"buy", "buy_to_close", true}, {"buy", "sell_to_close", false}, {"buy", "buy_to_open", false}, {"buy", "", false},
+	} {
+		local := &interfaces.Order{ID: "stop", ClientOrderID: "stop-client", Symbol: "XOM", Qty: 2, Side: tc.side, Type: "stop", TimeInForce: "gtc", Purpose: "protection", BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+		broker := *local
+		broker.Purpose, broker.Status, broker.PositionIntent = "close", "accepted", tc.intent
+		if got := durableOrderIdentityMatches(local, &broker); got != tc.want {
+			t.Errorf("side=%s intent=%q matched=%v, want %v", tc.side, tc.intent, got, tc.want)
+		}
+		broker.BrokerAccountID = "other"
+		if durableOrderIdentityMatches(local, &broker) {
+			t.Errorf("cross-account side=%s intent=%q was accepted", tc.side, tc.intent)
+		}
+	}
+}
+
 func TestActiveRetainsUncertainLocalWorkingOrders(t *testing.T) {
 	for _, mode := range []string{"lookup failure", "identity mismatch"} {
 		t.Run(mode, func(t *testing.T) {

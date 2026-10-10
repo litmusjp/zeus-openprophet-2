@@ -233,6 +233,28 @@ func TestStockTerminalProjectionWithoutPurposeResolvesStaleLocalExit(t *testing.
 	}
 }
 
+func TestAllHistoryKeepsTerminalLegacyClassification(t *testing.T) {
+	local := &interfaces.Order{ID: "legacy-entry-id", ClientOrderID: "legacy-entry-client", Symbol: "IWM", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Status: "filled", Purpose: "entry", BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+	broker := *local
+	broker.Purpose = "close"
+	service := &visibleOrdersTradingService{reconciliationTradingService: &reconciliationTradingService{}, brokerOrders: []*interfaces.Order{&broker}}
+	storage := &visibleOrdersStorage{orders: []*interfaces.Order{local}}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/orders?status=all", nil)
+	NewOrderController(service, nil, storage).HandleGetOrders(ctx)
+	var response struct {
+		Orders   []*interfaces.Order `json:"orders"`
+		Complete bool                `json:"complete"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Complete || len(response.Orders) != 1 || response.Orders[0].Status != "filled" || response.Orders[0].Purpose != "entry" {
+		t.Fatalf("terminal legacy history changed: %s", rec.Body.String())
+	}
+}
+
 func TestActiveProtectionStopAllowsBrokerClosePurposeWithoutWeakeningIdentity(t *testing.T) {
 	local := &interfaces.Order{ID: "stop-id", ClientOrderID: "stop-client", Symbol: "XOM", Qty: 40, Side: "sell", Type: "stop", TimeInForce: "gtc", StopPrice: floatPtr(165), Status: "pending_cancel", Purpose: "protection", BrokerAccountID: "acct", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
 	working := *local

@@ -1128,7 +1128,7 @@ func (oc *OrderController) listVisibleOrders(ctx context.Context, status string)
 				break
 			}
 		}
-		if local != nil && (!durableOrderIdentityMatches(local, broker) || services.ValidateBrokerOrderState(broker, local.Qty) != nil) {
+		if local != nil && (locallyWorkingOrder(local) || locallyWorkingOrder(broker)) && (!durableOrderIdentityMatches(local, broker) || services.ValidateBrokerOrderState(broker, local.Qty) != nil) {
 			complete = false
 			continue
 		}

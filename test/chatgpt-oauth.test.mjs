@@ -103,19 +103,37 @@ test('TERM-ignoring owned helper is killed and flow slot is released after cance
   }
 });
 
+function descendantFixtureScripts(marker) {
+  const childScript = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.writeFileSync(${JSON.stringify(marker)},String(process.pid)); setInterval(()=>{},1000);`;
+  const parentScript = `const {spawn}=require('node:child_process'); spawn(process.execPath,['-e',${JSON.stringify(childScript)}],{stdio:'ignore'}); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);`;
+  return { childScript, parentScript };
+}
+
+test('Linux descendant fixture scripts parse on every platform', () => {
+  const { childScript, parentScript } = descendantFixtureScripts(path.join(os.tmpdir(), 'op2-descendant-fixture-marker'));
+  new vm.Script(childScript);
+  new vm.Script(parentScript);
+});
+
 test('Linux cancellation kills only the helper process group and its descendant', { skip: process.platform !== 'linux' }, async () => {
   const marker = path.join(os.tmpdir(), `op2-child-${process.pid}-${Date.now()}`);
-  const flow = createChatGPTAuthFlow({ spawn: (_bin, _args, options) => spawnChild(process.execPath, ['-e', `const {spawn}=require('node:child_process'); const c=spawn(process.execPath,['-e',"const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.writeFileSync(${JSON.stringify(marker)},String(process.pid)); setInterval(()=>{},1000)"],{stdio:'ignore'}); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);`], options) });
-  const { id } = flow.start();
-  for (let i = 0; i < 100; i++) { try { await fs.access(marker); break; } catch { await new Promise(resolve => setTimeout(resolve, 10)); } }
-  await fs.access(marker);
-  const descendantPid = Number(await fs.readFile(marker, 'utf8'));
-  flow.cancel(id);
-  await new Promise(resolve => setTimeout(resolve, 500));
-  let state = null;
-  try { const stat = await fs.readFile(`/proc/${descendantPid}/stat`, 'utf8'); state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]; } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  assert.ok(state === null || state === 'Z', `descendant should be terminated or a non-running zombie; state=${state}`);
-  await fs.rm(marker, { force: true });
+  const { parentScript } = descendantFixtureScripts(marker);
+  const flow = createChatGPTAuthFlow({ spawn: (_bin, _args, options) => spawnChild(process.execPath, ['-e', parentScript], options) });
+  let id;
+  try {
+    ({ id } = flow.start());
+    for (let i = 0; i < 100; i++) { try { await fs.access(marker); break; } catch { await new Promise(resolve => setTimeout(resolve, 10)); } }
+    await fs.access(marker);
+    const descendantPid = Number(await fs.readFile(marker, 'utf8'));
+    flow.cancel(id);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    let state = null;
+    try { const stat = await fs.readFile(`/proc/${descendantPid}/stat`, 'utf8'); state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    assert.ok(state === null || state === 'Z', `descendant should be terminated or a non-running zombie; state=${state}`);
+  } finally {
+    if (id) flow.cancel(id);
+    await fs.rm(marker, { force: true });
+  }
 });
 
 test('expiry drops temporary code and fixed URL', async () => {

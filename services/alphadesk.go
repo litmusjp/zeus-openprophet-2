@@ -101,8 +101,9 @@ type AlphaDeskAssessmentRequest struct {
 }
 
 type AlphaDeskUnavailableError struct {
-	Reason string
-	Err    error
+	Reason   string
+	Err      error
+	Category string
 }
 
 type AlphaDeskConfigurationError struct{ Reason string }

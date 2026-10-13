@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -253,6 +254,82 @@ func TestStandaloneFAILAndUnavailablePreserveFeedback(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStandaloneConsumerClassifiesSafeUnavailableErrors(t *testing.T) {
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("2")}
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"authentication", http.StatusUnauthorized, "secret response", "upstream_authentication"},
+		{"service", http.StatusBadGateway, "private body", "upstream_service_error"},
+		{"schema", http.StatusOK, `{"decision":"PASS"}`, "response_validation"},
+		{"invalid_json", http.StatusOK, "private body", "response_validation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "test-key", HTTP: server.Client()}
+			_, err := client.AssessOptionsTrade(context.Background(), proposal)
+			var unavailable *AlphaDeskUnavailableError
+			if !errors.As(err, &unavailable) || unavailable.Category != tc.want {
+				t.Fatalf("got error %#v, want category %s", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private body") {
+				t.Fatal("upstream data leaked in error")
+			}
+		})
+	}
+}
+
+func TestStandaloneEffectiveScoreThresholdIsBoundToPolicyVersion(t *testing.T) {
+	snapshot, version := standaloneFixturePolicyAt("25")
+	snapshot["execution_max_quote_age_seconds"] = json.Number("120")
+	if !validStandalonePolicy(snapshot, version, 25) {
+		t.Fatal("standalone score override did not validate against its effective policy")
+	}
+	if validStandalonePolicy(snapshot, version, 35) {
+		t.Fatal("submission recheck accepted a different score threshold")
+	}
+}
+
+func TestStandaloneConsumerClassifiesConfigurationDeadlineAndTransport(t *testing.T) {
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("2")}
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := server.URL
+	server.Close()
+	cases := []struct {
+		name   string
+		client *AlphaDeskClient
+		ctx    context.Context
+		want   string
+	}{
+		{"configuration", &AlphaDeskClient{}, context.Background(), "configuration"},
+		{"deadline", &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: closedURL, APIKey: "test-key"}, expiredStandaloneContext(), "deadline_exceeded"},
+		{"transport", &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: closedURL, APIKey: "test-key"}, context.Background(), "transport_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.client.AssessOptionsTrade(tc.ctx, proposal)
+			var unavailable *AlphaDeskUnavailableError
+			if !errors.As(err, &unavailable) || unavailable.Category != tc.want {
+				t.Fatalf("got error %#v, want category %s", err, tc.want)
+			}
+		})
+	}
+}
+
+func expiredStandaloneContext() context.Context {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	cancel()
+	return ctx
 }
 
 func TestStandaloneValidationNeverCallsProvider(t *testing.T) {

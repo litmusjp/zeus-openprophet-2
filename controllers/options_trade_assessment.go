@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/gin-gonic/gin"
 	"io"
 	"net/http"
@@ -16,6 +17,21 @@ func standaloneUnavailable(code string) gin.H {
 		"market_data": gin.H{"source": "unknown", "feed": nil, "requested_feed": "indicative", "quality": "testing_only", "greeks_calculation_provenance": nil, "greeks_calculation_freshness": "unknown", "warnings": []string{"greek_calculation_time_unknown"}},
 		"checks":      []any{}, "blocking_reasons": []string{code},
 		"remediation": []string{"Check AlphaDesk configuration and current market evidence; skip this proposal and continue other work."}}
+}
+
+func standaloneErrorCategory(err error) string {
+	var unavailable *services.AlphaDeskUnavailableError
+	if errors.As(err, &unavailable) {
+		switch unavailable.Category {
+		case "configuration", "deadline_exceeded", "transport_error", "upstream_authentication", "upstream_service_error", "response_validation":
+			return unavailable.Category
+		}
+	}
+	var configuration *services.AlphaDeskConfigurationError
+	if errors.As(err, &configuration) {
+		return "configuration"
+	}
+	return "assessment_service_unavailable"
 }
 
 // AssessOptionsTrade only calls AlphaDesk's standalone assessment API. It never
@@ -41,7 +57,7 @@ func (oc *OrderController) AssessOptionsTrade(c *gin.Context) {
 	}
 	result, err := assessor.AssessOptionsTradeReadOnly(c.Request.Context(), proposal)
 	if err != nil {
-		c.JSON(http.StatusOK, standaloneUnavailable("assessment_service_unavailable"))
+		c.JSON(http.StatusOK, standaloneUnavailable(standaloneErrorCategory(err)))
 		return
 	}
 	c.JSON(http.StatusOK, result)

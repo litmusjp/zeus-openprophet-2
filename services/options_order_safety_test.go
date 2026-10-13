@@ -1087,3 +1087,92 @@ func TestOrderResultDistinguishesAcknowledgementFromFill(t *testing.T) {
 func floatPtr(value float64) *float64 { return &value }
 
 func decimalPtr(value decimal.Decimal) *decimal.Decimal { return &value }
+
+func TestPlaceOptionsOrderUsesCurrentStandaloneThreshold25(t *testing.T) {
+	now := time.Now().UTC()
+	caseName := "pass"
+	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			snapshot, version := standaloneFixturePolicyAt("25")
+			_ = json.NewEncoder(w).Encode(map[string]any{"scope": "TRADE_ASSESSMENT", "execution_allowed": false, "policy_version": version, "policy_snapshot": snapshot, "minimum_passing_score": "25"})
+			return
+		}
+		var proposal StandaloneTradeProposal
+		if err := json.NewDecoder(r.Body).Decode(&proposal); err != nil {
+			t.Errorf("decode proposal: %v", err)
+			return
+		}
+		doc := standaloneFixtureReceiptAt(proposal, now, "25")
+		switch caseName {
+		case "pass":
+			doc["signal_score"] = json.Number("33.27")
+			doc["score_components"] = map[string]float64{
+				"catalyst_confidence": .06, "sentiment": .075, "directional_momentum": .08,
+				"relative_volume": .005, "market_confirmation": .01875,
+				"sector_confirmation": .01875, "liquidity": .0752,
+			}
+		case "below_threshold":
+			doc["signal_score"] = json.Number("24.99")
+		case "fail":
+			doc["decision"] = "FAIL"
+		case "unavailable":
+			doc["decision"] = "UNAVAILABLE"
+		}
+		_ = json.NewEncoder(w).Encode(doc)
+	}))
+	defer alpha.Close()
+
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v2/account":
+			_, _ = w.Write([]byte(`{"id":"paper-account","equity":"10000","last_equity":"10000","cash":"10000","portfolio_value":"10000","buying_power":"10000","daytrade_count":0}`))
+		case "/v2/positions", "/v2/orders":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer broker.Close()
+
+	for _, tc := range []struct {
+		name            string
+		wantBrokerCalls int
+	}{
+		{"pass", 1}, {"below_threshold", 0}, {"fail", 0}, {"unavailable", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caseName = tc.name
+			brokerCalls := 0
+			policy := &TradingPolicy{IsPaper: true, AllowPaperTrading: true, AllowOptions: true, MaxPositionPct: 100, MaxDeployedPct: 100, MaxOpenPositions: 10, MaxDailyLoss: 100}
+			service := &AlpacaTradingService{
+				client:      alpaca.NewClient(alpaca.ClientOpts{APIKey: "fixture", APISecret: "fixture", BaseURL: broker.URL, HTTPClient: broker.Client()}),
+				clockReader: fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}}, logger: logrus.New(), policy: policy,
+				expectedAccountID: "paper-account", expectedPaper: true, expectedTenantID: "tenant", expectedSandboxID: "sandbox",
+				localOrderProvider: func(context.Context) ([]*interfaces.Order, error) { return nil, nil },
+				placeOrderFn: func(req alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+					brokerCalls++
+					return &alpaca.Order{ID: "threshold-fixture", ClientOrderID: req.ClientOrderID, Status: "accepted", Qty: req.Qty, Symbol: req.Symbol, Side: req.Side, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, PositionIntent: req.PositionIntent}, nil
+				},
+				alphaDesk:        &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, ExecutionMode: "PAPER_ADVISORY_OP2", URL: alpha.URL, APIKey: "fixture", HTTP: alpha.Client(), Now: func() time.Time { return now }},
+				submissionMarker: func(string) error { return nil },
+			}
+			service.SetManagedExecutionBlockCheck(func() bool { return false })
+			service.SetOpeningReservationLock(t.TempDir() + `\reservation.lock`)
+			order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "threshold-" + tc.name, Symbol: "AAPL261106C00200000", Underlying: "AAPL", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(2)})
+			order.AssessmentAuditSink = func(a *interfaces.AlphaDeskAssessment) error {
+				if tc.name == "pass" && (a.SignalScore == nil || *a.SignalScore != 33.27 || a.Threshold == nil || *a.Threshold != 25) {
+					t.Errorf("assessment score/threshold = %#v/%#v", a.SignalScore, a.Threshold)
+				}
+				return nil
+			}
+			_, err := service.PlaceOptionsOrder(context.Background(), order)
+			if tc.wantBrokerCalls == 1 && err != nil {
+				t.Fatalf("score 33.27 with current threshold 25 rejected: %v", err)
+			}
+			if brokerCalls != tc.wantBrokerCalls {
+				t.Fatalf("broker calls=%d, want %d (err=%v)", brokerCalls, tc.wantBrokerCalls, err)
+			}
+		})
+	}
+}

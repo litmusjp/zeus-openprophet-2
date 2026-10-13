@@ -194,7 +194,7 @@ func (ic *IntelligenceController) HandleAnalyzeStock(c *gin.Context) {
 	}
 
 	// Add timeout to prevent indefinite hangs
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
 	analysis, err := ic.stockAnalysisService.AnalyzeStock(ctx, symbol)
@@ -234,7 +234,7 @@ func (ic *IntelligenceController) HandleAnalyzeMultipleStocks(c *gin.Context) {
 	}
 
 	// Add timeout to prevent indefinite hangs
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
 	analyses, err := ic.stockAnalysisService.AnalyzeStocks(ctx, req.Symbols)

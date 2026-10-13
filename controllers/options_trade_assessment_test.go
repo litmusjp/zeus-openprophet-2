@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"context"
-	"errors"
 	"github.com/gin-gonic/gin"
 	"net/http"
 	"net/http/httptest"
@@ -15,14 +14,15 @@ import (
 // Unimplemented broker/account methods panic if the read-only route calls them.
 type standaloneOnlyService struct {
 	interfaces.TradingService
-	calls       int
-	unavailable bool
+	calls         int
+	unavailable   bool
+	errorCategory string
 }
 
 func (s *standaloneOnlyService) AssessOptionsTradeReadOnly(_ context.Context, p services.StandaloneTradeProposal) (map[string]any, error) {
 	s.calls++
 	if s.unavailable {
-		return nil, errors.New("private upstream detail")
+		return nil, &services.AlphaDeskUnavailableError{Reason: "private upstream detail", Category: s.errorCategory}
 	}
 	return map[string]any{"decision": "FAIL", "signal_score": 40, "execution_allowed": false, "remediation": []string{"genuine stronger signal required"}}, nil
 }
@@ -32,14 +32,15 @@ func TestStandaloneHTTPControllerReadOnlyValidationAndFeedback(t *testing.T) {
 		name, body    string
 		status, calls int
 		unavailable   bool
+		category      string
 	}{
-		{"feedback", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":2}`, 200, 1, false},
-		{"outage", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":2}`, 200, 1, true},
-		{"caller_score", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":2,"signal_score":100}`, 400, 0, false},
-		{"invalid_quantity", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":0,"limit_price":2}`, 400, 0, false},
+		{"feedback", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":2}`, 200, 1, false, ""},
+		{"outage", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":2}`, 200, 1, true, "transport_error"},
+		{"caller_score", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":2,"signal_score":100}`, 400, 0, false, ""},
+		{"invalid_quantity", `{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":0,"limit_price":2}`, 400, 0, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &standaloneOnlyService{unavailable: tc.unavailable}
+			s := &standaloneOnlyService{unavailable: tc.unavailable, errorCategory: tc.category}
 			controller := NewOrderController(s, nil, nil)
 			r := gin.New()
 			r.POST("/options/trade-assessment", controller.AssessOptionsTrade)
@@ -52,6 +53,9 @@ func TestStandaloneHTTPControllerReadOnlyValidationAndFeedback(t *testing.T) {
 			}
 			if tc.unavailable && (strings.Contains(w.Body.String(), "private upstream") || !strings.Contains(w.Body.String(), `"decision":"UNAVAILABLE"`)) {
 				t.Fatal("unsanitized or misleading outage")
+			}
+			if tc.unavailable && !strings.Contains(w.Body.String(), `"blocking_reasons":["`+tc.category+`"]`) {
+				t.Fatalf("category missing: %s", w.Body.String())
 			}
 			if tc.unavailable && (!strings.Contains(w.Body.String(), `"source":"unknown"`) || !strings.Contains(w.Body.String(), `"requested_feed":"indicative"`)) {
 				t.Fatal("outage claimed an observed provider source")

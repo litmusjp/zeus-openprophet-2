@@ -197,27 +197,27 @@ func sameStandaloneTrade(a, b StandaloneTradeProposal) bool {
 // AssessOptionsTrade is a five-second, read-only quality check. It does not call
 // a broker or modify ACCOUNT_VERIFIED execution, accounts or approval storage.
 func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal StandaloneTradeProposal) (map[string]any, error) {
-	unavailable := func() (map[string]any, error) {
-		return nil, &AlphaDeskUnavailableError{Reason: "Standalone AlphaDesk assessment is unavailable or invalid; do not execute this proposal"}
+	unavailable := func(category string) (map[string]any, error) {
+		return nil, &AlphaDeskUnavailableError{Reason: "Standalone AlphaDesk assessment is unavailable; do not execute this proposal", Category: category}
 	}
 	if err := proposal.Validate(); err != nil {
 		return nil, err
 	}
 	if c == nil || !c.Enabled || !c.SignalQualityEnabled || c.APIKey == "" {
-		return unavailable()
+		return unavailable("configuration")
 	}
 	if err := ValidateAlphaDeskURL(c.URL); err != nil {
-		return unavailable()
+		return unavailable("configuration")
 	}
 	body, err := json.Marshal(proposal)
 	if err != nil {
-		return unavailable()
+		return unavailable("response_validation")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, "POST", c.URL+"/api/v2/option-trade-assessments", bytes.NewReader(body))
 	if err != nil {
-		return unavailable()
+		return unavailable("response_validation")
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-AlphaDesk-API-Key", c.APIKey)
@@ -229,78 +229,90 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(request)
 	if err != nil {
-		return unavailable()
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return unavailable("deadline_exceeded")
+		}
+		return unavailable("transport_error")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return unavailable()
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return unavailable("upstream_authentication")
+		}
+		return unavailable("upstream_service_error")
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 262145))
-	if err != nil || len(data) > 262144 {
-		return unavailable()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return unavailable("deadline_exceeded")
+		}
+		return unavailable("transport_error")
+	}
+	if len(data) > 262144 {
+		return unavailable("response_validation")
 	}
 	var result map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF {
-		return unavailable()
+		return unavailable("response_validation")
 	}
 	decision, ok := result["decision"].(string)
 	if !ok || (decision != "PASS" && decision != "FAIL" && decision != "UNAVAILABLE") {
-		return unavailable()
+		return unavailable("response_validation")
 	}
 	authority, ok := result["execution_allowed"].(bool)
 	if !ok || authority {
-		return unavailable()
+		return unavailable("response_validation")
 	}
 	if decision == "PASS" {
 		if passValue, exists := result["pass"]; exists && passValue != true {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		if result["scope"] != "TRADE_ASSESSMENT" || result["score_source"] != "alphadesk_direct_market_data" {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		if result["score_profile"] != "catalyst_momentum_v1" || result["retryable"] != false {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		if result["advisory_policy_profile"] != "paper_advisory_greeks_v1" || result["advisory_policy_hash"] != "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca" || result["paper_only"] != true || result["human_approval_required"] != true {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		for _, name := range []string{"assessment_id", "policy_version"} {
 			if value, ok := result[name].(string); !ok || value == "" {
-				return unavailable()
+				return unavailable("response_validation")
 			}
 		}
 		observedText, ok := result["observed_at"].(string)
 		if !ok {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		observed, parseErr := time.Parse(time.RFC3339Nano, observedText)
 		if parseErr != nil {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		evidenceText, ok := result["evidence_observed_at"].(string)
 		if !ok {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		evidenceAt, parseErr := time.Parse(time.RFC3339Nano, evidenceText)
 		if parseErr != nil || evidenceAt.After(observed) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		market, marketOK := result["market_data"].(map[string]any)
 		if !marketOK || market["source"] != "alpaca" || market["feed"] != "indicative" || market["quality"] != "testing_only" {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		rawGreekTime, timePresent := market["greeks_calculated_at"]
 		rawGreekSource, sourcePresent := market["greeks_calculation_provenance"]
 		if timePresent && rawGreekTime != nil {
 			if _, ok := rawGreekTime.(string); !ok {
-				return unavailable()
+				return unavailable("response_validation")
 			}
 		}
 		if sourcePresent && rawGreekSource != nil {
 			if _, ok := rawGreekSource.(string); !ok {
-				return unavailable()
+				return unavailable("response_validation")
 			}
 		}
 		greekTime, hasGreekTime := rawGreekTime.(string)
@@ -308,44 +320,44 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 		warnings, warningOK := market["warnings"].([]any)
 		if !hasGreekTime {
 			if (sourcePresent && rawGreekSource != nil) || market["greeks_calculation_freshness"] != "unknown" || !warningOK || len(warnings) != 1 || warnings[0] != "greek_calculation_time_unknown" {
-				return unavailable()
+				return unavailable("response_validation")
 			}
 		} else {
 			calculatedAt, greekErr := time.Parse(time.RFC3339Nano, greekTime)
 			if !hasGreekSource || strings.TrimSpace(greekSource) == "" || greekErr != nil || calculatedAt.After(observed) || market["greeks_calculation_freshness"] != "verified" || !warningOK || len(warnings) != 0 {
-				return unavailable()
+				return unavailable("response_validation")
 			}
 		}
 		asOfText, ok := result["evidence_as_of"].(string)
 		if !ok {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		asOf, parseErr := time.Parse(time.RFC3339Nano, asOfText)
 		if parseErr != nil || !asOf.Equal(evidenceAt) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		current := time.Now()
 		if c.Now != nil {
 			current = c.Now()
 		}
 		if observed.After(current) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 
 		if _, numeric := result["signal_score"].(json.Number); !numeric {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		score, err := standaloneNumber(result["signal_score"])
 		if err != nil || score < 0 || score > 100 {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		threshold, err := standaloneNumber(result["minimum_passing_score"])
 		if err != nil || threshold < 0 || threshold > 100 || score < threshold {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		expiryText, ok := result["expires_at"].(string)
 		if !ok {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		expiry, err := time.Parse(time.RFC3339Nano, expiryText)
 		now := time.Now()
@@ -353,55 +365,55 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 			now = c.Now()
 		}
 		if err != nil || !expiry.After(now) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		policySnapshot, ok := result["policy_snapshot"].(map[string]any)
 		if !ok {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		maxAgeSeconds, ageErr := standaloneNumber(policySnapshot["execution_max_quote_age_seconds"])
 		if ageErr != nil || expiry.After(evidenceAt.Add(time.Duration(maxAgeSeconds*float64(time.Second)))) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		if fp, ok := result["trade_fingerprint"].(string); !ok || fp != standaloneProposalFingerprint(proposal) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		if !validStandalonePolicy(result["policy_snapshot"], result["policy_version"], threshold) || !validStandaloneComponents(result["score_components"], score) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		if result["remediation"] == nil {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		remediation, ok := result["remediation"].([]any)
 		if !ok || len(remediation) != 0 {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		blockers, ok := result["blocking_reasons"].([]any)
 		if !ok || len(blockers) != 0 {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		checks, ok := result["checks"].([]any)
 		if !ok || len(checks) == 0 {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		seenChecks := make(map[string]bool, len(checks))
 		for _, entry := range checks {
 			check, ok := entry.(map[string]any)
 			code, codeOK := check["code"].(string)
 			if !ok || !codeOK || code == "" || seenChecks[code] || check["passed"] != true {
-				return unavailable()
+				return unavailable("response_validation")
 			}
 			seenChecks[code] = true
 		}
 		raw, err := json.Marshal(result["trade"])
 		if err != nil {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 		var echo StandaloneTradeProposal
 		tradeDecoder := json.NewDecoder(bytes.NewReader(raw))
 		tradeDecoder.DisallowUnknownFields()
 		if tradeDecoder.Decode(&echo) != nil || !sameStandaloneTrade(proposal, echo) {
-			return unavailable()
+			return unavailable("response_validation")
 		}
 	}
 	return result, nil

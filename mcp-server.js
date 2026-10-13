@@ -13,6 +13,7 @@ import { checkPermissions } from './permissions.js';
 import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
 import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
 import { readNewsSummaryFile } from './news_summary.js';
+import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
 
 // Configuration
 const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
@@ -1930,7 +1931,7 @@ ${allNews.map((article, i) =>
 
       case 'log_decision': {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `${timestamp}_${args.action}${args.symbol ? '_' + args.symbol : ''}.json`;
+        const filename = `${timestamp}_${safeDecisionFilenameComponent(args.action)}${args.symbol ? '_' + safeDecisionFilenameComponent(args.symbol) : ''}.json`;
         const filepath = path.join(DECISIONS_DIR, filename);
 
         const decision = {

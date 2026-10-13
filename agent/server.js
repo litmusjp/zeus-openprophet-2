@@ -40,6 +40,7 @@ import { formatSlackNotification } from './slack-format.js';
 import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, createBasicAuthMiddleware, resolveApiAuthToken } from './auth.js';
 import { excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
+import { affectedSandboxesForAgentModelChange, hasBusyAffectedSandbox, chatgptStatus, createChatGPTAuthFlow, createChatGPTModelCheck, disconnectChatGPT, nativeOpenCodeEnv, isChatGPTModelVerified, recordChatGPTModelCheck, getVerifiedChatGPTModels } from './chatgpt-oauth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -135,6 +136,24 @@ function operatorAuthMiddleware(req, res, next) {
   if (configuredOperatorToken && providedOperatorToken === configuredOperatorToken) return next();
   if (hasValidBasicAuth(req)) return next();
   return res.status(BASIC_AUTH_CONFIGURED || configuredOperatorToken ? 403 : 503).json({ error: 'operator authorization is required' });
+}
+
+function sameOriginStateChange(req, res, next) {
+  const site = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  if (site === 'cross-site') return res.status(403).json({ error: 'same-origin request required' });
+  const origin = req.headers.origin;
+  if (origin) {
+    try { if (new URL(origin).host !== req.get('host')) return res.status(403).json({ error: 'same-origin request required' }); }
+    catch { return res.status(403).json({ error: 'same-origin request required' }); }
+  }
+  next();
+}
+
+function protectChatGPTModelChange(req, res, next) {
+  const assignedModel = req.body?.activeAgentId ? getAgentById(req.body.activeAgentId)?.model : '';
+  const routeAgentModel = req.path.endsWith('/activate') && req.path.includes('/agents/') ? getAgentById(req.params.id)?.model : '';
+  if (!String(req.body?.model || assignedModel || routeAgentModel || '').startsWith('openai/')) return next();
+  operatorAuthMiddleware(req, res, () => sameOriginStateChange(req, res, next));
 }
 
 function validateAlphaDeskUrl(raw) {
@@ -418,6 +437,7 @@ function createHarnessForActiveSandbox() {
     getPermissions: getPermissionsForSandbox,
     chatStore,
     opencodeEnv: {
+      OPENPROPHET_DATA_DIR: path.join(PROJECT_ROOT, 'data'),
       TRADING_BOT_URL,
       TRADING_BOT_TOKEN,
       AGENT_AUTH_TOKEN: AUTH_TOKEN,
@@ -710,9 +730,14 @@ app.get('/api/manager/config', (req, res) => {
   res.json({ model: mgr.model, customPrompt: mgr.customPrompt || '', sessions: _managerSessions, activeSessionId: _managerSessionId });
 });
 
-app.put('/api/manager/config', async (req, res) => {
+app.put('/api/manager/config', protectChatGPTModelChange, async (req, res) => {
   try {
     const config = getConfig();
+    if (req.body.model !== undefined && req.body.model !== config.manager?.model && _managerProc) return res.status(409).json({ error: 'Wait for the active manager turn to finish before changing its model' });
+    if (String(req.body.model || '').startsWith('openai/')) {
+      const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+      if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: req.body.model, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
+    }
     if (!config.manager) config.manager = {};
     if (req.body.model !== undefined) config.manager.model = req.body.model;
     if (req.body.customPrompt !== undefined) config.manager.customPrompt = req.body.customPrompt;
@@ -749,6 +774,10 @@ app.post('/api/manager/message', async (req, res) => {
     const mgr = config.manager || {};
     const model = mgr.model || config.activeModel || DEFAULT_AGENT_MODEL;
     const ocModel = model.includes('/') ? model : `anthropic/${model}`;
+    if (ocModel.startsWith('openai/')) {
+      const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+      if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: ocModel, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
+    }
     const customPromptAddition = mgr.customPrompt ? `\n\n## Custom Instructions\n${mgr.customPrompt}` : '';
     
     const managerPrompt = `You are the OpenProphet Manager — a configuration and research assistant.
@@ -832,9 +861,27 @@ ${message.trim()}${customPromptAddition}`;
     // Kill any existing manager process
     if (_managerProc) { try { _managerProc.kill('SIGTERM'); } catch {} }
 
+    let managerEnv;
+    if (ocModel.startsWith('openai/')) {
+      let managerConfig = {};
+      try { managerConfig = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}'); } catch {}
+      managerConfig = managerConfig && typeof managerConfig === 'object' && !Array.isArray(managerConfig) ? managerConfig : {};
+      managerConfig.model = ocModel; managerConfig.small_model = ocModel;
+      if (managerConfig.provider?.openai && typeof managerConfig.provider.openai === 'object') {
+        const provider = managerConfig.provider.openai;
+        delete provider.baseURL; delete provider.apiKey;
+        delete provider.options?.apiKey; delete provider.options?.baseURL;
+        const modelName = ocModel.slice('openai/'.length);
+        if (provider.models?.[modelName]) {
+          delete provider.models[modelName].apiKey; delete provider.models[modelName].baseURL;
+          delete provider.models[modelName].options?.apiKey; delete provider.models[modelName].options?.baseURL;
+        }
+      }
+      managerEnv = { ...nativeOpenCodeEnv({ dataDir: path.join(PROJECT_ROOT, 'data') }), OPENCODE_CONFIG_CONTENT: JSON.stringify(managerConfig), OPENPROPHET_ROLE: 'manager' };
+    } else managerEnv = { ...process.env, OPENPROPHET_ROLE: 'manager' };
     const proc = spawn('opencode', args, {
       cwd: process.cwd(),
-      env: { ...process.env, OPENPROPHET_ROLE: 'manager' },
+      env: managerEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     _managerProc = proc;
@@ -1241,9 +1288,18 @@ app.post('/api/sandboxes/:id/activate', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-app.put('/api/sandboxes/:id/agent', async (req, res) => {
+app.put('/api/sandboxes/:id/agent', protectChatGPTModelChange, async (req, res) => {
   try {
     const { activeAgentId, model, overrides = {} } = req.body || {};
+    const selectedAgent = activeAgentId ? getAgentById(activeAgentId) : null;
+    const nextModel = model ?? (activeAgentId ? selectedAgent?.model : '');
+    if (typeof nextModel === 'string' && nextModel.startsWith('openai/')) {
+      const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+      if (!status.connected) return res.status(409).json({ error: 'Connect ChatGPT subscription first' });
+      if (!await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: nextModel, connectionId: status.connectionId })) return res.status(409).json({ error: 'Verify this ChatGPT model for the current connection first' });
+    }
+    const targetRuntime = getHarnessForSandbox(req.params.id);
+    if ((model !== undefined || activeAgentId !== undefined) && targetRuntime && (targetRuntime._beating || targetRuntime._proc)) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its model or assignment' });
     const updates = {};
     if (activeAgentId !== undefined) updates.activeAgentId = activeAgentId;
     if (model !== undefined) updates.model = model;
@@ -1503,18 +1559,31 @@ app.get('/api/agents', (req, res) => {
   res.json({ agents: config.agents, activeId: config.activeAgentId });
 });
 
-app.post('/api/agents', async (req, res) => {
+app.post('/api/agents', protectChatGPTModelChange, async (req, res) => {
   try {
+    if (String(req.body?.model || '').startsWith('openai/')) {
+      const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+      if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: req.body.model, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
+    }
     const agent = await addAgent(req.body);
     broadcast('config', safeConfig());
     res.json({ ok: true, agent });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-app.put('/api/agents/:id', async (req, res) => {
+app.put('/api/agents/:id', protectChatGPTModelChange, async (req, res) => {
   try {
+    const previous = getAgentById(req.params.id);
+    const modelChanged = req.body?.model !== undefined && req.body.model !== previous?.model;
+    const affected = modelChanged ? affectedSandboxesForAgentModelChange(getSandboxes(), req.params.id) : [];
+    if (modelChanged && String(req.body.model).startsWith('openai/')) {
+      const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+      if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: req.body.model, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
+    }
+    if (modelChanged && hasBusyAffectedSandbox(affected, getHarnessForSandbox)) return res.status(409).json({ error: 'Wait for affected agent turns to finish before changing their model' });
     const agent = await updateAgent(req.params.id, req.body);
-    await refreshAllHarnessConfigs({ resetSession: true });
+    if (modelChanged) await Promise.all(affected.map(s => refreshHarnessConfigForSandbox(s.id, { resetSession: true })));
+    else await refreshAllHarnessConfigs({ resetSession: true });
     broadcast('config', safeConfig());
     res.json({ ok: true, agent });
   } catch (err) { res.status(400).json({ error: err.message }); }
@@ -1529,8 +1598,14 @@ app.delete('/api/agents/:id', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-app.post('/api/agents/:id/activate', async (req, res) => {
+app.post('/api/agents/:id/activate', protectChatGPTModelChange, async (req, res) => {
   try {
+    const agent = getAgentById(req.params.id);
+    if (String(agent?.model || '').startsWith('openai/')) {
+      const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+      if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: agent.model, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
+      if (harness._beating || harness._proc) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its assignment' });
+    }
     await setActiveAgent(req.params.id);
     await refreshHarnessConfigForSandbox(getActiveSandbox()?.id, { resetSession: true });
     broadcast('config', safeConfig());
@@ -1571,10 +1646,11 @@ app.delete('/api/strategies/:id', async (req, res) => {
 });
 
 // Model selection
-app.get('/api/models', (req, res) => {
+app.get('/api/models', async (req, res) => {
   const config = getConfig();
   // Live, auto-refreshing catalog (force a refresh with ?refresh=1).
-  const allModels = getAvailableModels({ force: req.query.refresh === '1' });
+  let allModels = getAvailableModels({ force: req.query.refresh === '1' });
+  if (!(await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') })).connected) allModels = allModels.filter(m => !m.id.startsWith('openai/'));
   const provider = req.query.provider;
   const models = provider ? allModels.filter(m => m.id.startsWith(provider + '/')) : allModels;
   const allProviders = [...new Set(allModels.map(m => m.id.split('/')[0]))];
@@ -1584,6 +1660,9 @@ app.get('/api/models', (req, res) => {
 
 app.post('/api/models/activate', async (req, res) => {
   try {
+    if (typeof req.body?.model === 'string' && req.body.model.startsWith('openai/')) {
+      return res.status(409).json({ error: 'Use the agent editor after verifying this ChatGPT model and connection' });
+    }
     await setActiveModel(req.body.model);
     await refreshHarnessConfigForSandbox(getActiveSandbox()?.id, { resetSession: true });
     broadcast('config', safeConfig());
@@ -1591,10 +1670,67 @@ app.post('/api/models/activate', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+// Operator-only ChatGPT subscription OAuth. Connecting only stores native OpenCode auth; it never changes agent selection.
+const chatgptAuthFlow = createChatGPTAuthFlow({ dataDir: path.join(PROJECT_ROOT, 'data') });
+const checkChatGPTModel = createChatGPTModelCheck({ dataDir: path.join(PROJECT_ROOT, 'data') });
+let chatgptChecksInFlight = false;
+function noStoreChatGPT(_req, res, next) { res.set('Cache-Control', 'no-store'); next(); }
+function chatgptIsInUse() {
+  const assigned = getSandboxes().some(s => String(getResolvedAgentForSandbox(s.id)?.model || s.agent?.model || '').startsWith('openai/'));
+  const active = [harness, ...[...orchestrator.runtimes.values()].map(x => x.harness)].some(h => h?.state?.running && String(h.state.activeModel || '').startsWith('openai/'));
+  const manager = _managerProc && String(getConfig().manager?.model || getConfig().activeModel || '').startsWith('openai/');
+  return assigned || active || Boolean(manager);
+}
+
+app.get('/api/providers/chatgpt/status', operatorAuthMiddleware, noStoreChatGPT, async (_req, res) => {
+  const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data'), inUse: chatgptIsInUse() });
+  const verifiedModels = await getVerifiedChatGPTModels({ dataDir: path.join(PROJECT_ROOT, 'data'), connectionId: status.connectionId });
+  res.json({ ...status, verifiedModels, connectionId: undefined });
+});
+app.post('/api/providers/chatgpt/connect', operatorAuthMiddleware, sameOriginStateChange, noStoreChatGPT, (_req, res) => {
+  if (chatgptIsInUse()) return res.status(409).json({ error: 'Switch assigned agents to another model before reconnecting ChatGPT' });
+  if (chatgptChecksInFlight > 0) return res.status(409).json({ error: 'Finish the current ChatGPT model check before reconnecting' });
+  try { res.json({ ok: true, flow: chatgptAuthFlow.start() }); }
+  catch (err) { res.status(409).json({ error: err.message }); }
+});
+app.get('/api/providers/chatgpt/connect/:id', operatorAuthMiddleware, noStoreChatGPT, async (req, res) => {
+  const flow = await chatgptAuthFlow.status(req.params.id);
+  if (!flow) return res.status(404).json({ error: 'Connection flow not found' });
+  res.json(flow);
+});
+app.post('/api/providers/chatgpt/connect/:id/cancel', operatorAuthMiddleware, sameOriginStateChange, noStoreChatGPT, (req, res) => {
+  if (!chatgptAuthFlow.cancel(req.params.id)) return res.status(404).json({ error: 'Connection flow not found' });
+  res.json({ ok: true });
+});
+app.post('/api/providers/chatgpt/disconnect', operatorAuthMiddleware, sameOriginStateChange, noStoreChatGPT, async (_req, res) => {
+  try {
+    if (chatgptAuthFlow.isPending() || chatgptChecksInFlight > 0) return res.status(409).json({ error: 'Finish or cancel the current ChatGPT connection or model check first' });
+    await disconnectChatGPT({ dataDir: path.join(PROJECT_ROOT, 'data'), inUse: chatgptIsInUse() });
+    res.json({ ok: true });
+  } catch (err) { res.status(409).json({ error: err.message }); }
+});
+app.post('/api/providers/chatgpt/check', operatorAuthMiddleware, sameOriginStateChange, noStoreChatGPT, async (req, res) => {
+  if (chatgptChecksInFlight) return res.status(409).json({ error: 'A ChatGPT model check is already in progress' });
+  chatgptChecksInFlight = true;
+  try {
+    const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+    if (!status.connected) return res.status(409).json({ error: 'ChatGPT subscription is not connected' });
+    const model = req.body?.model;
+    if (!getAvailableModels({ force: true }).some(item => item.id === model && item.id.startsWith('openai/'))) return res.status(404).json({ error: 'Model is not in the current ChatGPT catalog' });
+    const result = await checkChatGPTModel(model);
+    const current = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
+    if (!current.connected || current.connectionId !== status.connectionId) return res.status(409).json({ error: 'ChatGPT connection changed during model check; verify again' });
+    await recordChatGPTModelCheck({ dataDir: path.join(PROJECT_ROOT, 'data'), model: result.model, connectionId: current.connectionId });
+    res.json(result);
+  } catch { res.status(502).json({ error: 'Selected ChatGPT model check failed; no alternate model or API-key fallback was used' }); }
+  finally { chatgptChecksInFlight = false; }
+});
+
 app.post('/api/models/refresh', async (req, res) => {
   try {
     // Force the live registry to re-query `opencode models` (single source of truth).
-    const models = getAvailableModels({ force: true });
+    let models = getAvailableModels({ force: true });
+    if (!(await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') })).connected) models = models.filter(m => !m.id.startsWith('openai/'));
     broadcast('config', safeConfig());
     res.json({ ok: true, count: models.length, models });
   } catch (err) { res.status(400).json({ error: err.message }); }

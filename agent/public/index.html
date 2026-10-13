@@ -914,6 +914,21 @@
         <div class="sandbox-page-picker" id="plugins-sandbox-picker"></div>
 
         <div class="section">
+          <div class="section-title">AI Providers</div>
+          <div class="config-card">
+            <div class="config-card-header"><span class="config-card-title">ChatGPT (subscription)</span><span class="badge" id="chatgpt-status-badge">Checking…</span></div>
+            <div class="config-card-desc">Connect your ChatGPT subscription through OpenAI’s sign-in page. This does not select a model or start an agent. Model checks use subscription usage.</div>
+            <div id="chatgpt-status-detail" class="config-card-meta" style="margin-top:10px">Checking native connection status…</div>
+            <div id="chatgpt-flow-panel" style="display:none;margin-top:12px"></div>
+            <div class="config-card-actions" style="margin-top:12px">
+              <button class="btn primary sm" id="chatgpt-connect-btn" onclick="connectChatGPT()">Connect ChatGPT</button>
+              <button class="btn sm danger" id="chatgpt-disconnect-btn" onclick="disconnectChatGPT()" style="display:none">Disconnect…</button>
+              <span id="chatgpt-result" style="font-size:12px;color:var(--ink-faint)"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
           <div class="section-title">Slack Notifications</div>
           <div class="config-card">
             <div class="config-card-header">
@@ -1290,6 +1305,7 @@ function switchTab(id) {
   document.querySelectorAll('.panel, .terminal-panel').forEach(p => p.classList.remove('active'));
   const panel = document.getElementById('panel-' + id);
   if (panel) panel.classList.add('active');
+  if (id === 'plugins') loadChatGPTStatus();
   if (id === 'history' && !historyState.loaded) loadHistoryPanel();
   if (id === 'trades') loadVerifiedTrades();
 }
@@ -3589,7 +3605,7 @@ async function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
 
   const providers = [...new Set(allModels.map(m => m.id.split('/')[0]))].sort();
   const chipsHtml = '<button type="button" class="model-chip active" data-provider="" onclick="_builderFilterByProvider(this)">All (' + allModels.length + ')</button>'
-    + providers.map(p => '<button type="button" class="model-chip" data-provider="' + esc(p) + '" onclick="_builderFilterByProvider(this)">' + esc(p) + ' (' + allModels.filter(m => m.id.startsWith(p + '/')).length + ')</button>').join('');
+    + providers.map(p => '<button type="button" class="model-chip" data-provider="' + esc(p) + '" onclick="_builderFilterByProvider(this)">' + esc(p === 'openai' ? 'ChatGPT (subscription)' : p) + ' (' + allModels.filter(m => m.id.startsWith(p + '/')).length + ')</button>').join('');
 
   const stratOpts = '<option value="">None (use platform defaults)</option>' + allStrategies.map(s =>
     '<option value="' + esc(s.id) + '"' + (s.id === (a.strategyId || '') ? ' selected' : '') + '>' + esc(s.name) + '</option>'
@@ -3653,6 +3669,9 @@ async function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
     + '<input type="hidden" id="f-ag-model" value="' + esc(a.model || '') + '">'
     + '<div class="model-picker">'
     + '<div class="model-picker-search"><input type="text" id="model-search" placeholder="Search models by name, id, or price&hellip;" oninput="_builderFilterModels()" aria-label="Search models"></div>'
+    + '<div class="form-hint" id="chatgpt-model-check-note" style="display:none">Verify the selected ChatGPT model before saving. This sends one small request and uses subscription quota.</div>'
+    + '<button type="button" class="btn sm" id="chatgpt-model-check-btn" style="display:none;margin:8px" onclick="verifyBuilderChatGPTModel()">Verify selected model</button>'
+    + '<span id="chatgpt-model-check-result" style="font-size:12px;margin-left:8px"></span>'
     + '<div class="model-provider-chips" id="model-provider-chips">' + chipsHtml + '</div>'
     + '<div class="model-list" id="model-list" role="listbox" aria-label="Available models"></div>'
     + '</div>' + singleModelNotice + '</div>'
@@ -3693,6 +3712,7 @@ async function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
   document.getElementById('modal-content').classList.add('modal-wide');
   document.getElementById('modal-overlay').classList.add('visible');
   _builderRenderModelList('', '');
+  _builderSelectModel(a.model || '');
   _builderGoStep(1);
 }
 
@@ -3781,6 +3801,12 @@ function _builderRenderModelList(query, provider) {
 function _builderSelectModel(id) {
   const field = document.getElementById('f-ag-model');
   if (field) field.value = id;
+  const isChatGPT = id.startsWith('openai/');
+  document.getElementById('chatgpt-model-check-btn').style.display = isChatGPT ? 'inline-block' : 'none';
+  document.getElementById('chatgpt-model-check-note').style.display = isChatGPT ? 'block' : 'none';
+  const checkResult = document.getElementById('chatgpt-model-check-result');
+  checkResult.textContent = '';
+  if (checkResult) checkResult.dataset.verifiedModel = '';
   const q = (document.getElementById('model-search')?.value || '').toLowerCase();
   const activeChip = document.querySelector('.model-chip.active');
   _builderRenderModelList(q, activeChip ? activeChip.dataset.provider : '');
@@ -4062,6 +4088,25 @@ function renderHeartbeat() {
   if (forceEl) forceEl.checked = hb.forceHeartbeatIntervals === true;
 }
 
+async function verifyBuilderChatGPTModel() {
+  const model = document.getElementById('f-ag-model')?.value || '';
+  if (!model.startsWith('openai/')) return;
+  const out = document.getElementById('chatgpt-model-check-result');
+  const button = document.getElementById('chatgpt-model-check-btn');
+  if (button?.disabled) return;
+  if (button) button.disabled = true;
+  out.dataset.verifiedModel = '';
+  out.textContent = 'Checking selected model…';
+  try {
+    const r = await fetch('/api/providers/chatgpt/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+    const d = await r.json(); if (!r.ok) throw new Error(d.error || 'Model check failed');
+    if (document.getElementById('f-ag-model')?.value === model) {
+      out.textContent = 'Verified for the current connection'; out.style.color = 'var(--success)'; out.dataset.verifiedModel = model;
+    }
+  } catch (e) { if (document.getElementById('f-ag-model')?.value === model) { out.textContent = e.message; out.style.color = 'var(--error)'; } }
+  finally { if (button) button.disabled = false; }
+}
+
 function formatHeartbeatPhaseRange(range) {
   if (!range || range.start === null || range.end === null) return range?.label === 'Markets Closed' ? '8:00 PM–4:00 AM ET' : range?.label || 'Markets Closed';
   const format = minutes => {
@@ -4165,6 +4210,75 @@ function savePermissions() {
 }
 
 // ── Slack Plugin Config ────────────────────
+let chatgptFlowTimer = null;
+let chatgptFlowExpiresAt = 0;
+function clearChatGPTFlowCode() { const code = document.getElementById('chatgpt-flow-code'); if (code) code.textContent = ''; }
+function stopChatGPTFlow(id) {
+  if (window.chatgptFlowId !== id) return false;
+  if (chatgptFlowTimer) clearInterval(chatgptFlowTimer);
+  chatgptFlowTimer = null; window.chatgptFlowId = null; chatgptFlowExpiresAt = 0; clearChatGPTFlowCode(); return true;
+}
+async function loadChatGPTStatus() {
+  try {
+    const r = await fetch('/api/providers/chatgpt/status'); if (!r.ok) throw new Error('Status unavailable'); const s = await r.json();
+    const badge = document.getElementById('chatgpt-status-badge');
+    const detail = document.getElementById('chatgpt-status-detail');
+    const connect = document.getElementById('chatgpt-connect-btn');
+    const disconnect = document.getElementById('chatgpt-disconnect-btn');
+    if (!badge || !detail) return;
+    badge.textContent = ({ not_connected: 'Not connected', needs_reconnect: 'Reconnect required', connected_unverified: 'Connected · unverified' })[s.status] || 'Status unavailable';
+    detail.textContent = s.status === 'connected_unverified'
+      ? 'Native OAuth is stored in the private ChatGPT profile. Connection alone does not select a model.' + (s.verifiedModels?.length ? ' Verified: ' + s.verifiedModels.join(', ') + '.' : ' No model verified yet.') + (s.inUse ? ' Assigned in configuration.' : ' Not assigned in configuration.')
+      : s.status === 'needs_reconnect' ? 'Saved OAuth appears expired. Reconnect through OpenAI to continue.' : 'No ChatGPT subscription OAuth is stored. API keys do not count as this connection.';
+    if (connect) { connect.textContent = s.status === 'connected_unverified' ? 'Reconnect ChatGPT' : 'Connect ChatGPT'; connect.disabled = Boolean(s.inUse); }
+    if (disconnect) { disconnect.style.display = s.status === 'not_connected' ? 'none' : 'inline-block'; disconnect.disabled = Boolean(s.inUse); }
+  } catch {
+    const badge = document.getElementById('chatgpt-status-badge'); if (badge) badge.textContent = 'Status unavailable';
+  }
+}
+async function connectChatGPT() {
+  const result = document.getElementById('chatgpt-result');
+  try {
+    const r = await fetch('/api/providers/chatgpt/connect', { method: 'POST' }); const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Could not start connection');
+    const panel = document.getElementById('chatgpt-flow-panel');
+    panel.style.display = 'block';
+    panel.innerHTML = '<div>Open <a href="https://auth.openai.com/codex/device" target="_blank" rel="noopener noreferrer">OpenAI device sign-in</a> and enter this temporary code:</div><div id="chatgpt-flow-code" style="font-size:20px;font-weight:700;letter-spacing:2px;margin:8px 0">Waiting for code…</div><button class="btn sm" onclick="cancelChatGPTFlow()">Cancel</button><span id="chatgpt-flow-status" style="margin-left:8px"></span>';
+    window.chatgptFlowId = d.flow.id; chatgptFlowExpiresAt = d.flow.expiresAt;
+    if (chatgptFlowTimer) clearInterval(chatgptFlowTimer);
+    chatgptFlowTimer = setInterval(pollChatGPTFlow, 1500);
+  } catch (e) { if (result) result.textContent = e.message; }
+}
+async function pollChatGPTFlow() {
+  const id = window.chatgptFlowId; if (!id) return;
+  if (chatgptFlowExpiresAt && Date.now() >= chatgptFlowExpiresAt) { if (stopChatGPTFlow(id)) { const s = document.getElementById('chatgpt-flow-status'); if (s) s.textContent = 'expired'; } return; }
+  try {
+    const r = await fetch('/api/providers/chatgpt/connect/' + encodeURIComponent(id)); if (!r.ok) throw new Error('Connection flow unavailable'); const d = await r.json();
+    if (window.chatgptFlowId !== id) return;
+    const code = document.getElementById('chatgpt-flow-code'); if (code && d.code) code.textContent = d.code;
+    const status = document.getElementById('chatgpt-flow-status'); if (status) status.textContent = d.status === 'pending' ? '' : d.status;
+    if (d.status !== 'pending') {
+      if (stopChatGPTFlow(id)) {
+        if (d.status === 'connected') { fetch('/api/models?refresh=1').catch(() => {}); await loadChatGPTStatus(); }
+      }
+    }
+  } catch (e) { if (stopChatGPTFlow(id)) { const s = document.getElementById('chatgpt-flow-status'); if (s) s.textContent = 'Connection status unavailable'; } }
+}
+async function cancelChatGPTFlow() {
+  const id = window.chatgptFlowId; if (!id) return;
+  stopChatGPTFlow(id);
+  try { await fetch('/api/providers/chatgpt/connect/' + encodeURIComponent(id) + '/cancel', { method: 'POST' }); } catch {}
+  const panel = document.getElementById('chatgpt-flow-panel'); if (panel) panel.style.display = 'none';
+}
+async function disconnectChatGPT() {
+  if (!confirm('Disconnect ChatGPT subscription OAuth? This will remove only its native provider entry.')) return;
+  try {
+    const r = await fetch('/api/providers/chatgpt/disconnect', { method: 'POST' }); const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Disconnect failed');
+    await loadChatGPTStatus();
+  } catch (e) { document.getElementById('chatgpt-result').textContent = e.message; }
+}
+
 function renderSlack() {
   const s = sandboxScoped.slack || config.plugins?.slack || {};
   document.getElementById('slack-enabled').checked = !!s.enabled;

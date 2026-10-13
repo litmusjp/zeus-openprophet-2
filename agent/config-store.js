@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { DEFAULT_AGENT_MODEL, alpacaTradingUrl, resolveAgentModel } from './defaults.js';
+import { nativeOpenCodeEnv } from './chatgpt-oauth.js';
 
 function configuredDefaultModel() {
   return resolveAgentModel();
@@ -588,6 +589,15 @@ function defaultModels() {
       models.push({ id, name, description });
     }
     
+    try {
+      const dataDir = process.env.OPENPROPHET_DATA_DIR || path.join(__dirname, '..', 'data');
+      const openai = execSync('opencode models 2>&1', { encoding: 'utf-8', timeout: 10000, env: { ...nativeOpenCodeEnv({ dataDir }), OPENCODE_CONFIG_CONTENT: '{}' } });
+      for (const line of openai.trim().split('\n')) {
+        const id = line.trim();
+        if (!id.startsWith('openai/') || seen.has(id)) continue;
+        seen.add(id); models.push({ id, name: id.slice(7).replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()), description: 'ChatGPT subscription catalog candidate; verify before selection' });
+      }
+    } catch {}
     if (models.length > 0) {
       console.log(`[config-store] Loaded ${models.length} models from opencode`);
       return models;

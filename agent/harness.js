@@ -4,6 +4,7 @@ import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
+import { nativeOpenCodeEnv, chatgptStatus, isChatGPTModelVerified } from './chatgpt-oauth.js';
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
@@ -479,12 +480,14 @@ export class AgentHarness {
   async start() {
     if (this.state.running) return;
 
-    // Check CLI auth
-    if (!this.checkCliAuthFn()) {
+    await this.reloadConfig({ resetSession: true, silent: true });
+    if (String(this.state.activeModel || '').startsWith('openai/')) {
+      const status = await chatgptStatus({ dataDir: this.opencodeEnv.OPENPROPHET_DATA_DIR || path.resolve('data') });
+      if (!status.connected) throw new Error('ChatGPT subscription is not connected or needs reconnecting');
+      if (!await isChatGPTModelVerified({ dataDir: this.opencodeEnv.OPENPROPHET_DATA_DIR || path.resolve('data'), model: this.state.activeModel, connectionId: status.connectionId })) throw new Error('Verify this ChatGPT model for the current connection before starting the agent');
+    } else if (!this.checkCliAuthFn()) {
       throw new Error('OpenCode not authenticated. Run "opencode auth login" or configure the API key for your selected provider (for example OPENCODE_API_KEY or ANTHROPIC_API_KEY).');
     }
-
-    await this.reloadConfig({ resetSession: true, silent: true });
 
     this.state.running = true;
     this.state.paused = false;
@@ -1020,6 +1023,10 @@ ${userBlock}`;
 
       // Keep CLI helpers on the explicitly selected model, never a paid default.
       const invocationEnv = { ...process.env, ...this.opencodeEnv };
+      if (ocModel.startsWith('openai/')) {
+        Object.assign(invocationEnv, nativeOpenCodeEnv({ dataDir: this.opencodeEnv.OPENPROPHET_DATA_DIR || path.resolve('data'), env: invocationEnv }));
+        invocationEnv.OPENAI_API_KEY = '';
+      }
       let inherited = {};
       try {
         inherited = invocationEnv.OPENCODE_CONFIG_CONTENT ? JSON.parse(invocationEnv.OPENCODE_CONFIG_CONTENT) : {};
@@ -1037,6 +1044,18 @@ ${userBlock}`;
           const selected = inherited.provider[selectedProvider];
           if (!object(selected)) throw new Error();
           if (selected) {
+            if (selectedProvider === 'openai') {
+              delete selected.apiKey;
+              delete selected.baseURL;
+              delete selected.options?.apiKey;
+              delete selected.options?.baseURL;
+              if (selected.models?.[selectedModel]) {
+                delete selected.models[selectedModel].apiKey;
+                delete selected.models[selectedModel].baseURL;
+                delete selected.models[selectedModel].options?.apiKey;
+                delete selected.models[selectedModel].options?.baseURL;
+              }
+            }
             for (const key of ['options', 'models']) if (selected[key] !== undefined && !object(selected[key])) throw new Error();
             if (selected.models?.[selectedModel] !== undefined && !object(selected.models[selectedModel])) throw new Error();
             const cap = (options, key, maximum) => {

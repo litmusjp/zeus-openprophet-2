@@ -214,17 +214,31 @@ export function createChatGPTModelCheck({ dataDir = path.resolve('data'), spawn 
 
 export function createChatGPTAuthFlow({ dataDir = path.resolve('data'), spawn = nodeSpawn, timeoutMs = FLOW_TTL_MS } = {}) {
   let flow = null;
+  function signalOwned(current, signal) {
+    try {
+      if (process.platform !== 'win32' && current.child?.pid) process.kill(-current.child.pid, signal);
+      else current.child?.kill(signal);
+    } catch {}
+  }
   function finish(current, status) {
     if (!current || current.status !== 'pending') return;
     current.status = status;
     clearTimeout(current.timer);
-    try { current.child?.kill('SIGTERM'); } catch {}
     current.buffer = ''; current.rawBuffer = ''; current.code = null; current.url = null;
-    current.complete?.();
+    if (!current.childActive) { current.complete?.(); return; }
+    signalOwned(current, 'SIGTERM');
+    current.cleanupTimer = setTimeout(() => {
+      signalOwned(current, 'SIGKILL');
+      current.cleanupTimer = setTimeout(() => { current.cleanupTimer = null; current.childActive = false; current.complete?.(); }, 100);
+      current.cleanupTimer.unref?.();
+    }, 200);
+    current.cleanupTimer.unref?.();
   }
   return {
     start() {
-      if (flow?.status === 'pending' || flow?.childActive) throw new Error('A ChatGPT connection flow is already in progress');
+      if (flow?.status === 'pending' && flow.expiresAt > Date.now()) return { id: flow.id, status: 'pending', expiresAt: flow.expiresAt };
+      if (flow?.status === 'pending' && flow.expiresAt <= Date.now()) finish(flow, 'expired');
+      if (flow?.childActive || flow?.cleanupTimer) throw new Error('ChatGPT connection cleanup is still in progress');
       const id = randomBytes(24).toString('hex');
       let complete;
       const completion = new Promise(resolve => { complete = resolve; });
@@ -234,7 +248,7 @@ export function createChatGPTAuthFlow({ dataDir = path.resolve('data'), spawn = 
       try {
         ensurePrivateNativeProfile(dataDir);
         current.child = spawn('opencode', ['auth', 'login', '--provider', 'openai', '--method', 'ChatGPT Pro/Plus (headless)', '--pure'], {
-          env: minimalEnv(dataDir), stdio: ['ignore', 'pipe', 'pipe'], shell: false,
+          env: minimalEnv(dataDir), stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: process.platform !== 'win32',
         });
         current.childActive = Boolean(current.child);
       } catch { finish(current, 'error'); }
@@ -251,7 +265,7 @@ export function createChatGPTAuthFlow({ dataDir = path.resolve('data'), spawn = 
       current.child?.on('error', () => { current.childActive = false; finish(current, 'error'); });
       current.child?.on('exit', code => {
         current.childActive = false;
-        if (current.status !== 'pending') return;
+        if (current.status !== 'pending') { if (!current.cleanupTimer) current.complete?.(); return; }
         current.exitSeen = true;
         clearTimeout(current.timer);
         (async () => {

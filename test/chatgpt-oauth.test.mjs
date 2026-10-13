@@ -80,6 +80,44 @@ test('real child chunks parse ANSI instructions and cancellation clears code and
   flow.cancel(id); const state = await flow.status(id); assert.equal(state.code, null); assert.equal(state.url, null);
 });
 
+test('duplicate start reuses the same pending flow without another spawn', () => {
+  let spawns = 0;
+  const flow = createChatGPTAuthFlow({ spawn: () => { spawns++; const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => {}; return child; } });
+  const first = flow.start(); const second = flow.start();
+  assert.equal(second.id, first.id); assert.equal(spawns, 1);
+  flow.cancel(first.id);
+});
+
+test('TERM-ignoring owned helper is killed and flow slot is released after cancellation and expiry', async () => {
+  const make = timeoutMs => {
+    let spawns = 0; const signals = []; const flow = createChatGPTAuthFlow({ timeoutMs, spawn: () => { spawns++; const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = signal => { signals.push(signal); if (signal === 'SIGKILL') queueMicrotask(() => child.emit('exit', null)); return true; }; return child; } });
+    return { flow, spawns: () => spawns, signals };
+  };
+  for (const terminal of ['cancel', 'expire']) {
+    const { flow, spawns, signals } = make(20); const first = flow.start();
+    if (terminal === 'cancel') flow.cancel(first.id); else await new Promise(resolve => setTimeout(resolve, 30));
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.deepEqual(signals.slice(0, 2), ['SIGTERM', 'SIGKILL']);
+    const state = await flow.status(first.id); assert.equal(state.code, null); assert.equal(state.url, null);
+    const second = flow.start(); assert.notEqual(second.id, first.id); assert.equal(spawns(), 2); flow.cancel(second.id);
+  }
+});
+
+test('Linux cancellation kills only the helper process group and its descendant', { skip: process.platform !== 'linux' }, async () => {
+  const marker = path.join(os.tmpdir(), `op2-child-${process.pid}-${Date.now()}`);
+  const flow = createChatGPTAuthFlow({ spawn: (_bin, _args, options) => spawnChild(process.execPath, ['-e', `const {spawn}=require('node:child_process'); const c=spawn(process.execPath,['-e',"const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.writeFileSync(${JSON.stringify(marker)},String(process.pid)); setInterval(()=>{},1000)"],{stdio:'ignore'}); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);`], options) });
+  const { id } = flow.start();
+  for (let i = 0; i < 100; i++) { try { await fs.access(marker); break; } catch { await new Promise(resolve => setTimeout(resolve, 10)); } }
+  await fs.access(marker);
+  const descendantPid = Number(await fs.readFile(marker, 'utf8'));
+  flow.cancel(id);
+  await new Promise(resolve => setTimeout(resolve, 500));
+  let state = null;
+  try { const stat = await fs.readFile(`/proc/${descendantPid}/stat`, 'utf8'); state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  assert.ok(state === null || state === 'Z', `descendant should be terminated or a non-running zombie; state=${state}`);
+  await fs.rm(marker, { force: true });
+});
+
 test('expiry drops temporary code and fixed URL', async () => {
   const streams = () => Object.assign(new EventEmitter(), { write() {}, end() {} }); let child;
   const flow = createChatGPTAuthFlow({ timeoutMs: 10, spawn: () => { child = new EventEmitter(); child.stdout = streams(); child.stderr = streams(); child.kill = () => {}; return child; } });

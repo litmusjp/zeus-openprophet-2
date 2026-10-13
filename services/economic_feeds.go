@@ -345,15 +345,19 @@ func (s *EconomicFeedsService) GetBLSBriefing() (*BLSBriefing, error) {
 
 // YFQuote represents a single Yahoo Finance quote
 type YFQuote struct {
-	Symbol    string  `json:"symbol"`
-	Name      string  `json:"name"`
-	Price     float64 `json:"price"`
-	PrevClose float64 `json:"prev_close"`
-	Change    float64 `json:"change"`
-	ChangePct float64 `json:"change_pct"`
-	Currency  string  `json:"currency"`
-	Exchange  string  `json:"exchange"`
-	History   []YFBar `json:"history,omitempty"`
+	Symbol             string  `json:"symbol"`
+	Name               string  `json:"name"`
+	Price              float64 `json:"price"`
+	PrevClose          float64 `json:"prev_close"`
+	PrevCloseDate      string  `json:"prev_close_date,omitempty"`
+	PrevCloseAvailable bool    `json:"prev_close_available"`
+	PrevCloseSource    string  `json:"prev_close_source,omitempty"`
+	ChangeAvailable    bool    `json:"change_available"`
+	Change             float64 `json:"change"`
+	ChangePct          float64 `json:"change_pct"`
+	Currency           string  `json:"currency"`
+	Exchange           string  `json:"exchange"`
+	History            []YFBar `json:"history,omitempty"`
 }
 
 // YFBar represents a single price bar
@@ -478,15 +482,13 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 	}
 
 	price := getFloat(meta, "regularMarketPrice")
-	prevClose := getFloat(meta, "chartPreviousClose")
-	if prevClose == 0 {
-		prevClose = getFloat(meta, "previousClose")
-	}
-
-	change := price - prevClose
-	changePct := 0.0
-	if prevClose != 0 {
-		changePct = (change / prevClose) * 100
+	marketTime := time.Unix(int64(getFloat(meta, "regularMarketTime")), 0)
+	zone, zoneErr := time.LoadLocation(getString(meta, "exchangeTimezoneName"))
+	marketDate := ""
+	if zoneErr != nil {
+		zone = time.UTC
+	} else {
+		marketDate = marketTime.In(zone).Format("2006-01-02")
 	}
 
 	// Build 5-day history
@@ -504,7 +506,7 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 						closeFloat, _ := closes[i].(float64)
 						t := time.Unix(int64(tsFloat), 0)
 						history = append(history, YFBar{
-							Date:  t.Format("2006-01-02"),
+							Date:  t.In(zone).Format("2006-01-02"),
 							Close: float64(int(closeFloat*100)) / 100,
 						})
 					}
@@ -513,16 +515,35 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 		}
 	}
 
+	prevClose, prevCloseDate := 0.0, ""
+	for _, bar := range history {
+		if marketDate != "" && bar.Date < marketDate && bar.Close > 0 && bar.Date > prevCloseDate {
+			prevClose, prevCloseDate = bar.Close, bar.Date
+		}
+	}
+	change, changePct := 0.0, 0.0
+	if prevClose > 0 {
+		change = price - prevClose
+		changePct = change / prevClose * 100
+	}
+	prevCloseSource := ""
+	if prevClose > 0 {
+		prevCloseSource = "Yahoo Finance daily history"
+	}
 	return &YFQuote{
-		Symbol:    symbol,
-		Name:      name,
-		Price:     float64(int(price*100)) / 100,
-		PrevClose: float64(int(prevClose*100)) / 100,
-		Change:    float64(int(change*100)) / 100,
-		ChangePct: float64(int(changePct*100)) / 100,
-		Currency:  getString(meta, "currency"),
-		Exchange:  getString(meta, "exchangeName"),
-		History:   history,
+		Symbol:             symbol,
+		Name:               name,
+		Price:              float64(int(price*100)) / 100,
+		PrevClose:          float64(int(prevClose*100)) / 100,
+		PrevCloseDate:      prevCloseDate,
+		PrevCloseAvailable: prevClose > 0,
+		PrevCloseSource:    prevCloseSource,
+		ChangeAvailable:    prevClose > 0,
+		Change:             float64(int(change*100)) / 100,
+		ChangePct:          float64(int(changePct*100)) / 100,
+		Currency:           getString(meta, "currency"),
+		Exchange:           getString(meta, "exchangeName"),
+		History:            history,
 	}, nil
 }
 

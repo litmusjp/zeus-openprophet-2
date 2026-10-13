@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,45 @@ func TestOptionsChainPagesAndExactQuoteUseIndicativeFeed(t *testing.T) {
 	if quote.MarketDataFeed != "indicative" || quote.MarketDataQuality != "testing_only" {
 		t.Fatalf("misleading quote feed metadata: %#v", quote)
 	}
+	quoteJSON, err := json.Marshal(quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var quotePayload map[string]any
+	if err := json.Unmarshal(quoteJSON, &quotePayload); err != nil {
+		t.Fatal(err)
+	}
+	if quotePayload["latest_trade_size"] != float64(1) || quotePayload["Volume"] != nil || quotePayload["volume_known"] != false {
+		t.Fatalf("agent quote JSON=%s", quoteJSON)
+	}
+}
+
+func TestOptionsChainExposesTradeSizeWithoutClaimingVolumeOrOpenInterest(t *testing.T) {
+	symbol := "AAPL261106C00200000"
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"snapshots":{%q:{"latestQuote":{"bp":1.2,"ap":1.4,"bs":2,"as":3,"t":%q},"latestTrade":{"p":1.3,"s":7,"t":%q}}}}`, symbol, now, now)
+	}))
+	defer server.Close()
+	s := &AlpacaTradingService{logger: logrus.New(), optionsSnapshotBaseURL: server.URL, optionsSnapshotHTTP: server.Client()}
+	contracts, err := s.GetOptionsChain(context.Background(), "AAPL", time.Date(2026, 11, 6, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contracts) != 1 || contracts[0].OpenInterestPresent || contracts[0].MarketDataFeed != "indicative" || contracts[0].MarketDataQuality != "testing_only" {
+		t.Fatalf("contract metadata=%+v", contracts)
+	}
+	b, err := json.Marshal(contracts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err = json.Unmarshal(b, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["latest_trade_size"] != float64(7) || payload["Volume"] != nil || payload["OpenInterest"] != nil || payload["OpenInterestPresent"] != false {
+		t.Fatalf("agent JSON=%s", b)
+	}
 }
 
 func TestSecondarySnapshotUsesDocumentedExactSymbolQuery(t *testing.T) {
@@ -89,5 +129,30 @@ func TestSecondarySnapshotUsesDocumentedExactSymbolQuery(t *testing.T) {
 	}
 	if contract.MarketDataFeed != "indicative" || contract.MarketDataQuality != "testing_only" {
 		t.Fatalf("misleading option feed metadata: %#v", contract)
+	}
+}
+
+func TestSecondarySnapshotExposesLatestTradeSizeWithoutVolume(t *testing.T) {
+	symbol := "AAPL261106C00200000"
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"snapshots":{%q:{"latestQuote":{"bp":1,"ap":1.2,"bs":2,"as":3,"t":%q},"latestTrade":{"p":1.1,"s":9,"t":%q}}}}`, symbol, now, now)
+	}))
+	defer server.Close()
+	s := &AlpacaOptionsDataService{baseURL: server.URL, client: server.Client(), logger: logrus.New()}
+	contract, err := s.GetOptionSnapshot(context.Background(), symbol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err = json.Unmarshal(b, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["latest_trade_size"] != float64(9) || payload["volume_known"] != false || payload["Volume"] != nil {
+		t.Fatalf("secondary snapshot JSON=%s", b)
 	}
 }

@@ -1,8 +1,24 @@
 package interfaces
 
 import (
+	"encoding/json"
 	"time"
 )
+
+func marshalKnownNumericJSON(value any, omit ...string) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range omit {
+		delete(fields, name)
+	}
+	return json.Marshal(fields)
+}
 
 // OptionContract represents an option contract
 type OptionContract struct {
@@ -18,6 +34,9 @@ type OptionContract struct {
 	AskSize             int64
 	QuoteTimestamp      time.Time
 	Volume              int64
+	LatestTradeSize     int64  `json:"latest_trade_size,omitempty"`
+	VolumeKnown         bool   `json:"volume_known"`
+	VolumeBasis         string `json:"volume_basis,omitempty"`
 	OpenInterest        int64
 	OpenInterestPresent bool
 	ImpliedVolatility   float64
@@ -28,6 +47,18 @@ type OptionContract struct {
 	DTE                 int    // Days to expiration
 	MarketDataFeed      string `json:"market_data_feed,omitempty"`
 	MarketDataQuality   string `json:"market_data_quality,omitempty"`
+}
+
+func (c OptionContract) MarshalJSON() ([]byte, error) {
+	type plain OptionContract
+	var omit []string
+	if !c.VolumeKnown {
+		omit = append(omit, "Volume")
+	}
+	if !c.OpenInterestPresent {
+		omit = append(omit, "OpenInterest")
+	}
+	return marshalKnownNumericJSON(plain(c), omit...)
 }
 
 // OptionPosition represents an open options position

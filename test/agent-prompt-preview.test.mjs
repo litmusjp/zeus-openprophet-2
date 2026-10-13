@@ -84,6 +84,11 @@ test('previews resolve identity and strategy per sandbox while sharing system in
   assert.doesNotMatch(l2Prompt, /Test prompt update|test rules/);
   assert.equal(store.getResolvedAgentForSandbox('sbx_l2').heartbeatOverrides.midday, 777);
   assert.equal(l1Shared, l2Shared);
+  assert.match(l2Shared, /indicative\/testing_only.*permitted for this paper-advisory assessment/i);
+  assert.match(l2Shared, /Missing OI is unknown, not zero; latest-trade size is not daily volume/i);
+  assert.match(l2Shared, /freshly re-evaluate a bounded small set of relevant candidates/i);
+  assert.match(l2Shared, /recoverable feed\/data objection.*not an all-day no-setup conclusion/i);
+  assert.match(l2Shared, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/i);
 });
 
 test('shared operational instructions keep waits inside the heartbeat budget', async () => {

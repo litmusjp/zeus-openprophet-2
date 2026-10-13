@@ -1283,23 +1283,60 @@ func (oc *OrderController) HandleGetBars(c *gin.Context) {
 	endStr := c.Query("end")
 	timeframe := c.DefaultQuery("timeframe", "1D")
 
-	// Default to last 30 days if not specified
-	end := time.Now()
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		c.JSON(500, gin.H{"error": "trading timezone is unavailable"})
+		return
+	}
+	now := time.Now()
+	end := now
 	start := end.AddDate(0, 0, -30)
-
+	parseBound := func(value string, isEnd bool) (time.Time, error) {
+		if t, parseErr := time.Parse(time.RFC3339Nano, value); parseErr == nil {
+			return t, nil
+		}
+		day, parseErr := time.ParseInLocation("2006-01-02", value, loc)
+		if parseErr != nil {
+			return time.Time{}, parseErr
+		}
+		if isEnd {
+			day = day.AddDate(0, 0, 1)
+		}
+		return day, nil
+	}
 	if startStr != "" {
-		if t, err := time.Parse("2006-01-02", startStr); err == nil {
-			start = t
+		start, err = parseBound(startStr, false)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid start; use YYYY-MM-DD or RFC3339"})
+			return
 		}
 	}
-
 	if endStr != "" {
-		if t, err := time.Parse("2006-01-02", endStr); err == nil {
-			end = t
+		end, err = parseBound(endStr, true)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid end; use YYYY-MM-DD or RFC3339"})
+			return
 		}
 	}
+	if startStr != "" && endStr != "" && start.After(end) {
+		c.JSON(400, gin.H{"error": "start must not be after end"})
+		return
+	}
+	if _, startErr := time.Parse("2006-01-02", startStr); startStr != "" && startErr == nil {
+		if _, endErr := time.Parse("2006-01-02", endStr); endStr != "" && endErr == nil && startStr > endStr {
+			c.JSON(400, gin.H{"error": "start must not be after end"})
+			return
+		}
+	}
+	if end.After(now) {
+		end = now
+	}
+	if start.After(end) {
+		c.JSON(400, gin.H{"error": "start must not be after current time"})
+		return
+	}
 
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	bars, err := oc.dataService.GetHistoricalBars(ctx, symbol, start, end, timeframe)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})

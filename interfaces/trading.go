@@ -356,9 +356,19 @@ type OptionsQuote struct {
 	AskSize           int64
 	LastPrice         float64
 	Volume            int64
+	LatestTradeSize   int64 `json:"latest_trade_size,omitempty"`
+	VolumeKnown       bool  `json:"volume_known"`
 	Timestamp         time.Time
 	MarketDataFeed    string `json:"market_data_feed,omitempty"`
 	MarketDataQuality string `json:"market_data_quality,omitempty"`
+}
+
+func (q OptionsQuote) MarshalJSON() ([]byte, error) {
+	type plain OptionsQuote
+	if q.VolumeKnown {
+		return marshalKnownNumericJSON(plain(q))
+	}
+	return marshalKnownNumericJSON(plain(q), "Volume")
 }
 
 type OptionsPosition struct {

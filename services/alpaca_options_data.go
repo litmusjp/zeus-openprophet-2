@@ -150,6 +150,8 @@ func (s *AlpacaOptionsDataService) GetOptionSnapshot(ctx context.Context, option
 			Premium:           premium,
 			Bid:               alpacaContract.LatestQuote.BidPrice,
 			Ask:               alpacaContract.LatestQuote.AskPrice,
+			LatestTradeSize:   int64(alpacaContract.LatestTrade.Size),
+			VolumeBasis:       "unknown; latest trade size is not daily volume",
 			Delta:             alpacaContract.Greeks.Delta,
 			Gamma:             alpacaContract.Greeks.Gamma,
 			Theta:             alpacaContract.Greeks.Theta,

@@ -533,7 +533,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_historical_bars',
-        description: 'Get historical price bars for technical analysis. Returns OHLCV data for the specified date range and timeframe.',
+        description: 'Get historical price bars. Date-only start/end use America/New_York trading dates; end includes that date. You may also pass RFC3339 timestamps for exact bounds. Today is capped at now; malformed or inverted ranges are rejected.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -543,11 +543,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             start_date: {
               type: 'string',
-              description: 'Start date in YYYY-MM-DD format (default: 30 days ago)',
+              description: 'YYYY-MM-DD New York trading date or RFC3339 timestamp (default: 30 days ago)',
             },
             end_date: {
               type: 'string',
-              description: 'End date in YYYY-MM-DD format (default: today)',
+              description: 'Inclusive YYYY-MM-DD New York trading date or RFC3339 timestamp (default: now)',
             },
             timeframe: {
               type: 'string',
@@ -982,7 +982,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_options_chain',
-        description: 'Get available options contracts for an underlying symbol with optional filtering. Use filters to reduce token usage. Use this to find valid option symbols before placing orders.',
+        description: 'Get options contracts with indicative/testing_only provider data. LatestTradeSize is one trade, not daily Volume; unknown Volume and OpenInterest are omitted and OpenInterestPresent is false. PAPER_ADVISORY_OP2 assessment still requires exact fresh OCC bid/ask/depth and strategy/risk checks.',
         inputSchema: {
           type: 'object',
           properties: {

@@ -1147,7 +1147,8 @@ func (s *AlpacaTradingService) GetOptionsChain(ctx context.Context, underlying s
 			AskSize:           int64(data.LatestQuote.AskSize),
 			QuoteTimestamp:    data.LatestQuote.T,
 			Premium:           data.LatestTrade.Price,
-			Volume:            int64(data.LatestTrade.Size),
+			LatestTradeSize:   int64(data.LatestTrade.Size),
+			VolumeBasis:       "unknown; latest trade size is not daily volume",
 			ImpliedVolatility: data.ImpliedVolatility,
 			Delta:             data.Greeks.Delta,
 			Gamma:             data.Greeks.Gamma,
@@ -1244,15 +1245,15 @@ func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol strin
 		return nil, fmt.Errorf("options quote is stale or invalid for %s", symbol)
 	}
 	return &interfaces.OptionsQuote{
-		Symbol:         symbol,
-		BidPrice:       data.LatestQuote.Bid,
-		BidSize:        int64(data.LatestQuote.BidSize),
-		AskPrice:       data.LatestQuote.Ask,
-		AskSize:        int64(data.LatestQuote.AskSize),
-		LastPrice:      data.LatestTrade.Price,
-		Volume:         int64(data.LatestTrade.Size),
-		Timestamp:      timestamp,
-		MarketDataFeed: "indicative", MarketDataQuality: "testing_only",
+		Symbol:          symbol,
+		BidPrice:        data.LatestQuote.Bid,
+		BidSize:         int64(data.LatestQuote.BidSize),
+		AskPrice:        data.LatestQuote.Ask,
+		AskSize:         int64(data.LatestQuote.AskSize),
+		LastPrice:       data.LatestTrade.Price,
+		LatestTradeSize: int64(data.LatestTrade.Size),
+		Timestamp:       timestamp,
+		MarketDataFeed:  "indicative", MarketDataQuality: "testing_only",
 	}, nil
 }
 

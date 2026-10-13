@@ -26,6 +26,8 @@ test('disconnected status ignores API keys and native XDG resolution matches Ope
   const env = nativeOpenCodeEnv({ dataDir: '/persistent/op2' });
   assert.equal(env.XDG_DATA_HOME, path.join('/persistent/op2', 'chatgpt-xdg-data'));
   assert.equal(nativeAuthPath('/persistent/op2', env), path.join(env.XDG_DATA_HOME, 'opencode', 'auth.json'));
+  for (const key of ['OPENCODE_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT']) assert.equal(Object.hasOwn(env, key), false);
+  assert.equal(new URL('/v1/responses', 'https://api.openai.com').href, 'https://api.openai.com/v1/responses');
   assert.equal(Object.hasOwn(env, 'OPENCODE_DATA_DIR'), false);
 });
 
@@ -189,7 +191,8 @@ test('model check isolates native tools and validates the completed local MCP no
     const established = establish.start(); await waitForTerminal(establish, established.id);
     const fakeSpawn = events => (_bin, args, options) => {
       assert.deepEqual(args, ['run', '--format', 'json', '--model', 'openai/fixture-model', '--agent', 'op2-chatgpt-probe']);
-      assert.equal(options.env.OPENAI_API_KEY, ''); assert.equal(options.env.XDG_DATA_HOME, path.join(root, 'chatgpt-xdg-data'));
+      for (const key of ['OPENCODE_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT']) assert.equal(Object.hasOwn(options.env, key), false);
+      assert.equal(options.env.XDG_DATA_HOME, path.join(root, 'chatgpt-xdg-data'));
       assert.equal(Object.hasOwn(options.env, 'OPENCODE_DATA_DIR'), false); assert.notEqual(options.cwd, path.dirname(path.dirname(authFile)));
       const cfg = JSON.parse(options.env.OPENCODE_CONFIG_CONTENT);
       assert.equal(cfg.agent['op2-chatgpt-probe'].model, 'openai/fixture-model');

@@ -27,10 +27,9 @@ function ensurePrivateNativeProfile(dataDir) {
 }
 
 export function nativeOpenCodeEnv({ dataDir = path.resolve('data'), env = process.env } = {}) {
-  return {
-    ...env, XDG_DATA_HOME: chatgptXdgDataHome(dataDir),
-    OPENCODE_API_KEY: '', OPENAI_API_KEY: '', OPENAI_BASE_URL: '', OPENAI_ORG_ID: '', OPENAI_PROJECT: '',
-  };
+  const nativeEnv = { ...env, XDG_DATA_HOME: chatgptXdgDataHome(dataDir) };
+  for (const key of ['OPENCODE_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT']) delete nativeEnv[key];
+  return nativeEnv;
 }
 
 export function affectedSandboxesForAgentModelChange(sandboxes, agentId) {

@@ -104,6 +104,61 @@ test('shared operational instructions keep waits inside the heartbeat budget', a
   assert.match(prompt, /a wait does not schedule a new heartbeat/i);
 });
 
+test('owned complete instruction markers scope the temporary entry exception and permanent workflow', async () => {
+  const temp = `### TEMPORARY_ALPHA_MVP_OVERRIDE\nPaper validation objective: obtain at least one broker-confirmed options entry in your own account per regular market session.\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nBefore the open: prepare a small ranked shortlist using confirmed news and completed historical data. Record underlying, direction, candidate expiry, budget and exit plan. Label it research only—not submitted. Do not place new options orders before the broker clock confirms the market is open.\nAt the open: reconcile positions, active orders, planned intents and uncertain submissions. Refresh current price action and exact option-contract bid, ask, sizes and timestamps. Reuse useful research; do not restart everything from scratch.\nAssess: call prophet_assess_options_trade with legs: one exact OCC symbol, with side='buy'; quantity: 1; limit_price: the proposed positive quoted premium—not total dollar debit.\nAlphaDesk obtains its own evidence and score. Indicative/testing-only data is admissible for this paper-advisory workflow. Missing chain open interest is unknown, not zero; latest-trade size is not daily volume.\nRead decision, signal_score, checks and blocking_reasons. Score alone is not approval. On FAIL, address the genuine failed criteria or research another candidate. On UNAVAILABLE, report or recheck the specific problem; never turn a missing score into zero.\nExecute after PASS: call prophet_place_options_order with a new client_order_id, the same contract, quantity and price, its underlying, side='buy', position_intent='buy_to_open' and order_type='limit'. If the proposal changes, reassess. OP2 performs its own final checks.\nVerify and manage: confirm the broker fill. Never blindly retry an uncertain submission. Close the same contract with sell_to_close for the confirmed remaining quantity, following the documented exit plan, and verify the outcome.\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
+  const complete = (body) => `Identity and original strategy: ${body}\n\n${temp}`;
+  const build = (sandboxId, agentId, prompt) => buildSystemPrompt({
+    id: agentId, sandboxId, name: agentId, systemPromptTemplate: 'custom',
+    customSystemPrompt: prompt, strategyId: `${agentId}-rules`,
+  }, { getStrategyById: () => ({ customRules: 'ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory.' }) });
+
+  for (const [sandboxId, agentId] of [['sbx_723be98b', 'catalyst'], ['sbx_956ff9e4', 'mean-reversion']]) {
+    const prompt = await build(sandboxId, agentId, complete(`${agentId} identity`));
+    assert.match(prompt, /ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory\./);
+    assert.equal((prompt.match(/### TEMPORARY_ALPHA_MVP_OVERRIDE/g) || []).length, 1);
+    assert.equal((prompt.match(/### MARKET-OPEN ALPHADESK WORKFLOW/g) || []).length, 1);
+    assert.match(prompt, /supersedes the ordinary strategy entry filters, discretionary no-trade conditions, and this test-tool exclusion/i);
+    assert.doesNotMatch(prompt, /Do not trade to test tools\./);
+    assert.match(prompt, /Market eligibility, paper-only permissions, risk and exits, AlphaDesk PASS, broker\/backend checks, and reconciliation remain hard gates/i);
+    assert.doesNotMatch(prompt, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
+    assert.match(prompt, /temporary validation entry.*genuine AlphaDesk PASS.*hard gates.*documented exit/i);
+    assert.match(prompt, /Never blindly retry an uncertain submission/);
+    assert.match(prompt, /sell_to_close for the confirmed remaining quantity/);
+
+    const withoutTemp = `${agentId} identity\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nPermanent workflow\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
+    const ordinary = await build(sandboxId, agentId, withoutTemp);
+    assert.match(ordinary, /Do not trade to test tools\./);
+    assert.match(ordinary, /ORIGINAL STRATEGY: require entry filters/);
+    assert.match(ordinary, /### MARKET-OPEN ALPHADESK WORKFLOW/);
+    assert.doesNotMatch(ordinary, /supersedes the ordinary strategy entry filters/i);
+    assert.match(ordinary, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
+    assert.match(ordinary, /Do not trade to test tools\./);
+    assert.doesNotMatch(ordinary, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/);
+    assert.doesNotMatch(ordinary, /signal scores are nullable provider-owned evidence/);
+
+    const malformed = await build(sandboxId, agentId, `${agentId} identity\n### TEMPORARY_ALPHA_MVP_OVERRIDE\npartial`);
+    assert.match(malformed, /Do not trade to test tools\./);
+    assert.doesNotMatch(malformed, /supersedes the ordinary strategy entry filters/i);
+
+    const incompleteWorkflow = await build(sandboxId, agentId, `${agentId} identity\n\n### TEMPORARY_ALPHA_MVP_OVERRIDE\npartial\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n\n### MARKET-OPEN ALPHADESK WORKFLOW\npartial`);
+    assert.match(incompleteWorkflow, /Do not trade to test tools\./);
+    assert.match(incompleteWorkflow, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/);
+  }
+
+  const wrongSandbox = await build('sbx_other', 'catalyst', complete('Herald'));
+  assert.match(wrongSandbox, /Do not trade to test tools\./);
+  assert.doesNotMatch(wrongSandbox, /supersedes the ordinary strategy entry filters/i);
+
+  // Stored custom text is inert when the selected template does not use it.
+  const defaultTemplatePrompt = await buildSystemPrompt({
+    id: 'catalyst', sandboxId: 'sbx_723be98b', name: 'catalyst',
+    systemPromptTemplate: 'default', customSystemPrompt: complete('Herald'), strategyId: 'catalyst-rules',
+  }, { getStrategyById: () => ({ customRules: 'ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory.' }) });
+  assert.match(defaultTemplatePrompt, /Do not trade to test tools\./);
+  assert.match(defaultTemplatePrompt, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
+  assert.doesNotMatch(defaultTemplatePrompt, /supersedes the ordinary strategy entry filters/i);
+});
+
 test('changing the selected agent clears stale overrides but preserves explicit customization for the new agent', async () => {
   await store.updateSandboxAgentSelection('sbx_l2', { activeAgentId: 'catalyst' });
   let resolved = store.getResolvedAgentForSandbox('sbx_l2');

@@ -171,6 +171,22 @@ function parseOpenCodeStderrError(line) {
 // ── System Prompt Builder ──────────────────────────────────────────
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
+  const scopedPromptOwner = {
+    sbx_723be98b: 'catalyst',
+    sbx_956ff9e4: 'mean-reversion',
+  };
+  const customPrompt = agentConfig.customSystemPrompt || '';
+  const temporaryStart = customPrompt.indexOf('### TEMPORARY_ALPHA_MVP_OVERRIDE');
+  const temporaryEnd = customPrompt.indexOf('### END_TEMPORARY_ALPHA_MVP_OVERRIDE');
+  const workflowStart = customPrompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW');
+  const workflowEnd = customPrompt.indexOf('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
+  const scopedPrompt = scopedPromptOwner[agentConfig.sandboxId] === agentConfig.id
+    && agentConfig.systemPromptTemplate === 'custom';
+  const scopedWorkflowPresent = scopedPrompt && workflowStart >= 0 && workflowEnd > workflowStart;
+  const temporaryOverrideActive = scopedWorkflowPresent
+    && temporaryStart >= 0
+    && temporaryEnd > temporaryStart
+    && workflowStart > temporaryEnd;
   let strategyRules = '';
   if (agentConfig.customStrategyRules) {
     strategyRules = agentConfig.customStrategyRules;
@@ -207,10 +223,26 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
 
   // Layer 2: Strategy Rules
   const rulesBlock = tradingRules
-    ? `## Strategy Rules\nThese are the hard rules you MUST follow. They define what you can trade, position sizes, risk limits, and exit criteria.\n\n${tradingRules}`
+    ? `## Strategy Rules\n${temporaryOverrideActive
+      ? 'Preserve the original strategy text. During the temporary validation objective, only its entry filters and discretionary no-trade conditions are superseded; risk limits and exits remain mandatory.'
+      : 'These are the hard rules you MUST follow. They define what you can trade, position sizes, risk limits, and exit criteria.'}\n\n${tradingRules}`
     : '## No Strategy Rules Assigned\nNo trading rules have been configured. Use conservative defaults: max 10% per position, always use limit orders, maintain 50%+ cash.';
 
   // Layer 3: System Instructions (tools, heartbeat, operational)
+  const alphaDeskGuidance = scopedWorkflowPresent
+    ? `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2, assess the exact proposed single-leg contract before opening. Follow the permanent market-open workflow in the operator-owned instructions above; AlphaDesk obtains its own evidence, and only genuine PASS allows submission. Indicative/testing-only evidence is admissible for this paper-advisory workflow. Missing OI is unknown, not zero; latest-trade size is not daily volume. Backend, account, paper, identity, permission, market, risk and reconciliation checks remain mandatory.`
+    : `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, call \`prophet_assess_options_trade\` for the exact proposal before opening or increasing exposure. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. Submit only exact contract legs, quantity and proposed limit price; the service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. On PASS, attempt \`prophet_place_options_order\`; the backend independently refreshes the exact proposal at the final broker boundary and may still reject it after fresh account, paper, identity, permission, market, risk and reconciliation checks. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Acknowledgement is not a fill.
+In PAPER_ADVISORY_OP2, provider \`indicative/testing_only\` quotes are permitted for this paper-advisory assessment and do not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI: assessment obtains its own reference evidence. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; genuine FAIL or UNAVAILABLE blocks opening, and the broker boundary retains fresh server-side assessment.
+For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capital must freshly re-evaluate a bounded small set of relevant candidates on the permitted cadence. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion; keep management first, and stop only for a current hard exclusion or no setup with its specific reason.`;
+  const noTestGuidance = temporaryOverrideActive
+    ? '- Temporary validation exception: only for the opted-in objective, the operator-owned temporary override supersedes the ordinary strategy entry filters, discretionary no-trade conditions, and this test-tool exclusion. Market eligibility, paper-only permissions, risk and exits, AlphaDesk PASS, broker/backend checks, and reconciliation remain hard gates.'
+    : '- Do not trade to test tools. Old reports and superseded test plans are historical context, not active mandates.';
+  const decideActGuidance = temporaryOverrideActive
+    ? '6. DECIDE & ACT — ordinary entries require a stated edge and the guardrails. A temporary validation entry follows only the operator override scope: one eligible contract, genuine AlphaDesk PASS, all hard gates and a documented exit; never claim or invent a profitable edge. Use a limit price and always pass a `thesis` argument. Otherwise do nothing and say so.'
+    : '6. DECIDE & ACT — place an order only if you have a stated edge AND the guardrails allow it. Use a limit price and always pass a `thesis` argument. Otherwise do nothing and say so.';
+  const riskDisciplineGuidance = temporaryOverrideActive
+    ? '- Original strategy risk and exit rules, per-heartbeat GUARDRAILS, and backend controls remain HARD limits. Follow the temporary override only for entry-filter precedence; never work around those hard limits.'
+    : '- Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.';
   const systemInstructions = `## Available Tools
 
 ${renderPrefixedToolMenu()}
@@ -226,7 +258,7 @@ For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\`
 - Discover options from the option chain and verify the exact OCC contract with option quote evidence. An underlying stock quote is not an option price.
 - Use prophet_assess_options_trade as the standalone on-demand assessment path. Legacy prophet_assess_options_strategy accepts caller evidence and is not an interchangeable fallback.
 - Assessment currently supports long calls, long puts, and same-expiry 1:1 directional debit verticals. Agent execution is single-leg only; never claim an unsupported spread was executed.
-- Do not trade to test tools. Old reports and superseded test plans are historical context, not active mandates.
+${noTestGuidance}
 - Do not use native shell or file tools to discover credentials, edit application/configuration files, or bypass broker controls. Use authorized MCP tools for trading.
 
 ## Your Heartbeat Loop
@@ -238,7 +270,7 @@ Keep \`prophet_wait\` within its maximum of 30 seconds, and avoid repeated or mu
 3. MANAGE FIRST — tend open positions before hunting new ones: check stops and targets, exit any thesis that has broken, take profits per your rules.
 4. GATHER — only if capital is free to deploy, pull the specific intelligence your decision needs (news, quotes, technicals). Don't over-research.
 5. RECALL — before opening any NEW position, call \`prophet_find_similar_setups\` with your thesis. This is advisory: use only materially relevant matches and never invent a numeric similarity threshold.
-6. DECIDE & ACT — place an order only if you have a stated edge AND the guardrails allow it. Use a limit price and always pass a \`thesis\` argument. Otherwise do nothing and say so.
+${decideActGuidance}
 7. RECORD — call \`prophet_log_decision\` with the reasoning behind every trade; when a position closes, call \`prophet_store_trade_setup\` with the realized result so your memory compounds.
 
 ## Execution Contract (strict)
@@ -247,9 +279,7 @@ Keep \`prophet_wait\` within its maximum of 30 seconds, and avoid repeated or mu
 - Every options submission is checked against the broker-authoritative regular-session clock immediately before the broker call. A closed-session response is saved as \`planned_for_next_session\`; it is an application intent, NOT a broker order.
 - A written plan, intention, watchlist item, or statement that you "will place" a trade is NOT an order and must never be reported as queued, submitted, or placed unless the tool returns the explicit planned status.
 - Use \`prophet_place_options_order\` for a single OCC option symbol. Its agent schema is single-leg only. Do not construct a spread through sequential single-leg orders; backend atomic multi-leg support is not exposed by this tool. Never send an OCC option symbol through stock or managed-position tools. Always pass the underlying and explicit \`position_intent\` (\`buy_to_open\`, \`buy_to_close\`, \`sell_to_open\`, or \`sell_to_close\`).
-- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, call \`prophet_assess_options_trade\` for the exact proposal before opening or increasing exposure. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. Submit only exact contract legs, quantity and proposed limit price; the service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. On PASS, attempt \`prophet_place_options_order\`; the backend independently refreshes the exact proposal at the final broker boundary and may still reject it after fresh account, paper, identity, permission, market, risk and reconciliation checks. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Acknowledgement is not a fill.
-In PAPER_ADVISORY_OP2, provider \`indicative/testing_only\` quotes are permitted for this paper-advisory assessment and do not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI: assessment obtains its own reference evidence. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; genuine FAIL or UNAVAILABLE blocks opening, and the broker boundary retains fresh server-side assessment.
-For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capital must freshly re-evaluate a bounded small set of relevant candidates on the permitted cadence. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion; keep management first, and stop only for a current hard exclusion or no setup with its specific reason.
+${alphaDeskGuidance}
 - At the first valid-session heartbeat, review \`prophet_get_orders\` for \`planned_for_next_session\`. Only an eligible unexpired planned intent may be retried with its returned \`client_order_id\` and unchanged immutable order fields after complete broker reconciliation and fresh price, liquidity, account, positions, risk and thesis checks. Do not duplicate an existing broker order.
 - If broker state is incomplete or unavailable, do not submit or retry. Verify \`next_eligible_at\`, expiry and the exact original payload before the one eligible planned retry with its original ID. Never retry \`submission_uncertain\` blindly or replace its ID. \`market_closed\` means wait; \`provider_unavailable\` means fail closed. \`risk_blocked\`, \`rejected_before_submission\`, and \`planned_intent_not_broker_visible\` are application outcomes, not broker attempts.
 - Treat \`accepted\`, \`new\`, \`pending_new\`, and \`open\` as broker acknowledgement only. Any positive filled quantity is execution-confirmed, including a partial fill whose final status is \`canceled\`, \`rejected\`, \`expired\`, or \`done_for_day\`. Treat \`rejected\`, \`canceled\`, \`expired\`, \`submit_failed\`, and \`submission_uncertain\` with zero filled quantity as non-executions.
@@ -270,7 +300,7 @@ ${heartbeatIntervalsForced
     : 'Tune cadence with apply_heartbeat_profile or set_heartbeat (seconds). Settings are the required baseline. Do not change them just for preference: after two completed market sessions, only call set_heartbeat if the configured interval is materially impairing your work, and include a specific explanation of the problem and evidence. Use force=true only for an urgent, strongly justified market condition.'}
 
 ## Risk Discipline (non-negotiable)
-- Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.
+${riskDisciplineGuidance}
 - maxOrderValue=0 means there is no single-order dollar cap; it does not disable trading and is not an order blocker. A positive maxOrderValue is the only time the dollar cap applies. All other configured risk limits and permission flags still apply.
 - daily loss is derived from current broker account/P&L state, not from a dedicated status tool.
 - Always use limit orders; never market into a position you can't price.

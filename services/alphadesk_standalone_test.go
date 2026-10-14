@@ -8,10 +8,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/shopspring/decimal"
 )
 
@@ -80,6 +82,128 @@ func TestStandaloneConsumerPreservesFeedbackAndCannotAuthorizeOrders(t *testing.
 	}
 	if result["decision"] != "PASS" || result["execution_allowed"] != false || calls != 1 {
 		t.Fatalf("bad result: %#v", result)
+	}
+}
+
+func TestStandaloneConsumerAcceptsProducerGeneratedFastAPIReceipt(t *testing.T) {
+	data, err := os.ReadFile("testdata/op2-pass-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+	now := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client(), Now: func() time.Time { return now }}
+	clientReference := "op2-receipt-wire-format"
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("1.84"), ClientReference: &clientReference}
+	result, err := client.AssessOptionsTrade(context.Background(), proposal)
+	if err != nil {
+		t.Fatalf("producer-generated FastAPI PASS receipt rejected: %v", err)
+	}
+	if result["decision"] != "PASS" || result["execution_allowed"] != false {
+		t.Fatalf("unexpected producer receipt result: %#v", result)
+	}
+}
+
+func standaloneBudgetPolicyDocument() map[string]any {
+	snapshot := map[string]any{
+		"minimum_signal_score": "65", "execution_max_quote_age_seconds": 120,
+		"max_investment_per_candidate": "750", "maximum_contracts_per_candidate": 3,
+	}
+	bound := map[string]any{"workspace_policy": snapshot, "profile": "paper_advisory_greeks_v1", "paper_only": true, "require_greek_values": true, "unknown_greek_calculation_time": "warning"}
+	raw, _ := json.Marshal(bound)
+	hash := sha256.Sum256(raw)
+	return map[string]any{
+		"scope": "TRADE_ASSESSMENT", "policy_version": "standalone-paper-advisory-v1:" + hex.EncodeToString(hash[:]),
+		"minimum_passing_score": "65", "policy_snapshot": snapshot, "execution_allowed": false,
+		"advisory_policy_profile": "paper_advisory_greeks_v1", "advisory_policy_hash": "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca",
+		"paper_only": true, "human_approval_required": true,
+	}
+}
+
+func TestReadAssessmentPolicyReturnsOnlyAuthenticatedBudgetMetadata(t *testing.T) {
+	valid, _ := json.Marshal(standaloneBudgetPolicyDocument())
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       []byte
+		wantErr    string
+		wantMethod string
+	}{
+		{"valid", http.StatusOK, valid, "", http.MethodGet},
+		{"auth", http.StatusUnauthorized, []byte("private body"), "upstream_authentication", http.MethodGet},
+		{"malformed", http.StatusOK, []byte(`{"scope":"TRADE_ASSESSMENT"}`), "response_validation", http.MethodGet},
+		{"missing_budget", http.StatusOK, func() []byte {
+			doc := standaloneBudgetPolicyDocument()
+			delete(doc["policy_snapshot"].(map[string]any), "max_investment_per_candidate")
+			data, _ := json.Marshal(doc)
+			return data
+		}(), "response_validation", http.MethodGet},
+		{"redirect", http.StatusFound, []byte{}, "upstream_service_error", http.MethodGet},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tc.wantMethod || r.URL.Path != "/api/v2/option-trade-assessments/policy" || r.Header.Get("X-AlphaDesk-API-Key") != "fixture-key" {
+					t.Errorf("unexpected authenticated read-only request: %s %s", r.Method, r.URL.Path)
+				}
+				if tc.name == "redirect" {
+					w.Header().Set("Location", "https://untrusted.invalid")
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write(tc.body)
+			}))
+			defer server.Close()
+			client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client()}
+			result, err := client.ReadAssessmentPolicy(context.Background())
+			if tc.wantErr != "" {
+				var unavailable *AlphaDeskUnavailableError
+				if !errors.As(err, &unavailable) || unavailable.Category != tc.wantErr || result != nil {
+					t.Fatalf("expected safe unavailable %q, got result=%#v err=%#v", tc.wantErr, result, err)
+				}
+				if strings.Contains(err.Error(), "private body") || strings.Contains(err.Error(), "fixture-key") {
+					t.Fatal("upstream body or key reflected")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result["max_investment_per_candidate"] != "750" || result["maximum_contracts_per_candidate"] != json.Number("3") || result["decision"] != "POLICY_ONLY" || result["assessment_performed"] != false || result["execution_allowed"] != false {
+				t.Fatalf("unexpected policy metadata: %#v", result)
+			}
+			if _, exists := result["signal_score"]; exists {
+				t.Fatal("policy lookup returned assessment score")
+			}
+		})
+	}
+}
+
+func TestReadStandaloneAssessmentPolicyDoesNotAssessOrCallBroker(t *testing.T) {
+	policyBytes, _ := json.Marshal(standaloneBudgetPolicyDocument())
+	gets, posts, brokerCalls := 0, 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets++
+			_, _ = w.Write(policyBytes)
+			return
+		}
+		posts++
+	}))
+	defer server.Close()
+	alpha := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client()}
+	service := &AlpacaTradingService{
+		alphaDesk: alpha, expectedPaper: true, expectedAccountID: "paper-account",
+		expectedTenantID: "workspace", expectedSandboxID: "sandbox",
+		placeOrderFn: func(_ alpaca.PlaceOrderRequest) (*alpaca.Order, error) { brokerCalls++; return nil, nil },
+	}
+	if _, err := service.ReadStandaloneAssessmentPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gets != 1 || posts != 0 || brokerCalls != 0 {
+		t.Fatalf("policy read crossed assessment/order boundary: GET=%d POST=%d broker=%d", gets, posts, brokerCalls)
 	}
 }
 
@@ -212,6 +336,21 @@ func TestStandaloneConsumerRejectsInvalidOrUnboundPASS(t *testing.T) {
 			result, err := c.AssessOptionsTrade(context.Background(), proposal)
 			if err == nil || result != nil {
 				t.Fatalf("unsafe response accepted: %#v", result)
+			}
+			expectedStages := map[string]string{
+				"wrong_quantity": "trade", "bad_fingerprint": "trade_fingerprint",
+				"policy_tampered": "policy_version", "component_sum": "score_components",
+				"forged_advisory_hash": "advisory_policy_hash", "missing_advisory_profile": "advisory_policy_profile",
+				"execution_profile": "paper_only", "retryable": "retryable",
+				"bool_greek_time": "market_data.greeks_calculated_at", "number_greek_source": "market_data.greeks_calculation_provenance",
+				"whitespace_greek_source": "market_data.greeks_calculation_provenance",
+				"missing_metadata":        "observed_at",
+			}
+			if expected := expectedStages[name]; expected != "" {
+				var unavailable *AlphaDeskUnavailableError
+				if !errors.As(err, &unavailable) || unavailable.Category != "response_validation" || unavailable.Stage != expected {
+					t.Fatalf("validation diagnostic compatibility or safe stage missing: %#v", err)
+				}
 			}
 			if strings.Contains(err.Error(), "fixture-key") || strings.Contains(err.Error(), "private-upstream") {
 				t.Fatal("secret reflected")

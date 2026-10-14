@@ -31,3 +31,22 @@ test('standalone tool declares read-only scope and no caller evidence requiremen
   assert.match(schema,/PASS is not broker\/account authorization/);
   assert.doesNotMatch(schema,/market_scanner_features|external_account_id|max_loss/);
 });
+
+test('policy lookup is listed as idempotent read-only and serializes only backend metadata', async () => {
+  const schema = source.slice(source.indexOf("name: 'get_options_assessment_policy'"), source.indexOf("name: 'assess_options_trade'"));
+  assert.match(schema, /readOnlyHint: true/);
+  assert.match(schema, /idempotentHint: true/);
+  assert.match(schema, /never PASS or execution authority/);
+  const begin = source.indexOf("case 'get_options_assessment_policy': {");
+  const end = source.indexOf("case 'assess_options_trade': {", begin);
+  assert.ok(begin >= 0 && end > begin);
+  const body = source.slice(begin, end).replace("case 'get_options_assessment_policy': {", '').trim().replace(/}\s*$/, '');
+  const calls = [];
+  const policy = { kind: 'assessment_policy_metadata', decision: 'POLICY_ONLY', assessment_performed: false, max_investment_per_candidate: '750', execution_allowed: false };
+  const invoke = vm.runInNewContext(`(async () => {${body}})`, {
+    callTradingBot: async (...args) => { calls.push(args); return policy; },
+  });
+  const result = await invoke();
+  assert.deepEqual(calls, [['/options/assessment-policy']]);
+  assert.deepEqual(JSON.parse(result.content[0].text), policy);
+});

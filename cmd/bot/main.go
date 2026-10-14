@@ -453,6 +453,7 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		api.POST("/options/order", orderController.PlaceOptionsOrder)
 		api.POST("/options/assessment", orderController.AssessOptionsStrategy)
 		api.POST("/options/trade-assessment", orderController.AssessOptionsTrade)
+		api.GET("/options/assessment-policy", orderController.ReadOptionsAssessmentPolicy)
 		api.GET("/options/positions", orderController.ListOptionsPositions)
 		api.GET("/options/position/:symbol", orderController.GetOptionsPosition)
 		api.GET("/options/chain/:symbol", orderController.GetOptionsChain)

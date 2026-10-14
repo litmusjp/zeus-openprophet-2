@@ -216,6 +216,15 @@ func (s *AlpacaTradingService) AssessOptionsTradeReadOnly(ctx context.Context, p
 	}
 	return s.alphaDesk.cachedStandalone(ctx, s.standaloneIdentity(), p, false)
 }
+
+// ReadStandaloneAssessmentPolicy is scoped to the verified paper identity and
+// calls only AlphaDesk's authenticated policy endpoint.
+func (s *AlpacaTradingService) ReadStandaloneAssessmentPolicy(ctx context.Context) (map[string]any, error) {
+	if s == nil || s.alphaDesk == nil || !s.expectedPaper || s.expectedAccountID == "" || s.expectedTenantID == "" || s.expectedSandboxID == "" {
+		return nil, &AlphaDeskUnavailableError{Reason: "Standalone assessment policy is unavailable", Category: "configuration"}
+	}
+	return s.alphaDesk.ReadAssessmentPolicy(ctx)
+}
 func standaloneProposalForOrder(order *interfaces.OptionsOrder) (StandaloneTradeProposal, error) {
 	if order == nil || order.LimitPrice == nil || order.Qty < 1 || math.Trunc(order.Qty) != order.Qty || order.Side != "buy" || order.Type != "limit" || order.PositionIntent != "buy_to_open" {
 		return StandaloneTradeProposal{}, errors.New("Standalone guard supports opening long options and directional debit verticals with a limit")

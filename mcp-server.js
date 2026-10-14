@@ -932,6 +932,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_options_assessment_policy',
+        description: 'Read authenticated AlphaDesk policy budget metadata before selecting a new long-options candidate. Returns POLICY_ONLY metadata, never PASS or execution authority; does not assess or place trades.',
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
         name: 'assess_options_trade',
         description: 'Assess your exact proposed options trade using standalone AlphaDesk market evidence, without a scanner/watchlist or caller-supplied score. Returns PASS/FAIL/UNAVAILABLE, score, criteria and remediation. PASS is not broker/account authorization; on FAIL or UNAVAILABLE skip this proposal and continue other work. No orders or approvals.',
         annotations: { readOnlyHint: true, destructiveHint: false },
@@ -1979,6 +1985,11 @@ ${allNews.map((article, i) =>
           return { content: [{ type: 'text', text: JSON.stringify({ status: 'validation_error', error: 'client_order_id is required' }) }] };
         }
         const data = await callTradingBot(`/orders/planned-intents/${encodeURIComponent(clientOrderID)}`, 'DELETE');
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_options_assessment_policy': {
+        const data = await callTradingBot('/options/assessment-policy');
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

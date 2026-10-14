@@ -124,12 +124,18 @@ test('owned complete instruction markers scope the temporary entry exception and
     assert.match(prompt, /temporary validation entry.*genuine AlphaDesk PASS.*hard gates.*documented exit/i);
     assert.match(prompt, /Never blindly retry an uncertain submission/);
     assert.match(prompt, /sell_to_close for the confirmed remaining quantity/);
+    assert.match(prompt, /prophet_get_options_assessment_policy/);
+    assert.match(prompt, /max_investment_per_candidate divided by \(quantity \* standard contract multiplier\)/i);
+    assert.match(prompt, /do not assess an unaffordable candidate/i);
 
     const withoutTemp = `${agentId} identity\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nPermanent workflow\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
     const ordinary = await build(sandboxId, agentId, withoutTemp);
     assert.match(ordinary, /Do not trade to test tools\./);
     assert.match(ordinary, /ORIGINAL STRATEGY: require entry filters/);
     assert.match(ordinary, /### MARKET-OPEN ALPHADESK WORKFLOW/);
+    assert.match(ordinary, /prophet_get_options_assessment_policy/);
+    assert.match(ordinary, /max_investment_per_candidate divided by \(quantity \* standard contract multiplier\)/i);
+    assert.match(ordinary, /do not assess an unaffordable candidate/i);
     assert.doesNotMatch(ordinary, /supersedes the ordinary strategy entry filters/i);
     assert.match(ordinary, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
     assert.match(ordinary, /Do not trade to test tools\./);

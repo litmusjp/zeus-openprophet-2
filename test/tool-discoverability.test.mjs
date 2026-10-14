@@ -7,7 +7,11 @@ import { buildSystemPrompt } from '../agent/harness.js';
 const settingsHtml = fs.readFileSync(new URL('../agent/public/index.html', import.meta.url), 'utf8');
 
 test('curated tool catalog and rendered menu include AlphaDesk assessment', () => {
-  assert.match(renderToolMenu(), /\*\*Options\*\*: assess_options_trade,/);
+  assert.match(renderToolMenu(), /\*\*Options\*\*: get_options_assessment_policy, assess_options_trade,/);
+});
+
+test('curated tool catalog exposes the read-only assessment policy lookup', () => {
+  assert.match(renderToolMenu(), /get_options_assessment_policy/);
 });
 
 test('generated system prompt documents the AlphaDesk assessment workflow', async () => {
@@ -19,6 +23,11 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   });
 
   assert.match(prompt, /prophet_assess_options_trade/);
+  assert.match(prompt, /prophet_get_options_assessment_policy/);
+  assert.match(prompt, /max_investment_per_candidate/);
+  assert.match(prompt, /maximum affordable premium as max_investment_per_candidate divided by \(quantity \* standard contract multiplier\)/);
+  assert.match(prompt, /quantity within maximum_contracts_per_candidate/);
+  assert.match(prompt, /POLICY_ONLY response/);
   assert.match(prompt, /before opening or increasing exposure/i);
   assert.match(prompt, /for the exact proposal/);
   assert.match(prompt, /Decision is PASS, FAIL or UNAVAILABLE/);

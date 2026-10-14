@@ -3299,14 +3299,15 @@ async function saveAgentPrompt(agentId) {
   if (!textarea) return;
   const prompt = textarea.value.trim();
   try {
-    await fetch('/api/agents/' + encodeURIComponent(agentId), {
+    const response = await fetch('/api/agents/' + encodeURIComponent(agentId), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        customSystemPrompt: prompt, 
-        systemPromptTemplate: prompt ? 'custom' : 'default' 
+      body: JSON.stringify({
+        customSystemPrompt: prompt,
+        systemPromptTemplate: prompt ? 'custom' : 'default'
       }),
     });
+    if (!response.ok) throw new Error('Request failed with status ' + response.status);
     config = await fetch('/api/config').then(r => r.json());
     renderAll();
     logToSandbox(getEffectiveSandboxId(), '<div class="log-entry success"><span class="time">' + fmtTime() + '</span>Prompt saved for ' + esc(agentId) + '. Takes effect next beat.</div>');

@@ -15,6 +15,7 @@ import (
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/shopspring/decimal"
+	"prophet-trader/interfaces"
 	"prophet-trader/models"
 )
 
@@ -106,6 +107,231 @@ func TestStandaloneConsumerAcceptsProducerGeneratedFastAPIReceipt(t *testing.T) 
 	}
 	if result["decision"] != "PASS" || result["execution_allowed"] != false {
 		t.Fatalf("unexpected producer receipt result: %#v", result)
+	}
+}
+
+func TestProducerDerivedReceiptAllowsBoundedAssessorClockSkew(t *testing.T) {
+	data, err := os.ReadFile("testdata/op2-pass-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerTime := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	var receipt map[string]any
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"evidence_observed_at", "evidence_as_of"} {
+		receipt[key] = producerTime.Add(-time.Second).Format(time.RFC3339Nano)
+	}
+	receipt["expires_at"] = producerTime.Add(119 * time.Second).Format(time.RFC3339Nano)
+	receipt["market_data"].(map[string]any)["source_quote_times"].(map[string]any)["AAPL261106C00200000"] = producerTime.Add(-time.Second).Format(time.RFC3339Nano)
+	data, err = json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, skew := range []time.Duration{2 * time.Millisecond, 100 * time.Millisecond, 250 * time.Millisecond, 251 * time.Millisecond} {
+		t.Run(skew.String(), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(data)
+			}))
+			defer server.Close()
+			now := producerTime.Add(-skew)
+			client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client(), Now: func() time.Time { return now }}
+			clientReference := "op2-receipt-wire-format"
+			proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("1.84"), ClientReference: &clientReference}
+			result, err := client.AssessOptionsTrade(context.Background(), proposal)
+			if skew <= 250*time.Millisecond && err != nil {
+				var unavailable *AlphaDeskUnavailableError
+				if errors.As(err, &unavailable) && unavailable.Category == "response_validation" && unavailable.Stage == "observed_at" {
+					t.Fatalf("producer-derived contract receipt with %s assessor clock skew rejected at observed_at", skew)
+				}
+				t.Fatalf("producer-derived contract receipt rejected at %s skew: %v", skew, err)
+				return
+			}
+			if skew > 250*time.Millisecond {
+				var unavailable *AlphaDeskUnavailableError
+				if !errors.As(err, &unavailable) || unavailable.Stage != "observed_at" {
+					t.Fatalf("want observed_at rejection above allowance, got %v", err)
+				}
+				return
+			}
+			if result["decision"] != "PASS" || result["execution_allowed"] != false {
+				t.Fatalf("unexpected result: %#v", result)
+			}
+		})
+	}
+}
+
+func producerDerivedReceiptWithOptionQuoteOffsets(t *testing.T, now time.Time, observedOffset, quoteOffset time.Duration) []byte {
+	t.Helper()
+	data, err := os.ReadFile("testdata/op2-pass-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	quoteTime := now.Add(quoteOffset)
+	receipt["observed_at"] = now.Add(observedOffset).Format(time.RFC3339Nano)
+	receipt["evidence_observed_at"] = now.Add(-time.Second).Format(time.RFC3339Nano)
+	receipt["evidence_as_of"] = now.Add(-time.Second).Format(time.RFC3339Nano)
+	receipt["expires_at"] = now.Add(119 * time.Second).Format(time.RFC3339Nano)
+	market := receipt["market_data"].(map[string]any)
+	market["source_quote_times"].(map[string]any)["AAPL261106C00200000"] = quoteTime.Format(time.RFC3339Nano)
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestFutureOptionQuoteTimestampRejectedAcrossAssessmentPaths(t *testing.T) {
+	base := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	body := producerDerivedReceiptWithOptionQuoteOffsets(t, base, 2*time.Millisecond, time.Millisecond)
+	var receipt map[string]any
+	if err := json.Unmarshal(body, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	proposalRef := "op2-receipt-wire-format"
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("1.84"), ClientReference: &proposalRef}
+	for _, path := range []string{"raw", "cached", "opening_guard", "opening_guard_wrapper"} {
+		t.Run(path, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_ = json.NewEncoder(w).Encode(map[string]any{"scope": "TRADE_ASSESSMENT", "execution_allowed": false, "policy_version": receipt["policy_version"], "policy_snapshot": receipt["policy_snapshot"], "minimum_passing_score": receipt["minimum_passing_score"]})
+					return
+				}
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+			client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client(), Now: func() time.Time { return base }}
+			var err error
+			switch path {
+			case "raw":
+				_, err = client.AssessOptionsTrade(context.Background(), proposal)
+			case "cached":
+				identity := models.DurableIdentity{BrokerAccountID: "paper", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+				_, err = client.cachedStandalone(context.Background(), identity, proposal, false)
+			case "opening_guard", "opening_guard_wrapper":
+				price := 1.84
+				audits := 0
+				order := &interfaces.OptionsOrder{Symbol: proposal.Legs[0].Symbol, Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", LimitPrice: &price, ClientOrderID: proposalRef,
+					AssessmentAuditSink: func(*interfaces.AlphaDeskAssessment) error { audits++; return nil }}
+				service := &AlpacaTradingService{expectedPaper: true, expectedAccountID: "paper", expectedTenantID: "tenant", expectedSandboxID: "sandbox", policy: &TradingPolicy{}, alphaDesk: client}
+				if path == "opening_guard_wrapper" {
+					err = service.requireStandaloneApproval(context.Background(), order)
+				} else {
+					err = service.requirePaperAdvisoryQualification(context.Background(), order)
+				}
+				var unavailable *AlphaDeskUnavailableError
+				if !errors.As(err, &unavailable) || unavailable.Stage != "market_data.source_quote_times" || audits != 0 || order.AlphaDeskAssessment != nil || len(client.standaloneCache) != 0 {
+					t.Fatalf("opening guard accepted or retained future option quote: err=%v audits=%d attached=%t cached=%d", err, audits, order.AlphaDeskAssessment != nil, len(client.standaloneCache))
+				}
+				return
+			}
+			var unavailable *AlphaDeskUnavailableError
+			if !errors.As(err, &unavailable) || unavailable.Stage != "market_data.source_quote_times" {
+				t.Fatalf("%s path accepted or rejected elsewhere for future option quote; want market_data.source_quote_times, got %v", path, err)
+			}
+			if path == "cached" && len(client.standaloneCache) != 0 {
+				t.Fatalf("cached path retained rejected receipt: %d", len(client.standaloneCache))
+			}
+		})
+	}
+}
+
+func TestOptionQuoteTimestampCannotFollowAssessorObservation(t *testing.T) {
+	base := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	body := producerDerivedReceiptWithOptionQuoteOffsets(t, base, -time.Millisecond, 0)
+	proposalRef := "op2-receipt-wire-format"
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("1.84"), ClientReference: &proposalRef}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+	defer server.Close()
+	client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client(), Now: func() time.Time { return base }}
+	_, err := client.AssessOptionsTrade(context.Background(), proposal)
+	var unavailable *AlphaDeskUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Stage != "market_data.source_quote_times" {
+		t.Fatalf("quote timestamp after observed_at was accepted or rejected elsewhere: %v", err)
+	}
+}
+
+func TestMalformedPresentOptionQuoteTimesFailClosed(t *testing.T) {
+	data, err := os.ReadFile("testdata/op2-pass-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	proposalRef := "op2-receipt-wire-format"
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("1.84"), ClientReference: &proposalRef}
+	for name, sourceQuotes := range map[string]any{"wrong_container": "bad", "non_string_timestamp": map[string]any{"AAPL261106C00200000": 7}, "unparsable_timestamp": map[string]any{"AAPL261106C00200000": "not-a-time"}} {
+		t.Run(name, func(t *testing.T) {
+			var receipt map[string]any
+			if err := json.Unmarshal(data, &receipt); err != nil {
+				t.Fatal(err)
+			}
+			receipt["market_data"].(map[string]any)["source_quote_times"] = sourceQuotes
+			body, err := json.Marshal(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+			defer server.Close()
+			client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client(), Now: func() time.Time { return base }}
+			_, err = client.AssessOptionsTrade(context.Background(), proposal)
+			var unavailable *AlphaDeskUnavailableError
+			if !errors.As(err, &unavailable) || unavailable.Stage != "market_data.source_quote_times" {
+				t.Fatalf("malformed source_quote_times accepted or rejected elsewhere: %v", err)
+			}
+		})
+	}
+}
+
+func TestAssessorClockAllowanceDoesNotAdmitFutureMarketTimes(t *testing.T) {
+	data, err := os.ReadFile("testdata/op2-pass-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	proposalRef := "op2-receipt-wire-format"
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("1.84"), ClientReference: &proposalRef}
+	for _, field := range []string{"evidence_observed_at", "market_data.greeks_calculated_at"} {
+		t.Run(field, func(t *testing.T) {
+			var doc map[string]any
+			if err := json.Unmarshal(data, &doc); err != nil {
+				t.Fatal(err)
+			}
+			future := base.Add(time.Millisecond).Format(time.RFC3339Nano)
+			doc["observed_at"] = base.Add(2 * time.Millisecond).Format(time.RFC3339Nano)
+			stage := "evidence_observed_at"
+			if field == "evidence_observed_at" {
+				doc[field] = future
+				doc["evidence_as_of"] = future
+				doc["expires_at"] = base.Add(120 * time.Second).Format(time.RFC3339Nano)
+			} else {
+				market := doc["market_data"].(map[string]any)
+				market["greeks_calculated_at"] = future
+				market["greeks_calculation_provenance"] = "fixture"
+				market["greeks_calculation_freshness"] = "verified"
+				market["warnings"] = []any{}
+				stage = "market_data.greeks_calculated_at"
+			}
+			body, _ := json.Marshal(doc)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(body) }))
+			defer server.Close()
+			client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-key", HTTP: server.Client(), Now: func() time.Time { return base }}
+			_, rawErr := client.AssessOptionsTrade(context.Background(), proposal)
+			var unavailable *AlphaDeskUnavailableError
+			if !errors.As(rawErr, &unavailable) || unavailable.Stage != stage {
+				t.Fatalf("raw client accepted future market time or rejected elsewhere: stage=%q err=%v", stage, rawErr)
+			}
+			identity := models.DurableIdentity{BrokerAccountID: "paper", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+			_, cachedErr := client.cachedStandalone(context.Background(), identity, proposal, false)
+			if !errors.As(cachedErr, &unavailable) || unavailable.Stage != stage || len(client.standaloneCache) != 0 {
+				t.Fatalf("cached assessment admitted future market time: stage=%q err=%v cache=%d", stage, cachedErr, len(client.standaloneCache))
+			}
+		})
 	}
 }
 
@@ -278,7 +504,7 @@ func TestStandaloneProposalFingerprintMatchesPythonContractFixture(t *testing.T)
 func TestStandaloneConsumerRejectsInvalidOrUnboundPASS(t *testing.T) {
 	now := time.Now().UTC()
 	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("2")}
-	cases := []string{"authority", "stale", "missing_score", "weak_score", "unknown_decision", "wrong_quantity", "failed_check", "missing_marker", "redirect", "bad_json", "http_error", "blocker", "missing_metadata", "missing_blockers", "malformed_blockers", "retryable", "bad_fingerprint", "bool_score", "string_score", "policy_tampered", "missing_policy_snapshot", "malformed_policy_snapshot", "component_sum", "bool_component", "missing_check_code", "contradictory_pass", "unknown_trade_field", "missing_advisory_profile", "forged_advisory_hash", "execution_profile", "bool_greek_time", "number_greek_source", "map_greek_time", "whitespace_greek_source", "bool_unknown_greek_time"}
+	cases := []string{"authority", "stale", "missing_score", "weak_score", "unknown_decision", "wrong_quantity", "failed_check", "missing_marker", "redirect", "bad_json", "http_error", "blocker", "missing_metadata", "number_observed_at", "format_observed_at", "far_future_observed_at", "missing_blockers", "malformed_blockers", "retryable", "bad_fingerprint", "bool_score", "string_score", "policy_tampered", "missing_policy_snapshot", "malformed_policy_snapshot", "component_sum", "bool_component", "missing_check_code", "contradictory_pass", "unknown_trade_field", "missing_advisory_profile", "forged_advisory_hash", "execution_profile", "bool_greek_time", "number_greek_source", "map_greek_time", "whitespace_greek_source", "bool_unknown_greek_time"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -313,6 +539,12 @@ func TestStandaloneConsumerRejectsInvalidOrUnboundPASS(t *testing.T) {
 					doc["blocking_reasons"] = []string{"criterion failed"}
 				case "missing_metadata":
 					delete(doc, "observed_at")
+				case "number_observed_at":
+					doc["observed_at"] = 7
+				case "format_observed_at":
+					doc["observed_at"] = "not-a-timestamp"
+				case "far_future_observed_at":
+					doc["observed_at"] = now.Add(time.Hour).Format(time.RFC3339Nano)
 				case "authority":
 					doc["execution_allowed"] = true
 				case "stale":
@@ -383,11 +615,18 @@ func TestStandaloneConsumerRejectsInvalidOrUnboundPASS(t *testing.T) {
 				"bool_greek_time": "market_data.greeks_calculated_at", "number_greek_source": "market_data.greeks_calculation_provenance",
 				"whitespace_greek_source": "market_data.greeks_calculation_provenance",
 				"missing_metadata":        "observed_at",
+				"number_observed_at":      "observed_at",
+				"format_observed_at":      "observed_at",
+				"far_future_observed_at":  "observed_at",
 			}
 			if expected := expectedStages[name]; expected != "" {
 				var unavailable *AlphaDeskUnavailableError
 				if !errors.As(err, &unavailable) || unavailable.Category != "response_validation" || unavailable.Stage != expected {
 					t.Fatalf("validation diagnostic compatibility or safe stage missing: %#v", err)
+				}
+				expectedTimestampRejection := map[string]string{"missing_metadata": "missing", "number_observed_at": "type", "format_observed_at": "format", "far_future_observed_at": "future"}[name]
+				if unavailable.TimestampRejection != expectedTimestampRejection {
+					t.Fatalf("timestamp subtype=%q, want %q", unavailable.TimestampRejection, expectedTimestampRejection)
 				}
 			}
 			if strings.Contains(err.Error(), "fixture-key") || strings.Contains(err.Error(), "private-upstream") {

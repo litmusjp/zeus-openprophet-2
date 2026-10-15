@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"prophet-trader/services"
+	"regexp"
+	"time"
 )
 
 func standaloneUnavailable(code string, stages ...string) gin.H {
@@ -16,10 +18,10 @@ func standaloneUnavailable(code string, stages ...string) gin.H {
 		"advisory_policy_profile": "paper_advisory_greeks_v1", "advisory_policy_hash": "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca", "policy_version": nil, "paper_only": true, "human_approval_required": true,
 		"market_data": gin.H{"source": "unknown", "feed": nil, "requested_feed": "indicative", "quality": "testing_only", "greeks_calculation_provenance": nil, "greeks_calculation_freshness": "unknown", "warnings": []string{"greek_calculation_time_unknown"}},
 		"checks":      []any{}, "blocking_reasons": []string{code},
-		"remediation": []string{"Check AlphaDesk configuration and current market evidence; skip this proposal and continue other work."}}
+		"remediation": []string{"Address the reported issue. A temporary assessment or consumer failure is not a permanent candidate rejection or blanket AlphaDesk outage; a bounded later read-only reassessment with fresh evidence is appropriate. Never blindly retry an uncertain broker order; reconcile its status first."}}
 	if len(stages) > 0 {
 		switch stages[0] {
-		case "response_read", "decision", "execution_allowed", "pass", "scope", "score_source", "score_profile", "retryable", "advisory_policy_profile", "advisory_policy_hash", "paper_only", "human_approval_required", "assessment_id", "policy_version", "observed_at", "evidence_observed_at", "market_data", "market_data.source", "market_data.feed", "market_data.quality", "market_data.greeks_calculated_at", "market_data.greeks_calculation_provenance", "market_data.greeks_calculation_freshness", "market_data.warnings", "evidence_as_of", "signal_score", "minimum_passing_score", "expires_at", "policy_snapshot", "policy_snapshot.execution_max_quote_age_seconds", "score_components", "trade_fingerprint", "remediation", "blocking_reasons", "checks", "trade":
+		case "response_read", "decision", "execution_allowed", "pass", "scope", "score_source", "score_profile", "retryable", "advisory_policy_profile", "advisory_policy_hash", "paper_only", "human_approval_required", "assessment_id", "policy_version", "observed_at", "evidence_observed_at", "market_data", "market_data.source", "market_data.feed", "market_data.quality", "market_data.source_quote_times", "market_data.greeks_calculated_at", "market_data.greeks_calculation_provenance", "market_data.greeks_calculation_freshness", "market_data.warnings", "evidence_as_of", "signal_score", "minimum_passing_score", "expires_at", "policy_snapshot", "policy_snapshot.execution_max_quote_age_seconds", "score_components", "trade_fingerprint", "remediation", "blocking_reasons", "checks", "trade":
 			result["validation_stage"] = stages[0]
 		}
 	}
@@ -66,14 +68,57 @@ func (oc *OrderController) AssessOptionsTrade(c *gin.Context) {
 	if err != nil {
 		var unavailable *services.AlphaDeskUnavailableError
 		if errors.As(err, &unavailable) && unavailable.Category == "response_validation" {
-			c.JSON(http.StatusOK, standaloneUnavailable(standaloneErrorCategory(err), unavailable.Stage))
+			result := standaloneUnavailable(standaloneErrorCategory(err), unavailable.Stage)
+			addStandaloneErrorDiagnostics(result, unavailable)
+			c.JSON(http.StatusOK, result)
 			return
 		}
-		c.JSON(http.StatusOK, standaloneUnavailable(standaloneErrorCategory(err)))
+		result := standaloneUnavailable(standaloneErrorCategory(err))
+		if errors.As(err, &unavailable) {
+			addStandaloneErrorDiagnostics(result, unavailable)
+		}
+		c.JSON(http.StatusOK, result)
 		return
 	}
 	c.JSON(http.StatusOK, result)
 }
+
+func addStandaloneErrorDiagnostics(result gin.H, unavailable *services.AlphaDeskUnavailableError) {
+	if unavailable == nil {
+		return
+	}
+	result["provider_scalars_validated"] = false
+	switch unavailable.ProviderDecision {
+	case "PASS", "FAIL", "UNAVAILABLE":
+		result["provider_reported_decision"] = unavailable.ProviderDecision
+	}
+	if standaloneUUID.MatchString(unavailable.AssessmentID) {
+		result["provider_reported_assessment_id"] = unavailable.AssessmentID
+	}
+	switch unavailable.TimestampRejection {
+	case "missing", "type", "format", "future":
+		result["timestamp_rejection"] = unavailable.TimestampRejection
+	}
+	if value := safeStandaloneTimestamp(unavailable.ProviderObservedAt); value != "" {
+		result["provider_observed_at"] = value
+	}
+	if value := safeStandaloneTimestamp(unavailable.ConsumerCheckedAt); value != "" {
+		result["consumer_checked_at"] = value
+	}
+	if unavailable.ClockDeltaMillis != nil && *unavailable.ClockDeltaMillis >= 0 && *unavailable.ClockDeltaMillis <= 60000 {
+		result["clock_delta_millis"] = *unavailable.ClockDeltaMillis
+	}
+}
+
+func safeStandaloneTimestamp(value string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return ""
+	}
+	return parsed.UTC().Format(time.RFC3339Nano)
+}
+
+var standaloneUUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // ReadOptionsAssessmentPolicy exposes only the authenticated AlphaDesk budget
 // fields needed before selecting a long-options candidate. It is not an

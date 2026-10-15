@@ -21,6 +21,7 @@ type standaloneOnlyService struct {
 	policy        map[string]any
 	policyErr     bool
 	policyCalls   int
+	assessmentErr *services.AlphaDeskUnavailableError
 }
 
 func (s *standaloneOnlyService) ReadStandaloneAssessmentPolicy(_ context.Context) (map[string]any, error) {
@@ -34,9 +35,53 @@ func (s *standaloneOnlyService) ReadStandaloneAssessmentPolicy(_ context.Context
 func (s *standaloneOnlyService) AssessOptionsTradeReadOnly(_ context.Context, p services.StandaloneTradeProposal) (map[string]any, error) {
 	s.calls++
 	if s.unavailable {
+		if s.assessmentErr != nil {
+			return nil, s.assessmentErr
+		}
 		return nil, &services.AlphaDeskUnavailableError{Reason: "private upstream detail", Category: s.errorCategory, Stage: s.errorStage}
 	}
 	return map[string]any{"decision": "FAIL", "signal_score": 40, "execution_allowed": false, "remediation": []string{"genuine stronger signal required"}}, nil
+}
+
+func TestStandaloneUnavailableProjectsOnlySafeReceiptDiagnostics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	delta := int64(2)
+	service := &standaloneOnlyService{unavailable: true, assessmentErr: &services.AlphaDeskUnavailableError{
+		Reason: "secret body/token", Category: "response_validation", Stage: "observed_at", ProviderDecision: "PASS",
+		AssessmentID: "888c17f7-e4af-408f-a8bb-50109488f262", TimestampRejection: "future",
+		ProviderObservedAt: "2026-10-06T15:00:00Z", ConsumerCheckedAt: "2026-10-06T14:59:59.998Z", ClockDeltaMillis: &delta,
+	}}
+	controller := NewOrderController(service, nil, nil)
+	router := gin.New()
+	router.POST("/options/trade-assessment", controller.AssessOptionsTrade)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/options/trade-assessment", strings.NewReader(`{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":1.84,"client_reference":"op2-receipt-wire-format"}`)))
+	body := w.Body.String()
+	for _, want := range []string{`"decision":"UNAVAILABLE"`, `"signal_score":null`, `"execution_allowed":false`, `"provider_scalars_validated":false`, `"provider_reported_decision":"PASS"`, `"provider_reported_assessment_id":"888c17f7-e4af-408f-a8bb-50109488f262"`, `"timestamp_rejection":"future"`, `"provider_observed_at":"2026-10-06T15:00:00Z"`, `"consumer_checked_at":"2026-10-06T14:59:59.998Z"`, `"clock_delta_millis":2`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing safe diagnostic %s: %s", want, body)
+		}
+	}
+	for _, want := range []string{"bounded later read-only reassessment", "Never blindly retry an uncertain broker order; reconcile its status first"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("remediation missing %q: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"secret body", "token", `"pass":true`, "execution_allowed\":true"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("unsafe diagnostic leaked %q: %s", forbidden, body)
+		}
+	}
+	unsafe := standaloneUnavailable("response_validation")
+	addStandaloneErrorDiagnostics(unsafe, &services.AlphaDeskUnavailableError{ProviderDecision: "PASS\nprivate", AssessmentID: "private-id", TimestampRejection: "future\nsecret", ProviderObservedAt: "private timestamp", ConsumerCheckedAt: "private timestamp"})
+	if unsafe["provider_scalars_validated"] != false {
+		t.Fatalf("unvalidated scalar flag missing: %#v", unsafe)
+	}
+	for _, key := range []string{"provider_reported_decision", "provider_reported_assessment_id", "timestamp_rejection", "provider_observed_at", "consumer_checked_at"} {
+		if _, exists := unsafe[key]; exists {
+			t.Fatalf("unsafe scalar %q projected: %#v", key, unsafe[key])
+		}
+	}
 }
 
 func TestOptionsAssessmentPolicyRouteSerializesPolicyOnlyAndFailsClosed(t *testing.T) {
@@ -84,6 +129,9 @@ func TestStandaloneUnavailableOmitsUnrecognizedValidationStages(t *testing.T) {
 	result := standaloneUnavailable("response_validation", "private-upstream-value")
 	if _, exists := result["validation_stage"]; exists {
 		t.Fatalf("unallowlisted stage leaked: %#v", result["validation_stage"])
+	}
+	if result := standaloneUnavailable("response_validation", "market_data.source_quote_times"); result["validation_stage"] != "market_data.source_quote_times" {
+		t.Fatalf("new safe quote timestamp stage omitted: %#v", result)
 	}
 }
 func TestStandaloneHTTPControllerReadOnlyValidationAndFeedback(t *testing.T) {

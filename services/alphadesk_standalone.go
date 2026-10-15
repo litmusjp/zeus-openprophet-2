@@ -71,6 +71,9 @@ func (p *StandaloneTradeProposal) UnmarshalJSON(data []byte) error {
 }
 
 var standaloneOCC = regexp.MustCompile(`^[A-Z0-9]{1,6}[0-9]{6}[CP][0-9]{8}$`)
+var standaloneAssessmentUUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+const standaloneAssessorClockAllowance = 250 * time.Millisecond
 
 func (p StandaloneTradeProposal) Validate() error {
 	price, err := decimal.NewFromString(string(p.LimitPrice))
@@ -204,15 +207,17 @@ func sameStandaloneTrade(a, b StandaloneTradeProposal) bool {
 // a broker or modify ACCOUNT_VERIFIED execution, accounts or approval storage.
 func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal StandaloneTradeProposal) (map[string]any, error) {
 	validationStage := "response_read"
+	var providerDecision, assessmentID, timestampRejection, providerObservedAt, consumerCheckedAt string
+	var clockDeltaMillis *int64
 	unavailable := func(category string) (map[string]any, error) {
 		stage := ""
 		if category == "response_validation" {
 			stage = validationStage
 		}
-		return nil, &AlphaDeskUnavailableError{Reason: "Standalone AlphaDesk assessment is unavailable; do not execute this proposal", Category: category, Stage: stage}
+		return nil, &AlphaDeskUnavailableError{Reason: "Standalone AlphaDesk assessment is unavailable; do not execute this proposal", Category: category, Stage: stage, ProviderDecision: providerDecision, AssessmentID: assessmentID, TimestampRejection: timestampRejection, ProviderObservedAt: providerObservedAt, ConsumerCheckedAt: consumerCheckedAt, ClockDeltaMillis: clockDeltaMillis}
 	}
 	rejectField := func(field string) (map[string]any, error) {
-		return nil, &AlphaDeskUnavailableError{Reason: "Standalone AlphaDesk assessment is unavailable; do not execute this proposal", Category: "response_validation", Stage: field}
+		return nil, &AlphaDeskUnavailableError{Reason: "Standalone AlphaDesk assessment is unavailable; do not execute this proposal", Category: "response_validation", Stage: field, ProviderDecision: providerDecision, AssessmentID: assessmentID, TimestampRejection: timestampRejection, ProviderObservedAt: providerObservedAt, ConsumerCheckedAt: consumerCheckedAt, ClockDeltaMillis: clockDeltaMillis}
 	}
 	if err := proposal.Validate(); err != nil {
 		return nil, err
@@ -276,6 +281,7 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 	if !ok || (decision != "PASS" && decision != "FAIL" && decision != "UNAVAILABLE") {
 		return unavailable("response_validation")
 	}
+	providerDecision = decision
 	authority, ok := result["execution_allowed"].(bool)
 	if !ok || authority {
 		return rejectField("execution_allowed")
@@ -310,17 +316,37 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 		}
 		if value, ok := result["assessment_id"].(string); !ok || value == "" {
 			return rejectField("assessment_id")
+		} else if standaloneAssessmentUUID.MatchString(value) {
+			assessmentID = strings.ToLower(value)
 		}
 		if value, ok := result["policy_version"].(string); !ok || value == "" {
 			return rejectField("policy_version")
 		}
 		validationStage = "observed_at"
+		current := time.Now()
+		if c.Now != nil {
+			current = c.Now()
+		}
+		consumerCheckedAt = current.UTC().Format(time.RFC3339Nano)
 		observedText, ok := result["observed_at"].(string)
 		if !ok {
+			if _, exists := result["observed_at"]; exists {
+				timestampRejection = "type"
+			} else {
+				timestampRejection = "missing"
+			}
 			return rejectField("observed_at")
 		}
 		observed, parseErr := time.Parse(time.RFC3339Nano, observedText)
 		if parseErr != nil {
+			timestampRejection = "format"
+			return rejectField("observed_at")
+		}
+		providerObservedAt = observed.UTC().Format(time.RFC3339Nano)
+		if observed.After(current.Add(standaloneAssessorClockAllowance)) {
+			timestampRejection = "future"
+			delta := int64(observed.Sub(current) / time.Millisecond)
+			clockDeltaMillis = &delta
 			return rejectField("observed_at")
 		}
 		validationStage = "evidence_observed_at"
@@ -329,7 +355,7 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 			return rejectField("evidence_observed_at")
 		}
 		evidenceAt, parseErr := time.Parse(time.RFC3339Nano, evidenceText)
-		if parseErr != nil || evidenceAt.After(observed) {
+		if parseErr != nil || evidenceAt.After(observed) || evidenceAt.After(current) {
 			return rejectField("evidence_observed_at")
 		}
 		validationStage = "market_data"
@@ -345,6 +371,23 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 		}
 		if market["quality"] != "testing_only" {
 			return rejectField("market_data.quality")
+		}
+		if rawQuoteTimes, present := market["source_quote_times"]; present {
+			validationStage = "market_data.source_quote_times"
+			quoteTimes, ok := rawQuoteTimes.(map[string]any)
+			if !ok {
+				return rejectField("market_data.source_quote_times")
+			}
+			for _, rawQuoteTime := range quoteTimes {
+				quoteText, ok := rawQuoteTime.(string)
+				if !ok {
+					return rejectField("market_data.source_quote_times")
+				}
+				quoteAt, quoteErr := time.Parse(time.RFC3339Nano, quoteText)
+				if quoteErr != nil || quoteAt.After(observed) || quoteAt.After(current) {
+					return rejectField("market_data.source_quote_times")
+				}
+			}
 		}
 		rawGreekTime, timePresent := market["greeks_calculated_at"]
 		rawGreekSource, sourcePresent := market["greeks_calculation_provenance"]
@@ -367,7 +410,7 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 			}
 		} else {
 			calculatedAt, greekErr := time.Parse(time.RFC3339Nano, greekTime)
-			if greekErr != nil || calculatedAt.After(observed) {
+			if greekErr != nil || calculatedAt.After(observed) || calculatedAt.After(current) {
 				return rejectField("market_data.greeks_calculated_at")
 			}
 			if !hasGreekSource || strings.TrimSpace(greekSource) == "" {
@@ -389,14 +432,6 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 		if parseErr != nil || !asOf.Equal(evidenceAt) {
 			return rejectField("evidence_as_of")
 		}
-		current := time.Now()
-		if c.Now != nil {
-			current = c.Now()
-		}
-		if observed.After(current) {
-			return rejectField("observed_at")
-		}
-
 		validationStage = "signal_score"
 		if _, numeric := result["signal_score"].(json.Number); !numeric {
 			return rejectField("signal_score")

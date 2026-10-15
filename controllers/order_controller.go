@@ -759,6 +759,30 @@ func attachAssessmentError(result *interfaces.OrderResult, err error) {
 	} else {
 		result.AssessmentReason = "AlphaDesk evidence is unavailable; re-assess after addressing the reported evidence stage"
 	}
+	if !explicitDecision && assessmentErr.ProviderDecision != "" {
+		switch assessmentErr.ProviderDecision {
+		case "PASS", "FAIL", "UNAVAILABLE":
+			result.AssessmentReason += "; provider-reported decision " + assessmentErr.ProviderDecision + " is unvalidated"
+		}
+	}
+	if assessmentErr.TimestampRejection != "" {
+		switch assessmentErr.TimestampRejection {
+		case "missing", "type", "format", "future":
+			result.AssessmentReason += "; observed_at rejected as " + assessmentErr.TimestampRejection
+		}
+	}
+	if assessmentErr.ClockDeltaMillis != nil && *assessmentErr.ClockDeltaMillis >= 0 && *assessmentErr.ClockDeltaMillis <= 60000 {
+		result.AssessmentReason += fmt.Sprintf(" (provider timestamp is %d ms ahead of consumer check)", *assessmentErr.ClockDeltaMillis)
+	}
+	if assessmentErr.AssessmentID != "" && standaloneUUID.MatchString(assessmentErr.AssessmentID) {
+		result.AssessmentReason += "; provider-reported assessment ID " + assessmentErr.AssessmentID + " is unvalidated"
+	}
+	if value := safeStandaloneTimestamp(assessmentErr.ProviderObservedAt); value != "" {
+		result.AssessmentReason += "; provider observed_at " + value
+	}
+	if value := safeStandaloneTimestamp(assessmentErr.ConsumerCheckedAt); value != "" {
+		result.AssessmentReason += "; consumer checked_at " + value
+	}
 }
 func safeAssessmentCategory(value string) string {
 	switch value {
@@ -769,7 +793,7 @@ func safeAssessmentCategory(value string) string {
 }
 func safeAssessmentStage(value string) string {
 	switch value {
-	case "decision", "response_read", "observed_at", "evidence_observed_at", "expires_at", "policy_version", "trade_fingerprint", "checks", "market_data", "signal_score", "policy_snapshot", "trade_echo":
+	case "decision", "response_read", "observed_at", "evidence_observed_at", "expires_at", "policy_version", "trade_fingerprint", "checks", "market_data", "market_data.source_quote_times", "signal_score", "policy_snapshot", "trade_echo":
 		return value
 	}
 	return "assessment"

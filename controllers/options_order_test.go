@@ -121,6 +121,7 @@ func TestOptionsOrderHTTPPreservesAssessmentOutcomeDiagnostics(t *testing.T) {
 	}{
 		{name: "AlphaDesk FAIL", decision: "FAIL", category: "assessment_rejected", stage: "decision", err: &services.AlphaDeskUnavailableError{Reason: "AlphaDesk assessment returned FAIL", Decision: "FAIL", Category: "assessment_rejected", Stage: "decision"}, recordPass: true, status: http.StatusBadGateway},
 		{name: "evidence unavailable", decision: "UNAVAILABLE", category: "response_validation", stage: "expires_at", err: &services.AlphaDeskUnavailableError{Reason: "Standalone evidence is unavailable", Decision: "UNAVAILABLE", Category: "response_validation", Stage: "expires_at"}, recordPass: true, status: http.StatusBadGateway},
+		{name: "receipt clock rejection diagnostics", decision: "UNAVAILABLE", category: "response_validation", stage: "observed_at", err: &services.AlphaDeskUnavailableError{Reason: "private body and token", Category: "response_validation", Stage: "observed_at", ProviderDecision: "PASS", AssessmentID: "888c17f7-e4af-408f-a8bb-50109488f262", TimestampRejection: "future", ProviderObservedAt: "2026-10-06T15:00:00Z", ConsumerCheckedAt: "2026-10-06T14:59:59.998Z", ClockDeltaMillis: func() *int64 { value := int64(2); return &value }()}, status: http.StatusBadGateway},
 		{name: "validated PASS then session block", decision: "PASS", category: "execution_blocked", stage: "market_session", recordPass: true, err: &services.MarketClosedError{}, status: http.StatusAccepted},
 		{name: "validated PASS then evidence deadline block", decision: "PASS", category: "execution_blocked", stage: "evidence_observed_at", recordPass: true, err: &services.PreSubmissionRejectionError{Err: &services.AlphaDeskUnavailableError{Reason: "OP2 market evidence deadline expired", Category: "response_validation", Stage: "evidence_observed_at"}}, status: http.StatusConflict},
 		{name: "validated PASS then context cancellation", decision: "PASS", category: "execution_blocked", stage: "submission_boundary", recordPass: true, err: &services.PreSubmissionRejectionError{Err: context.Canceled}, status: http.StatusConflict},
@@ -164,6 +165,17 @@ func TestOptionsOrderHTTPPreservesAssessmentOutcomeDiagnostics(t *testing.T) {
 			}
 			if tc.name == "AlphaDesk FAIL" && !strings.Contains(body["assessment_reason"].(string), "re-assess") {
 				t.Fatalf("FAIL response lacks actionable safe remediation: %#v", body)
+			}
+			if tc.name == "receipt clock rejection diagnostics" {
+				reason := body["assessment_reason"].(string)
+				for _, safe := range []string{"provider-reported decision PASS is unvalidated", "provider-reported assessment ID 888c17f7-e4af-408f-a8bb-50109488f262 is unvalidated", "observed_at rejected as future", "2 ms ahead", "2026-10-06T15:00:00Z", "2026-10-06T14:59:59.998Z"} {
+					if !strings.Contains(reason, safe) {
+						t.Fatalf("opening projection missing %q: %s", safe, reason)
+					}
+				}
+				if strings.Contains(reason, "private body") || body["assessment_decision"] == "PASS" {
+					t.Fatalf("opening projection leaked or promoted provider data: %#v", body)
+				}
 			}
 			if strings.Contains(recorder.Body.String(), "private upstream") || strings.Contains(recorder.Body.String(), "fixture token") {
 				t.Fatalf("unsafe assessment details leaked: %s", recorder.Body.String())

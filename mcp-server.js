@@ -864,7 +864,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             client_order_id: {
               type: 'string',
-              description: 'Generate one stable client_order_id before assessment and use the same value as client_reference. After PASS, submit the unchanged proposal with this same ID; uncertain submission must never be blindly retried.',
+              description: 'Generate a stable client_order_id for every NEW intent before assessment and pass that exact value as client_reference. After PASS, submit the unchanged proposal with this same ID. Reuse it with immutable fields ONLY for an eligible persisted planned retry after reconciliation; uncertain submission must never be blindly retried.',
             },
             symbol: {
               type: 'string',

@@ -39,7 +39,7 @@ import { redactSecrets } from './redaction.js';
 import { formatSlackNotification } from './slack-format.js';
 import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, createBasicAuthMiddleware, resolveApiAuthToken } from './auth.js';
-import { excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
+import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
 import { affectedSandboxesForAgentModelChange, hasBusyAffectedSandbox, chatgptStatus, createChatGPTAuthFlow, createChatGPTModelCheck, disconnectChatGPT, nativeOpenCodeEnv, isChatGPTModelVerified, recordChatGPTModelCheck, getVerifiedChatGPTModels } from './chatgpt-oauth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -86,7 +86,8 @@ function getPersistedSandboxOrders(sandbox) {
              tenant_id AS TenantID, sandbox_id AS SandboxID,
              symbol AS Symbol, qty AS Qty, side AS Side, type AS Type,
              status AS Status, filled_qty AS FilledQty, filled_avg_price AS FilledAvgPrice,
-             submitted_at AS SubmittedAt, filled_at AS FilledAt, metadata AS Metadata
+             submitted_at AS SubmittedAt, filled_at AS FilledAt, purpose AS Purpose,
+             metadata AS Metadata
       FROM orders ORDER BY submitted_at ASC
     `).all();
   } catch (err) {
@@ -1934,6 +1935,7 @@ async function reconcileSandboxOrders(sandbox, account) {
     }
     const collisionCheck = excludeBrokerIdentityCollisions(rawBrokerOrders.map(normalizeBrokerOrder).filter(Boolean));
     const brokerOrders = collisionCheck.orders;
+    const entryAssessments = entryAssessmentsByBroker(localOrders, brokerOrders, { brokerAccountId: account.brokerAccountId, tenantId: account.id, sandboxId: sandbox.id });
     const merged = new Map();
     let unmatchedFilled = false;
     for (const order of brokerOrders) {
@@ -1956,7 +1958,13 @@ async function reconcileSandboxOrders(sandbox, account) {
       if (localKeys.some(key => collisionCheck.ambiguousKeys.has(key))) continue;
       const brokerOrder = matchBrokerOrder(order, brokerOrders);
       if (brokerOrder) {
-        merged.set(brokerOrder.ID || brokerOrder.ClientOrderID, { ...order, ...brokerOrder });
+        const entryAssessment = entryAssessments.get(brokerOrder);
+        merged.set(brokerOrder.ID || brokerOrder.ClientOrderID, {
+          ...order, ...brokerOrder,
+          BrokerAccountID: account.brokerAccountId, PaperLive: 'paper', TenantID: account.id, SandboxID: sandbox.id,
+          broker_identity_verified: true, provider_account_id: account.brokerAccountId, provider_paper: true,
+          ...(entryAssessment ? { entry_assessment: entryAssessment } : {}),
+        });
       } else if (Number(order.FilledQty || 0) > 0) {
         unmatchedFilled = true;
       } else if (order.ID || order.ClientOrderID) {

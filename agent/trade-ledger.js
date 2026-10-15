@@ -45,6 +45,17 @@ function isOption(symbol) {
     : /^[A-Z0-9.]{1,6}\d{6}[CP]\d{8}$/.test(canonicalSymbol(symbol));
 }
 
+function entryAssessment(order) {
+  const value = order?.entry_assessment;
+  if (order?.broker_identity_verified !== true || order?.Purpose !== 'entry' || !value || typeof value !== 'object') return null;
+  if (typeof value.assessmentId !== 'string' || !value.assessmentId || !['PASS', 'FAIL', 'UNAVAILABLE'].includes(value.decision)) return null;
+  const score = value.signalScore;
+  if (score !== null && (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100)) return null;
+  const safe = item => typeof item === 'string' && item.length <= 128 ? item : null;
+  return { assessmentId: value.assessmentId.slice(0, 128), decision: value.decision, signalScore: score,
+    scoreSource: safe(value.scoreType), scoreProfile: safe(value.scoreProfile), observedAt: safe(value.observedAt), effectiveExpiresAt: safe(value.effectiveExpiresAt) };
+}
+
 export function buildTradeLedger(orders = [], metadata = {}) {
   const unique = new Map();
   for (const order of orders.filter(isFilled)) {
@@ -93,6 +104,7 @@ export function buildTradeLedger(orders = [], metadata = {}) {
         timestamp: time,
         status: 'realized',
         assetType: multiplier === 100 ? 'option' : 'stock',
+        entryAssessment: lot.entryAssessment,
         ...metadata,
       });
       remaining -= quantity;
@@ -107,6 +119,7 @@ export function buildTradeLedger(orders = [], metadata = {}) {
         quantity: remaining,
         price,
         time,
+        entryAssessment: side === 'buy' ? entryAssessment(order) : null,
       });
     }
     lots.set(symbol, queue);

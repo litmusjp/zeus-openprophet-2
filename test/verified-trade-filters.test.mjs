@@ -4,11 +4,13 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const page = fs.readFileSync(new URL('../agent/public/index.html', import.meta.url), 'utf8');
-const filterStart = page.indexOf('function isBrokerConfirmedFill(order)');
+const filterStart = page.indexOf('function tradeAccountKey(item)');
 const filterEnd = page.indexOf('function selectedTradeAccounts()', filterStart);
 const loadStart = page.indexOf('async function loadVerifiedTrades()', filterEnd);
 const loadEnd = page.indexOf('const TOOL_REFERENCE', loadStart);
-const source = page.slice(filterStart, filterEnd) + page.slice(loadStart, loadEnd);
+const renderStart = page.indexOf('function renderVerifiedTradeFeed()');
+const renderEnd = page.indexOf('\nfunction selectedTradeAccounts()', renderStart);
+const source = page.slice(filterStart, filterEnd) + page.slice(loadStart, loadEnd) + page.slice(renderStart, renderEnd);
 const fill = (overrides = {}) => ({
   ID: 'o1', accountId: 'a1', accountName: 'Alpha', agentId: 'g1', agentName: 'Agent One',
   Symbol: 'AAPL', Status: 'filled', Side: 'buy', FilledQty: 2, FilledAvgPrice: 10,
@@ -74,10 +76,44 @@ function setup(orders = [], { trades = [], accounts = [], fetchImpl } = {}) {
     fmtPnl: value => value == null ? 'P/L pending' : `$${Number(value).toFixed(2)}`,
     clearTradeFeed() { const feed = document.getElementById('trades-feed'); feed.innerHTML = ''; feed.children = []; return feed; },
     renderTradeChart() {}, updateTradeChart() {}, fetch: fetchImpl || (async () => ({ ok: true, async json() { return {}; } })),
+    renderVerifiedTradeFilters() {}, filteredVerifiedOrders() { return this.verifiedOrders; },
+    isBrokerConfirmedFill(order) { return order.Status === 'filled' && Boolean(order.ID); },
+    tradeFillDate(order) { return new Date(order.FilledAt); },
   };
   vm.createContext(ctx); vm.runInContext(source, ctx);
   return { ctx, elements };
 }
+
+test('entry assessment detail is text-only, shows zero and historical N/A', () => {
+  const entry = fill({ ID: 'entry', ClientOrderID: 'entry', broker_identity_verified: true });
+  const exit = fill({ ID: 'exit', ClientOrderID: 'exit', Side: 'sell' });
+  const trade = { ID: 'exit', accountId: 'a1', entryOrderId: 'entry', entryAssessment: { assessmentId: '<img>', decision: 'PASS', signalScore: 0, scoreProfile: 'catalyst_momentum_v1', scoreSource: 'alphadesk_direct_market_data', observedAt: '2026-01-01T11:59:00Z' } };
+  const { ctx, elements } = setup([entry, exit], { trades: [trade] });
+  ctx.renderVerifiedTradeFeed();
+  const card = elements.get('trades-feed').children[1];
+  const context = card.children.find(child => child.className === 'trade-assessment-context');
+  assert.match(context.textContent, /score 0/);
+  assert.match(context.textContent, /<img>/);
+  assert.equal(context.innerHTML, '');
+  ctx.verifiedTrades = [];
+  ctx.renderVerifiedTradeFeed();
+  assert.match(elements.get('trades-feed').children[0].children.find(child => child.className === 'trade-assessment-context').textContent, /N\/A/);
+});
+
+test('exit matching multiple FIFO entry assessments never shows one entry as representative', () => {
+  const orders = [fill({ ID: 'entry-a', Side: 'buy' }), fill({ ID: 'entry-b', Side: 'buy' }), fill({ ID: 'exit-multi', Side: 'sell' })];
+  const assessment = assessmentId => ({ assessmentId, decision: 'PASS', signalScore: 80, scoreProfile: 'catalyst_momentum_v1', scoreSource: 'alphadesk_direct_market_data', observedAt: '2026-01-01T11:00:00Z' });
+  const trades = [
+    { ID: 'exit-multi', accountId: 'a1', entryOrderId: 'entry-a', entryAssessment: assessment('assessment-a') },
+    { ID: 'exit-multi', accountId: 'a1', entryOrderId: 'entry-b', entryAssessment: assessment('assessment-b') },
+  ];
+  const { ctx, elements } = setup(orders, { trades });
+  ctx.renderVerifiedTradeFeed();
+  const exitCard = elements.get('trades-feed').children[2];
+  const context = exitCard.children.find(child => child.className === 'trade-assessment-context');
+  assert.match(context.textContent, /N\/A/);
+  assert.doesNotMatch(context.textContent, /assessment-a|assessment-b|score 80/);
+});
 const idsOf = result => Array.from(result, order => order.ID);
 const group = (elements, id) => elements.get(id).inputs;
 const change = (root, input, checked) => { input.checked = checked; root.dispatch('change', input); };

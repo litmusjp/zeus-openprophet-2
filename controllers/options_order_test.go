@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -27,6 +29,7 @@ func TestOptionsOrderRequestHasNoClientAssessmentAuthorizationField(t *testing.T
 type plannedOptionsTradingService struct {
 	*reconciliationTradingService
 	nextOpen time.Time
+	calls    int
 }
 
 type optionsResultTradingService struct {
@@ -44,6 +47,228 @@ type recordingOptionsTradingService struct {
 	identity    *interfaces.OptionsOrder
 	result      *interfaces.OrderResult
 	auditCalled bool
+}
+
+type postMarkerAbortOptionsService struct {
+	*reconciliationTradingService
+	marker         func(string) error
+	finalAbort     error
+	brokerCallback func()
+}
+
+type failingRejectedOptionsStorage struct{ interfaces.StorageService }
+
+func (s *failingRejectedOptionsStorage) SaveOrder(order *interfaces.Order) error {
+	if order != nil && order.Status == "rejected_before_submission" {
+		return errors.New("simulated terminal persistence failure")
+	}
+	return s.StorageService.SaveOrder(order)
+}
+
+type diagnosticOptionsService struct {
+	*reconciliationTradingService
+	err        error
+	recordPass bool
+	audit      *interfaces.AlphaDeskAssessment
+}
+
+func (s *diagnosticOptionsService) PlaceOptionsOrder(_ context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
+	if s.recordPass {
+		if err := order.AssessmentAuditSink(s.audit); err != nil {
+			return nil, err
+		}
+	}
+	return nil, s.err
+}
+
+func TestOptionsOrderHTTPPreservesAssessmentOutcomeDiagnostics(t *testing.T) {
+	receipt, err := os.ReadFile("../services/testdata/op2-pass-receipt.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessmentTime := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(receipt) }))
+	defer fixture.Close()
+	alphaDesk := &services.AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: fixture.URL, APIKey: "offline-fixture", HTTP: fixture.Client(), Now: func() time.Time { return assessmentTime }}
+	clientReference := "op2-receipt-wire-format"
+	validated, err := alphaDesk.AssessOptionsTrade(context.Background(), services.StandaloneTradeProposal{Legs: []services.StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("1.84"), ClientReference: &clientReference})
+	if err != nil || validated["decision"] != "PASS" {
+		t.Fatalf("producer fixture validation failed: decision=%v err=%v", validated["decision"], err)
+	}
+	scoreNumber, ok := validated["signal_score"].(json.Number)
+	if !ok {
+		t.Fatalf("validated score type=%T", validated["signal_score"])
+	}
+	score, err := scoreNumber.Float64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, validated["observed_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, validated["expires_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit := &interfaces.AlphaDeskAssessment{Scope: "TRADE_ASSESSMENT", AssessmentID: validated["assessment_id"].(string), Decision: "PASS", Pass: true, SignalScore: &score,
+		Evidence: validated, ExpiresAt: expiresAt, ObservedAt: observedAt, ExecutionAllowed: false, HumanApprovalRequired: true}
+	for _, tc := range []struct {
+		name, decision, category, stage string
+		err                             error
+		recordPass                      bool
+		status                          int
+	}{
+		{name: "AlphaDesk FAIL", decision: "FAIL", category: "assessment_rejected", stage: "decision", err: &services.AlphaDeskUnavailableError{Reason: "AlphaDesk assessment returned FAIL", Decision: "FAIL", Category: "assessment_rejected", Stage: "decision"}, recordPass: true, status: http.StatusBadGateway},
+		{name: "evidence unavailable", decision: "UNAVAILABLE", category: "response_validation", stage: "expires_at", err: &services.AlphaDeskUnavailableError{Reason: "Standalone evidence is unavailable", Decision: "UNAVAILABLE", Category: "response_validation", Stage: "expires_at"}, recordPass: true, status: http.StatusBadGateway},
+		{name: "validated PASS then session block", decision: "PASS", category: "execution_blocked", stage: "market_session", recordPass: true, err: &services.MarketClosedError{}, status: http.StatusAccepted},
+		{name: "validated PASS then evidence deadline block", decision: "PASS", category: "execution_blocked", stage: "evidence_observed_at", recordPass: true, err: &services.PreSubmissionRejectionError{Err: &services.AlphaDeskUnavailableError{Reason: "OP2 market evidence deadline expired", Category: "response_validation", Stage: "evidence_observed_at"}}, status: http.StatusConflict},
+		{name: "validated PASS then context cancellation", decision: "PASS", category: "execution_blocked", stage: "submission_boundary", recordPass: true, err: &services.PreSubmissionRejectionError{Err: context.Canceled}, status: http.StatusConflict},
+		{name: "validated PASS then policy lookup failure", decision: "PASS", category: "execution_blocked", stage: "policy_version", recordPass: true, err: &services.PreSubmissionRejectionError{Err: &services.AlphaDeskUnavailableError{Reason: "policy unavailable", Category: "configuration", Stage: "policy_version"}}, status: http.StatusConflict},
+		{name: "PASS audit with broker uncertainty", decision: "PASS", category: "", stage: "", recordPass: true, err: &services.SubmissionUncertainError{Err: errors.New("stub broker timeout")}, status: http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "diagnostics.db")
+			storage, err := database.NewLocalStorage(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer storage.Close()
+			trading := &diagnosticOptionsService{reconciliationTradingService: &reconciliationTradingService{}, err: tc.err, recordPass: tc.recordPass, audit: audit}
+			controller := NewOrderController(trading, nil, storage)
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/api/options/order", bytes.NewBufferString(`{"client_order_id":"op2-receipt-wire-format","symbol":"AAPL261106C00200000","underlying":"AAPL","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":1.84}`))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			controller.PlaceOptionsOrder(ctx)
+			var body map[string]any
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			categoryMatches := body["assessment_category"] == tc.category
+			stageMatches := body["assessment_stage"] == tc.stage
+			if tc.category == "" {
+				categoryMatches = body["assessment_category"] == nil
+			}
+			if tc.stage == "" {
+				stageMatches = body["assessment_stage"] == nil
+			}
+			if recorder.Code != tc.status || body["assessment_decision"] != tc.decision || !categoryMatches || !stageMatches {
+				t.Fatalf("HTTP %d response %#v; want decision=%s category=%s stage=%s", recorder.Code, body, tc.decision, tc.category, tc.stage)
+			}
+			if tc.name == "validated PASS then evidence deadline block" && !strings.Contains(body["assessment_reason"].(string), "evidence deadline expired") {
+				t.Fatalf("evidence rejection reason=%v", body["assessment_reason"])
+			}
+			if tc.name == "validated PASS then policy lookup failure" && !strings.Contains(body["assessment_reason"].(string), "policy") {
+				t.Fatalf("policy rejection reason=%v", body["assessment_reason"])
+			}
+			if tc.name == "AlphaDesk FAIL" && !strings.Contains(body["assessment_reason"].(string), "re-assess") {
+				t.Fatalf("FAIL response lacks actionable safe remediation: %#v", body)
+			}
+			if strings.Contains(recorder.Body.String(), "private upstream") || strings.Contains(recorder.Body.String(), "fixture token") {
+				t.Fatalf("unsafe assessment details leaked: %s", recorder.Body.String())
+			}
+			reopened, err := database.NewLocalStorage(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := reopened.GetOrderByClientOrderID("op2-receipt-wire-format")
+			_ = reopened.Close()
+			if err != nil || saved == nil {
+				t.Fatalf("reopened controller order=%#v error=%v", saved, err)
+			}
+			if tc.recordPass && !strings.Contains(saved.Metadata, `"decision":"PASS"`) {
+				t.Fatalf("validated assessment audit missing after reopen: %s", saved.Metadata)
+			}
+		})
+	}
+}
+
+func (s *postMarkerAbortOptionsService) SetSubmissionMarker(marker func(string) error) {
+	s.marker = marker
+}
+
+func (s *postMarkerAbortOptionsService) PlaceOptionsOrder(_ context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
+	if err := s.marker(order.ClientOrderID); err != nil {
+		return nil, err
+	}
+	// This models a final local policy/context abort after durable marking and
+	// before the stubbed broker callback.
+	if s.finalAbort != nil {
+		return nil, s.finalAbort
+	}
+	if s.brokerCallback != nil {
+		s.brokerCallback()
+	}
+	return nil, errors.New("stub broker callback returned unexpectedly")
+}
+
+func TestPlaceOptionsOrderPostMarkerPreRPCAbortIsTerminalAndNotRisk(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "post-marker-abort.db")
+	storage, err := database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if storage != nil {
+			_ = storage.Close()
+		}
+	}()
+	brokerCalls := 0
+	trading := &postMarkerAbortOptionsService{reconciliationTradingService: &reconciliationTradingService{}, finalAbort: &services.PreSubmissionRejectionError{Err: context.Canceled}, brokerCallback: func() { brokerCalls++ }}
+	controller := NewOrderController(trading, nil, storage)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/options/order", bytes.NewBufferString(`{"client_order_id":"post-marker-abort","symbol":"TSLA251219C00400000","underlying":"TSLA","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":1.25}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	controller.PlaceOptionsOrder(ctx)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage = nil
+	storage, err = database.NewLocalStorage(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := storage.GetOrderByClientOrderID("post-marker-abort")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != "rejected_before_submission" || !saved.SubmissionAttempted {
+		t.Fatalf("saved post-marker abort = %#v, want durable terminal pre-RPC outcome with attempted bit retained", saved)
+	}
+	if brokerCalls != 0 || services.IsRiskRelevantLocalOrder(saved) {
+		t.Fatalf("broker calls=%d; risk relevant=%v, want zero calls and no broker risk", brokerCalls, services.IsRiskRelevantLocalOrder(saved))
+	}
+	reconciliation, err := storage.GetOrdersNeedingReconciliation()
+	if err != nil || len(reconciliation) != 0 {
+		t.Fatalf("reconciliation = %#v, %v; want no unresolved order", reconciliation, err)
+	}
+}
+
+func TestPlaceOptionsOrderPostMarkerRejectionPersistenceFailureStaysUncertain(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "post-marker-abort-failure.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	trading := &postMarkerAbortOptionsService{reconciliationTradingService: &reconciliationTradingService{}, finalAbort: &services.PreSubmissionRejectionError{Err: context.Canceled}}
+	controller := NewOrderController(trading, nil, &failingRejectedOptionsStorage{StorageService: storage})
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/options/order", bytes.NewBufferString(`{"client_order_id":"post-marker-abort-failure","symbol":"TSLA251219C00400000","underlying":"TSLA","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","limit_price":1.25}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	controller.PlaceOptionsOrder(ctx)
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	saved, err := storage.GetOrderByClientOrderID("post-marker-abort-failure")
+	if err != nil || saved == nil || saved.Status != "pending" || !saved.SubmissionAttempted {
+		t.Fatalf("durable marker after rejected-state persistence failure = %#v, %v; want unresolved attempted intent", saved, err)
+	}
 }
 
 func (s *recordingOptionsTradingService) PlaceOptionsOrder(_ context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
@@ -192,7 +417,36 @@ func TestPlaceOptionsOrderPassesStableIdentityFieldsAndAuditSinkToService(t *tes
 }
 
 func (s *plannedOptionsTradingService) PlaceOptionsOrder(context.Context, *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
+	s.calls++
 	return nil, &services.MarketClosedError{NextOpen: s.nextOpen}
+}
+
+func TestAttemptedPlannedOptionsIntentCannotBeReplayed(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "attempted-planned.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	eligible := time.Now().Add(-time.Minute)
+	expires := time.Now().Add(time.Hour)
+	order := &interfaces.Order{ClientOrderID: "attempted-planned", Symbol: "TSLA251219C00400000", Underlying: "TSLA", AssetClass: "us_option", Qty: 1, Side: "buy", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1.25), PositionIntent: "buy_to_open", Purpose: "entry", Status: "planned_for_next_session", SubmissionAttempted: true, NextEligibleAt: &eligible, ExpiresAt: &expires}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	trading := &plannedOptionsTradingService{reconciliationTradingService: &reconciliationTradingService{}, nextOpen: time.Now().Add(time.Hour)}
+	controller := NewOrderController(trading, nil, storage)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/options/order", bytes.NewBufferString(`{"client_order_id":"attempted-planned","symbol":"TSLA251219C00400000","underlying":"TSLA","qty":1,"side":"buy","position_intent":"buy_to_open","type":"limit","time_in_force":"day","limit_price":1.25}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	controller.PlaceOptionsOrder(ctx)
+	if recorder.Code != http.StatusConflict || trading.calls != 0 {
+		t.Fatalf("status=%d broker/service calls=%d body=%s; want replay fence before submission", recorder.Code, trading.calls, recorder.Body.String())
+	}
+	saved, err := storage.GetOrderByClientOrderID(order.ClientOrderID)
+	if err != nil || saved == nil || saved.Status != "planned_for_next_session" || !saved.SubmissionAttempted {
+		t.Fatalf("attempted planned intent after replay rejection = %#v, %v; want lifecycle/attempt bit preserved", saved, err)
+	}
 }
 
 func TestPlaceOptionsOrderPersistsPlannedIntentWhenMarketClosed(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
+	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
 )
@@ -1090,6 +1092,8 @@ func decimalPtr(value decimal.Decimal) *decimal.Decimal { return &value }
 
 func TestPlaceOptionsOrderUsesCurrentStandaloneThreshold25(t *testing.T) {
 	now := time.Now().UTC()
+	assessmentPosts := 0
+	assessmentReferences := []string{}
 	caseName := "pass"
 	alpha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -1101,6 +1105,12 @@ func TestPlaceOptionsOrderUsesCurrentStandaloneThreshold25(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&proposal); err != nil {
 			t.Errorf("decode proposal: %v", err)
 			return
+		}
+		assessmentPosts++
+		if proposal.ClientReference != nil {
+			assessmentReferences = append(assessmentReferences, *proposal.ClientReference)
+		} else {
+			assessmentReferences = append(assessmentReferences, "")
 		}
 		doc := standaloneFixtureReceiptAt(proposal, now, "25")
 		switch caseName {
@@ -1143,8 +1153,20 @@ func TestPlaceOptionsOrderUsesCurrentStandaloneThreshold25(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			caseName = tc.name
+			assessmentPosts = 0
+			assessmentReferences = nil
+			t.Setenv("ALPACA_ACCOUNT_ID", "paper-account")
+			t.Setenv("ALPACA_PAPER", "true")
+			t.Setenv("OPENPROPHET_TENANT_ID", "tenant")
+			t.Setenv("OPENPROPHET_SANDBOX_ID", "sandbox")
 			brokerCalls := 0
 			policy := &TradingPolicy{IsPaper: true, AllowPaperTrading: true, AllowOptions: true, MaxPositionPct: 100, MaxDeployedPct: 100, MaxOpenPositions: 10, MaxDailyLoss: 100}
+			dbPath := filepath.Join(t.TempDir(), "handoff.db")
+			storage, storageErr := database.NewLocalStorage(dbPath)
+			if storageErr != nil {
+				t.Fatal(storageErr)
+			}
+			defer storage.Close()
 			service := &AlpacaTradingService{
 				client:      alpaca.NewClient(alpaca.ClientOpts{APIKey: "fixture", APISecret: "fixture", BaseURL: broker.URL, HTTPClient: broker.Client()}),
 				clockReader: fakeMarketClock{clock: &alpaca.Clock{IsOpen: true}}, logger: logrus.New(), policy: policy,
@@ -1154,12 +1176,32 @@ func TestPlaceOptionsOrderUsesCurrentStandaloneThreshold25(t *testing.T) {
 					brokerCalls++
 					return &alpaca.Order{ID: "threshold-fixture", ClientOrderID: req.ClientOrderID, Status: "accepted", Qty: req.Qty, Symbol: req.Symbol, Side: req.Side, Type: req.Type, TimeInForce: req.TimeInForce, LimitPrice: req.LimitPrice, PositionIntent: req.PositionIntent}, nil
 				},
-				alphaDesk:        &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, ExecutionMode: "PAPER_ADVISORY_OP2", URL: alpha.URL, APIKey: "fixture", HTTP: alpha.Client(), Now: func() time.Time { return now }},
-				submissionMarker: func(string) error { return nil },
+				alphaDesk: &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, ExecutionMode: "PAPER_ADVISORY_OP2", URL: alpha.URL, APIKey: "fixture", HTTP: alpha.Client(), Now: func() time.Time { return now }},
+				submissionMarker: func(id string) error {
+					saved, err := storage.GetOrderByClientOrderID(id)
+					if err != nil || saved == nil {
+						return fmt.Errorf("load durable intent: %w", err)
+					}
+					saved.SubmissionAttempted = true
+					saved.Status = "submitting"
+					return storage.SaveOrder(saved)
+				},
 			}
 			service.SetManagedExecutionBlockCheck(func() bool { return false })
 			service.SetOpeningReservationLock(t.TempDir() + `\reservation.lock`)
 			order := readyAssessmentOrder(&interfaces.OptionsOrder{ClientOrderID: "threshold-" + tc.name, Symbol: "AAPL261106C00200000", Underlying: "AAPL", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(2)})
+			if tc.name == "pass" {
+				if err := storage.SaveOrder(&interfaces.Order{BrokerAccountID: "paper-account", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox", ClientOrderID: order.ClientOrderID, Symbol: order.Symbol, Qty: order.Qty, Side: order.Side, Type: order.Type, TimeInForce: order.TimeInForce, LimitPrice: order.LimitPrice, PositionIntent: order.PositionIntent, Purpose: "entry", Status: "pending"}); err != nil {
+					t.Fatal(err)
+				}
+				proposal, err := standaloneProposalForOrder(order)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := service.AssessOptionsTradeReadOnly(context.Background(), proposal); err != nil {
+					t.Fatalf("fixture assessment: %v", err)
+				}
+			}
 			order.AssessmentAuditSink = func(a *interfaces.AlphaDeskAssessment) error {
 				if tc.name == "pass" && (a.SignalScore == nil || *a.SignalScore != 33.27 || a.Threshold == nil || *a.Threshold != 25) {
 					t.Errorf("assessment score/threshold = %#v/%#v", a.SignalScore, a.Threshold)
@@ -1172,6 +1214,26 @@ func TestPlaceOptionsOrderUsesCurrentStandaloneThreshold25(t *testing.T) {
 			}
 			if brokerCalls != tc.wantBrokerCalls {
 				t.Fatalf("broker calls=%d, want %d (err=%v)", brokerCalls, tc.wantBrokerCalls, err)
+			}
+			if tc.name == "pass" {
+				if assessmentPosts != 1 {
+					t.Fatalf("assessment fixture calls=%d, want one cached receipt", assessmentPosts)
+				}
+				if len(assessmentReferences) != 1 || assessmentReferences[0] != order.ClientOrderID {
+					t.Fatalf("assessment client_reference=%v, want exact order ID %q", assessmentReferences, order.ClientOrderID)
+				}
+				if err := storage.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := database.NewLocalStorage(dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				saved, err := reopened.GetOrderByClientOrderID(order.ClientOrderID)
+				if err != nil || saved == nil || !saved.SubmissionAttempted {
+					t.Fatalf("reopened marker=%#v err=%v", saved, err)
+				}
 			}
 		})
 	}

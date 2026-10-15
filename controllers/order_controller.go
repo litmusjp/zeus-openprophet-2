@@ -300,6 +300,9 @@ func (oc *OrderController) prepareClientOrderID(ctx context.Context, clientOrder
 	if status != "planned_for_next_session" {
 		return fmt.Errorf("client order ID %q is not retryable after broker submission attempt; reconcile the existing identity instead", clientOrderID)
 	}
+	if existing.SubmissionAttempted {
+		return fmt.Errorf("client order ID %q retains a durable submission attempt; reconcile before retrying", clientOrderID)
+	}
 	if existing.ExpiresAt != nil && !existing.ExpiresAt.After(time.Now()) {
 		return fmt.Errorf("client order ID %q planned intent has expired", clientOrderID)
 	}
@@ -694,7 +697,82 @@ func (oc *OrderController) optionsResponseWithIdentity(intent *interfaces.Order,
 	if message != "" {
 		result.Message = message
 	}
+	if intent != nil && intent.Metadata != "" && len(intent.Metadata) <= 262144 {
+		var audit struct {
+			Scope                 string `json:"scope"`
+			AssessmentID          string `json:"assessment_id"`
+			Decision              string `json:"decision"`
+			Pass                  bool   `json:"pass"`
+			ExecutionAllowed      bool   `json:"execution_allowed"`
+			HumanApprovalRequired bool   `json:"human_approval_required"`
+		}
+		if json.Unmarshal([]byte(intent.Metadata), &audit) == nil && audit.Scope == "TRADE_ASSESSMENT" && audit.AssessmentID != "" && audit.Decision == "PASS" && audit.Pass && !audit.ExecutionAllowed && audit.HumanApprovalRequired {
+			result.AssessmentDecision = "PASS"
+		}
+	}
 	return result
+}
+
+func attachAssessmentError(result *interfaces.OrderResult, err error) {
+	var assessmentErr *services.AlphaDeskUnavailableError
+	hasAssessmentError := errors.As(err, &assessmentErr)
+	if result == nil {
+		return
+	}
+	explicitDecision := hasAssessmentError && (assessmentErr.Decision == "FAIL" || assessmentErr.Decision == "UNAVAILABLE")
+	if result.AssessmentDecision == "PASS" && !explicitDecision && services.IsPreSubmissionRejection(err) {
+		result.AssessmentCategory = "execution_blocked"
+		result.AssessmentStage, result.AssessmentReason = "submission_boundary", "Final OP2 checks blocked submission before the broker call"
+		if hasAssessmentError {
+			result.AssessmentStage = safeAssessmentStage(assessmentErr.Stage)
+			if assessmentErr.Stage == "evidence_observed_at" {
+				result.AssessmentReason = "OP2 market evidence deadline expired before submission"
+			} else if assessmentErr.Stage == "expires_at" {
+				result.AssessmentReason = "AlphaDesk assessment receipt expired before submission"
+			} else if assessmentErr.Category == "configuration" {
+				result.AssessmentReason = "Current AlphaDesk policy could not be verified before submission"
+			}
+		} else if errors.Is(err, context.Canceled) {
+			result.AssessmentStage, result.AssessmentReason = "submission_boundary", "Order context was canceled before the broker call"
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			result.AssessmentStage, result.AssessmentReason = "submission_boundary", "Order deadline expired before the broker call"
+		}
+		return
+	}
+	if result.AssessmentDecision == "PASS" && !explicitDecision {
+		// A prior validated PASS remains the assessment result. In particular,
+		// broker-call uncertainty is not an execution block or a new verdict.
+		return
+	}
+	if !hasAssessmentError {
+		return
+	}
+	decision := assessmentErr.Decision
+	if decision != "FAIL" && decision != "UNAVAILABLE" {
+		decision = "UNAVAILABLE"
+	}
+	result.AssessmentDecision = decision
+	result.AssessmentCategory = safeAssessmentCategory(assessmentErr.Category)
+	result.AssessmentStage = safeAssessmentStage(assessmentErr.Stage)
+	if decision == "FAIL" {
+		result.AssessmentReason = "AlphaDesk returned FAIL; re-assess this exact proposal to retrieve current checks and remediation"
+	} else {
+		result.AssessmentReason = "AlphaDesk evidence is unavailable; re-assess after addressing the reported evidence stage"
+	}
+}
+func safeAssessmentCategory(value string) string {
+	switch value {
+	case "assessment_rejected", "assessment_decision", "configuration", "response_validation", "transport_error", "deadline_exceeded", "upstream_service_error", "upstream_authentication":
+		return value
+	}
+	return "assessment_unavailable"
+}
+func safeAssessmentStage(value string) string {
+	switch value {
+	case "decision", "response_read", "observed_at", "evidence_observed_at", "expires_at", "policy_version", "trade_fingerprint", "checks", "market_data", "signal_score", "policy_snapshot", "trade_echo":
+		return value
+	}
+	return "assessment"
 }
 
 func (oc *OrderController) cancelOrder(orderID string) error {
@@ -1575,6 +1653,10 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			c.JSON(409, oc.optionsResponseWithIdentity(existing, nil, existing.Status, "client_order_id is not an unresolved planned intent; reconcile before any retry"))
 			return
 		}
+		if existing.SubmissionAttempted {
+			c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(existing, nil, existing.Status, "client_order_id retains a durable submission attempt; reconcile before retrying"))
+			return
+		}
 		if !plannedOptionsMatch(existing, req) {
 			c.JSON(409, oc.optionsResponseWithIdentity(existing, nil, "validation_error", "retry request does not match the persisted options intent"))
 			return
@@ -1692,6 +1774,11 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 				ClientOrderID:  clientOrderID,
 				NextEligibleAt: intent.NextEligibleAt,
 			}, intent.Status, err.Error())
+			if result.AssessmentDecision == "PASS" {
+				result.AssessmentCategory = "execution_blocked"
+				result.AssessmentStage = "market_session"
+				result.AssessmentReason = "Market session is closed"
+			}
 			c.JSON(202, result)
 			return
 		}
@@ -1709,6 +1796,18 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(intent, nil, intent.Status, err.Error()))
 			return
 		}
+		if services.IsPreSubmissionRejection(err) {
+			intent.Status = "rejected_before_submission"
+			if saveErr := oc.storageService.SaveOrder(intent); saveErr != nil {
+				oc.logger.WithError(saveErr).Warn("Failed to record pre-submission options rejection")
+				c.JSON(http.StatusBadGateway, oc.optionsResponseWithIdentity(intent, nil, "submission_uncertain", "pre-submission rejection was not durably recorded"))
+				return
+			}
+			response := oc.optionsResponseWithIdentity(intent, nil, "risk_blocked", err.Error())
+			attachAssessmentError(response, err)
+			c.JSON(http.StatusConflict, response)
+			return
+		}
 		intent.Status = "submit_failed"
 		if services.IsSubmissionUncertain(err) {
 			intent.Status = "submission_uncertain"
@@ -1717,13 +1816,9 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			oc.logger.WithError(saveErr).Warn("Failed to record options order submission failure")
 		}
 		oc.logger.WithError(err).Error("Failed to place options order")
-		if services.IsPreSubmissionRejection(err) {
-			intent.Status = "rejected_before_submission"
-			_ = oc.storageService.SaveOrder(intent)
-			c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(intent, nil, "risk_blocked", err.Error()))
-			return
-		}
-		c.JSON(502, oc.optionsResponseWithIdentity(intent, nil, intent.Status, err.Error()))
+		response := oc.optionsResponseWithIdentity(intent, nil, intent.Status, err.Error())
+		attachAssessmentError(response, err)
+		c.JSON(502, response)
 		return
 	}
 	if result == nil {

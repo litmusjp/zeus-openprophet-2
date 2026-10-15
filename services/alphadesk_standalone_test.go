@@ -15,6 +15,7 @@ import (
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/shopspring/decimal"
+	"prophet-trader/models"
 )
 
 func standaloneFixturePolicyAt(minimum string) (map[string]any, string) {
@@ -105,6 +106,43 @@ func TestStandaloneConsumerAcceptsProducerGeneratedFastAPIReceipt(t *testing.T) 
 	}
 	if result["decision"] != "PASS" || result["execution_allowed"] != false {
 		t.Fatalf("unexpected producer receipt result: %#v", result)
+	}
+}
+
+func TestStandaloneAssessmentExposesOriginalAndOP2EffectiveExpiry(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	proposal := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("2")}
+	assessmentCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assessmentCalls++
+		doc := standaloneFixtureReceiptAt(proposal, now, "65")
+		snapshot := doc["policy_snapshot"].(map[string]any)
+		snapshot["execution_max_quote_age_seconds"] = 300
+		bound := map[string]any{"workspace_policy": snapshot, "profile": "paper_advisory_greeks_v1", "paper_only": true, "require_greek_values": true, "unknown_greek_calculation_time": "warning"}
+		raw, _ := json.Marshal(bound)
+		digest := sha256.Sum256(raw)
+		version := "standalone-paper-advisory-v1:" + hex.EncodeToString(digest[:])
+		doc["policy_version"] = version
+		doc["evidence_observed_at"] = now.Add(-10 * time.Second)
+		doc["evidence_as_of"] = now.Add(-10 * time.Second)
+		doc["expires_at"] = now.Add(240 * time.Second)
+		_ = json.NewEncoder(w).Encode(doc)
+	}))
+	defer server.Close()
+	client := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture", HTTP: server.Client(), Now: func() time.Time { return now }}
+	identity := models.DurableIdentity{BrokerAccountID: "paper-account", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
+	result, err := client.cachedStandalone(context.Background(), identity, proposal, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := time.Parse(time.RFC3339Nano, result["expires_at"].(string))
+	effectiveRaw, ok := result["op2_effective_expires_at"].(string)
+	if !ok {
+		t.Fatalf("OP2 effective expiry missing from assessment: %#v", result)
+	}
+	effective, err := time.Parse(time.RFC3339Nano, effectiveRaw)
+	if err != nil || !original.Equal(now.Add(240*time.Second)) || !effective.Equal(now.Add(110*time.Second)) || assessmentCalls != 1 {
+		t.Fatalf("original=%v effective=%v parseErr=%v calls=%d; want untouched AD expiry and 120s evidence deadline", original, effective, err, assessmentCalls)
 	}
 }
 

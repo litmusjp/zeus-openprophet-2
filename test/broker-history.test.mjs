@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import test from 'node:test';
-import { excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from '../agent/broker-history.js';
+import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from '../agent/broker-history.js';
 
 const account = { paper: true, publicKey: 'paper-key', secretKey: 'paper-secret', brokerAccountId: 'paper-2' };
 
@@ -77,6 +77,23 @@ test('matches local orders by either identity and rejects ambiguous collisions',
   const second = normalizeBrokerOrder({ id: 'broker-2', client_order_id: 'client-2' });
   assert.equal(matchBrokerOrder({ ID: 'local-id', ClientOrderID: 'client-2' }, [first, second]), second);
   assert.equal(matchBrokerOrder({ ID: 'broker-1', ClientOrderID: 'client-2' }, [first, second]), null);
+});
+
+test('entry assessment joins only one exact identity-scoped entry order and keeps score zero', () => {
+  const identity = { brokerAccountId: 'acct', tenantId: 'tenant', sandboxId: 'sandbox' };
+  const broker = normalizeBrokerOrder({ id: 'broker-entry', client_order_id: 'entry-client' });
+  const metadata = JSON.stringify({ assessment_id: 'assessment-1', decision: 'PASS', signal_score: 0, observed_at: '2026-09-18T12:59:00Z', evidence: { score_profile: 'catalyst_momentum_v1', score_source: 'alphadesk_direct_market_data' } });
+  const entry = { ID: 'broker-entry', ClientOrderID: 'entry-client', Purpose: 'entry', BrokerAccountID: 'acct', PaperLive: 'paper', TenantID: 'tenant', SandboxID: 'sandbox', Metadata: metadata };
+  const joined = entryAssessmentsByBroker([entry], [broker], identity);
+  assert.equal(joined.get(broker).signalScore, 0);
+  assert.equal(joined.get(broker).assessmentId, 'assessment-1');
+  assert.equal(entryAssessmentsByBroker([{ ...entry, TenantID: 'other' }], [broker], identity).size, 0);
+  assert.equal(entryAssessmentsByBroker([{ ...entry, Purpose: 'close' }], [broker], identity).size, 0);
+  assert.equal(entryAssessmentsByBroker([entry, { ...entry }], [broker], identity).size, 0);
+  assert.equal(entryAssessmentsByBroker([entry, { ...entry, Metadata: '{bad' }], [broker], identity).size, 0);
+  assert.equal(entryAssessmentsByBroker([{ ...entry, ID: 'wrong-broker-id' }], [broker], identity).size, 0);
+  assert.equal(entryAssessmentsByBroker([{ ...entry, ClientOrderID: 'wrong-client-id' }], [broker], identity).size, 0);
+  assert.equal(entryAssessmentsByBroker([{ ...entry, id: 'wrong-alias-id' }], [broker], identity).size, 0);
 });
 
 test('excludes broker identity collisions instead of overwriting records', () => {

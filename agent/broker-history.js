@@ -39,6 +39,54 @@ export function matchBrokerOrder(localOrder, brokerOrders = []) {
   return candidates.size === 1 ? [...candidates][0] : null;
 }
 
+function boundedAssessment(order) {
+  if (order?.Purpose !== 'entry' || order?.PaperLive !== 'paper' || !order?.BrokerAccountID || !order?.TenantID || !order?.SandboxID) return null;
+  const raw = order.Metadata ?? order.metadata;
+  if (typeof raw !== 'string' || raw.length > 65536) return null;
+  let doc;
+  try { doc = JSON.parse(raw); } catch { return null; }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || typeof doc.assessment_id !== 'string' || !doc.assessment_id || !['PASS','FAIL','UNAVAILABLE'].includes(doc.decision)) return null;
+  const score = doc.signal_score;
+  if (score !== undefined && (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100)) return null;
+  const evidence = doc.evidence && typeof doc.evidence === 'object' && !Array.isArray(doc.evidence) ? doc.evidence : {};
+  const safeText = value => typeof value === 'string' && value.length <= 128 ? value : null;
+  return {
+    assessmentId: doc.assessment_id.slice(0, 128), decision: doc.decision,
+    signalScore: score === undefined ? null : score,
+    scoreProfile: safeText(evidence.score_profile), scoreType: safeText(evidence.score_source),
+    observedAt: safeText(doc.observed_at), effectiveExpiresAt: safeText(doc.op2_effective_expires_at),
+  };
+}
+
+// Attach context only when one identity-scoped local entry row uniquely maps
+// to one already-verified broker order. A broker collision is never resolved here.
+export function entryAssessmentsByBroker(localOrders = [], brokerOrders = [], identity = {}) {
+  const exactBrokerMatch = local => {
+    const broker = matchBrokerOrder(local, brokerOrders);
+    if (!broker) return null;
+    const orderIds = [local?.ID, local?.id].map(value => String(value || '').trim()).filter(Boolean);
+    const clientOrderIds = [local?.ClientOrderID, local?.client_order_id].map(value => String(value || '').trim()).filter(Boolean);
+    if (orderIds.some(value => String(broker.ID || '').trim() !== value)) return null;
+    if (clientOrderIds.some(value => String(broker.ClientOrderID || '').trim() !== value)) return null;
+    return broker;
+  };
+  const candidates = new Map();
+  for (const local of localOrders) {
+    if (local?.Purpose !== 'entry' || local?.BrokerAccountID !== identity.brokerAccountId || local?.PaperLive !== 'paper' || local?.TenantID !== identity.tenantId || local?.SandboxID !== identity.sandboxId) continue;
+    const broker = exactBrokerMatch(local);
+    if (!broker) continue;
+    candidates.set(broker, (candidates.get(broker) || 0) + 1);
+  }
+  const output = new Map();
+  for (const local of localOrders) {
+    if (local?.Purpose !== 'entry' || local?.BrokerAccountID !== identity.brokerAccountId || local?.PaperLive !== 'paper' || local?.TenantID !== identity.tenantId || local?.SandboxID !== identity.sandboxId) continue;
+    const assessment = boundedAssessment(local);
+    const broker = assessment && exactBrokerMatch(local);
+    if (assessment && broker && candidates.get(broker) === 1) output.set(broker, assessment);
+  }
+  return output;
+}
+
 // A broker identity is ambiguous if one broker ID or client-order ID points
 // at more than one order. Keep the entire identity out of the verified view;
 // never let insertion order decide which record wins.

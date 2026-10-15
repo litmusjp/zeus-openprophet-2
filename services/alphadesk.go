@@ -105,6 +105,7 @@ type AlphaDeskUnavailableError struct {
 	Err      error
 	Category string
 	Stage    string
+	Decision string
 }
 
 type AlphaDeskConfigurationError struct{ Reason string }

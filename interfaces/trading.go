@@ -139,6 +139,10 @@ type OrderResult struct {
 	ExecutionConfirmed bool       `json:"execution_confirmed"`
 	FullyFilled        bool       `json:"fully_filled"`
 	NextEligibleAt     *time.Time `json:"next_eligible_at,omitempty"`
+	AssessmentDecision string     `json:"assessment_decision,omitempty"`
+	AssessmentCategory string     `json:"assessment_category,omitempty"`
+	AssessmentStage    string     `json:"assessment_stage,omitempty"`
+	AssessmentReason   string     `json:"assessment_reason,omitempty"`
 }
 
 type Position struct {
@@ -274,6 +278,7 @@ type AlphaDeskAssessment struct {
 	Policy                       any                           `json:"policy,omitempty"`
 	Evidence                     any                           `json:"evidence,omitempty"`
 	ExpiresAt                    time.Time                     `json:"expires_at"`
+	OP2EffectiveExpiresAt        time.Time                     `json:"op2_effective_expires_at,omitempty"`
 	Fingerprint                  string                        `json:"trade_fingerprint"`
 	HumanApprovalRequired        bool                          `json:"human_approval_required"`
 	ExecutionAllowed             bool                          `json:"execution_allowed"`

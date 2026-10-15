@@ -864,7 +864,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             client_order_id: {
               type: 'string',
-              description: 'Generate a stable client_order_id for every NEW intent. Reuse it with immutable fields ONLY for an eligible persisted planned retry after reconciliation; uncertain submission must never be blindly retried.',
+              description: 'Generate one stable client_order_id before assessment and use the same value as client_reference. After PASS, submit the unchanged proposal with this same ID; uncertain submission must never be blindly retried.',
             },
             symbol: {
               type: 'string',
@@ -939,7 +939,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'assess_options_trade',
-        description: 'Assess your exact proposed options trade using standalone AlphaDesk market evidence, without a scanner/watchlist or caller-supplied score. Returns PASS/FAIL/UNAVAILABLE, score, criteria and remediation. PASS is not broker/account authorization; on FAIL or UNAVAILABLE skip this proposal and continue other work. No orders or approvals.',
+        description: 'Assess your exact proposed options trade using standalone AlphaDesk market evidence, without a scanner/watchlist or caller-supplied score. Generate one stable client_order_id before assessment and pass the same stable client_order_id as optional client_reference; after PASS reuse it for the unchanged order proposal. Returns PASS/FAIL/UNAVAILABLE, score, criteria and remediation. PASS is not broker/account authorization; on FAIL or UNAVAILABLE skip this proposal and continue other work. No orders or approvals.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object', additionalProperties: false,
@@ -951,7 +951,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               required:['symbol','side'] } },
             quantity: {type:'integer',minimum:1,maximum:10},
             limit_price: {type:'number',exclusiveMinimum:0},
-            client_reference: {type:'string',maxLength:128},
+            client_reference: {type:'string',maxLength:128,description:'Optional stable client_order_id for the exact later order; reuse the same value when submitting unchanged legs, quantity and limit price.'},
           }, required: ['legs','quantity','limit_price'],
         },
       },

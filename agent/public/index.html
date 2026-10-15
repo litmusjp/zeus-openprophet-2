@@ -2277,12 +2277,21 @@ function renderVerifiedTradeFeed() {
   if (!allFilled.length) { feed.innerHTML = verifiedReconciliationComplete ? '<div class="no-data">No verified fills.</div>' : '<div class="no-data">Verified ledger unavailable or incomplete; complete account data is shown only when available.</div>'; return; }
   if (!matching.length) { feed.innerHTML='<div class="no-data">No verified fills match these filters.</div>'; return; }
   const realizedByOrder = new Map();
-  verifiedTrades.forEach(t => realizedByOrder.set(tradeOrderKey(t), t));
+  const realizedEntriesByOrder = new Map();
+  verifiedTrades.forEach(t => {
+    const key = tradeOrderKey(t);
+    realizedByOrder.set(key, t);
+    if (!realizedEntriesByOrder.has(key)) realizedEntriesByOrder.set(key, []);
+    realizedEntriesByOrder.get(key).push(t);
+  });
   matching.slice(0, verifiedTradeFilterState.pageSize).forEach(order => {
     const side = String(order.Side || order.side || '').toLowerCase();
     const price = Number(order.FilledAvgPrice ?? order.filledAvgPrice);
     const quantity = Number(order.FilledQty ?? order.filledQty);
     const trade = realizedByOrder.get(tradeOrderKey(order));
+    const realizedForOrder = realizedEntriesByOrder.get(tradeOrderKey(order)) || [];
+    const entryAssessment = realizedForOrder.length === 1 && realizedForOrder[0].entryOrderId
+      ? realizedForOrder[0].entryAssessment : null;
     const card = document.createElement('div');
     card.className = 'trade-card';
     const header = document.createElement('div'); header.className = 'trade-header';
@@ -2291,8 +2300,13 @@ function renderVerifiedTradeFeed() {
     header.append(symbol, sideEl); card.appendChild(header);
     const details = document.createElement('div'); details.className = 'trade-details';
     details.textContent = `${order.accountName || 'Unknown account'} / ${order.agentName || 'Unassigned'} | ${quantity || '?'} @ ${Number.isFinite(price) ? '$' + price.toFixed(2) : 'price pending'} | ${trade ? fmtPnl(trade.pnl) : 'P/L pending'}`;
+    const context = document.createElement('div'); context.className = 'trade-assessment-context';
+    const assessment = entryAssessment;
+    const score = assessment && typeof assessment.signalScore === 'number' && Number.isFinite(assessment.signalScore) ? assessment.signalScore : 'N/A';
+    const contextValue = assessment ? `assessment ${assessment.assessmentId || 'N/A'} | ${assessment.decision || 'N/A'} | score ${score} (${assessment.scoreProfile || 'profile N/A'}; ${assessment.scoreSource || 'type N/A'}) | observed ${assessment.observedAt || 'N/A'}${assessment.effectiveExpiresAt ? ` | OP2 deadline ${assessment.effectiveExpiresAt}` : ''}` : (realizedForOrder.length > 1 ? 'multiple entry lots; N/A' : 'N/A');
+    context.textContent = `AlphaDesk entry catalyst/momentum context (not a trade quality grade): ${contextValue}`;
     const stamp = document.createElement('div'); stamp.className = 'trade-time'; stamp.textContent = tradeFillDate(order) ? tradeFillDate(order).toLocaleString() : 'Fill date unknown';
-    card.append(details, stamp); feed.appendChild(card);
+    card.append(details, context, stamp); feed.appendChild(card);
   });
 }
 

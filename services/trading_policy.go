@@ -45,10 +45,10 @@ func IsRiskRelevantLocalOrder(order *interfaces.Order) bool {
 	}
 	status := strings.ToLower(strings.TrimSpace(order.Status))
 	switch status {
-	case "filled", "canceled", "cancelled", "rejected", "expired", "done_for_day", "replaced":
+	case "filled", "canceled", "cancelled", "rejected", "rejected_before_submission", "expired", "done_for_day", "replaced":
 		return false
 	}
-	if status == "planned_for_next_session" && strings.TrimSpace(order.ID) == "" && !order.SubmissionAttempted {
+	if status == "planned_for_next_session" && strings.TrimSpace(order.ID) == "" {
 		if strings.EqualFold(strings.TrimSpace(order.Purpose), "entry") {
 			return positivePrice(order.LimitPrice) || positivePrice(order.StopPrice)
 		}

@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func TestSaveOrderUpsertsByClientOrderID(t *testing.T) {
@@ -94,6 +96,7 @@ func TestGetOrdersNeedingReconciliation(t *testing.T) {
 	orders := []*interfaces.Order{
 		{ClientOrderID: "op-pending", Symbol: "AAPL", Status: "pending"},
 		{ClientOrderID: "op-submit-failed", Symbol: "MSFT", Status: "submit_failed", SubmissionAttempted: true},
+		{ClientOrderID: "op-planned-attempted", Symbol: "AMZN", Status: "planned_for_next_session", SubmissionAttempted: true},
 		{ClientOrderID: "op-filled", Symbol: "GOOG", Status: "filled"},
 		{Symbol: "TSLA", Status: "pending"},
 	}
@@ -113,8 +116,44 @@ func TestGetOrdersNeedingReconciliation(t *testing.T) {
 	for _, order := range got {
 		clientOrderIDs[order.ClientOrderID] = true
 	}
-	if !clientOrderIDs["op-pending"] || !clientOrderIDs["op-submit-failed"] {
-		t.Fatalf("GetOrdersNeedingReconciliation() client order IDs = %v, want pending and submit_failed orders", clientOrderIDs)
+	if !clientOrderIDs["op-pending"] || !clientOrderIDs["op-submit-failed"] || clientOrderIDs["op-planned-attempted"] {
+		t.Fatalf("GetOrdersNeedingReconciliation() client order IDs = %v, want pending/uncertain but no planned order", clientOrderIDs)
+	}
+}
+
+func TestReconciliationRoundTripPreservesAssessmentMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reconciliation-metadata.db")
+	storage, err := NewLocalStorage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := &interfaces.Order{ID: "broker-metadata", ClientOrderID: "client-metadata", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "limit", TimeInForce: "day", Status: "accepted", Revision: 1, SubmissionAttempted: true, Metadata: `{"assessment_id":"assessment-1","score":0.91,"reasons":["receipt","news"]}`}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := storage.GetOrdersNeedingReconciliation()
+	if err != nil || len(reconciled) != 1 {
+		t.Fatalf("GetOrdersNeedingReconciliation() = %#v, %v", reconciled, err)
+	}
+	reconciled[0].Status = "partially_filled"
+	reconciled[0].FilledQty = 0.5
+	if err := storage.SaveOrder(reconciled[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage, err = NewLocalStorage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	saved, err := storage.GetOrderByClientOrderID(order.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Metadata != order.Metadata || saved.ID != order.ID || saved.Revision != 2 || !saved.SubmissionAttempted || saved.FilledQty != 0.5 {
+		t.Fatalf("reopened reconciled order = %#v, want metadata and broker/revision state preserved", saved)
 	}
 }
 
@@ -142,6 +181,58 @@ func TestSaveOrderRejectsStaleRevisionAndBrokerIdentity(t *testing.T) {
 	mismatched.ID = "broker-b"
 	if err := storage.SaveOrder(&mismatched); err == nil {
 		t.Fatal("broker order identity replacement should be rejected")
+	}
+}
+
+func TestSaveOrderConcurrentRevisionConflictDoesNotUpsert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent-revision.db")
+	storage, err := NewLocalStorage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if storage != nil {
+			_ = storage.Close()
+		}
+	}()
+	order := &interfaces.Order{ID: "broker-cas", ClientOrderID: "client-cas", Symbol: "AAPL", Qty: 1, Side: "buy", Type: "market", TimeInForce: "day", Purpose: "entry", Status: "pending"}
+	if err := storage.SaveOrder(order); err != nil {
+		t.Fatal(err)
+	}
+	stale := *order
+	stale.Status = "canceled"
+	advanced := false
+	callbackName := "test:advance_revision_before_conditional_update"
+	if err := storage.db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if advanced || tx.Statement.Table != "orders" {
+			return
+		}
+		advanced = true
+		result := tx.Exec("UPDATE orders SET revision = revision + 1, status = ? WHERE client_order_id = ? AND revision = ?", "accepted", order.ClientOrderID, int64(1))
+		if result.Error != nil {
+			t.Errorf("advance stored revision: %v", result.Error)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.SaveOrder(&stale); err == nil {
+		t.Fatal("stale conditional update unexpectedly succeeded")
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storage = nil
+	storage, err = NewLocalStorage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	saved, err := storage.GetOrderByClientOrderID(order.ClientOrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != "accepted" || saved.Revision != 2 || saved.ID != order.ID {
+		t.Fatalf("reopened order = %#v, want newer accepted revision and identities intact", saved)
 	}
 }
 

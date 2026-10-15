@@ -32,6 +32,42 @@ test('standalone tool declares read-only scope and no caller evidence requiremen
   assert.doesNotMatch(schema,/market_scanner_features|external_account_id|max_loss/);
 });
 
+test('standalone assessment and order tools share one stable proposal identity', () => {
+  const assessment = source.slice(source.indexOf("name: 'assess_options_trade'"), source.indexOf("name: 'assess_options_strategy'"));
+  const order = source.slice(source.indexOf("name: 'place_options_order'"), source.indexOf("name: 'withdraw_planned_intent'"));
+  assert.match(assessment, /client_reference/);
+  assert.match(assessment, /same stable client_order_id/i);
+  assert.match(order, /client_order_id.*client_reference/i);
+  const prompt = fs.readFileSync(new URL('../agent/harness.js', import.meta.url), 'utf8');
+  assert.match(prompt, /generate one stable client_order_id before assessment/i);
+  assert.match(prompt, /use that exact value as client_reference/i);
+  assert.match(prompt, /submit the unchanged contract, quantity, and limit/i);
+});
+
+test('MCP order response forwards safe assessment diagnostics unchanged', () => {
+  const start = source.indexOf('function orderResponse(data, args)');
+  const end = source.indexOf('\n}', start) + 2;
+  assert.ok(start >= 0 && end > start);
+  const respond = vm.runInNewContext(`(() => { ${source.slice(start, end)}; return orderResponse; })()`);
+  const diagnostic = { status: 'risk_blocked', assessment_decision: 'PASS', assessment_category: 'execution_blocked', assessment_stage: 'market_session', assessment_reason: 'Market session is closed' };
+  assert.deepEqual(JSON.parse(respond(diagnostic, { thesis: 'fixture thesis' }).content[0].text), diagnostic);
+});
+
+test('MCP place_options_order preserves typed HTTP outcome diagnostics', async () => {
+  const begin = source.indexOf("case 'place_options_order': {");
+  const end = source.indexOf("case 'withdraw_planned_intent': {", begin);
+  const body = source.slice(begin, end).replace("case 'place_options_order': {", '').trim().replace(/}\s*$/, '');
+  const calls = [];
+  const invoke = vm.runInNewContext(`(async (args) => {${body}})`, {
+    callTradingBot: async (...args) => { calls.push(args); return { status: 'risk_blocked', assessment_decision: 'PASS', assessment_category: 'execution_blocked', assessment_stage: 'market_session' }; },
+    isOpeningIntent: () => true, autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
+  });
+  const output = await invoke({ client_order_id: 'stable-id', symbol: 'AAPL261106C00200000', underlying: 'AAPL', quantity: 1, side: 'buy', position_intent: 'buy_to_open', order_type: 'limit', limit_price: 2, thesis: 'fixture' });
+  assert.equal(calls[0][0], '/options/order');
+  assert.equal(calls[0][2].client_order_id, 'stable-id');
+  assert.equal(JSON.parse(output.content[0].text).assessment_category, 'execution_blocked');
+});
+
 test('policy lookup is listed as idempotent read-only and serializes only backend metadata', async () => {
   const schema = source.slice(source.indexOf("name: 'get_options_assessment_policy'"), source.indexOf("name: 'assess_options_trade'"));
   assert.match(schema, /readOnlyHint: true/);

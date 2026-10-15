@@ -19,6 +19,8 @@ func TestIsRiskRelevantLocalOrderSeparatesApplicationIntentsFromBrokerRisk(t *te
 		{name: "pending local intent before boundary is not broker risk", order: &interfaces.Order{Status: "pending", Purpose: "entry", SubmissionAttempted: false}, want: false},
 		{name: "broker identity remains risk relevant", order: &interfaces.Order{Status: "pending", ID: "broker-1", Purpose: "entry"}, want: true},
 		{name: "uncertain submission remains risk relevant", order: &interfaces.Order{Status: "submission_uncertain", Purpose: "entry", SubmissionAttempted: true}, want: true},
+		{name: "known post-marker rejection is not broker risk", order: &interfaces.Order{Status: "rejected_before_submission", Purpose: "entry", SubmissionAttempted: true}, want: false},
+		{name: "planned order still reserves risk after durable marker", order: &interfaces.Order{Status: "planned_for_next_session", Purpose: "entry", LimitPrice: floatPtr(100), SubmissionAttempted: true}, want: true},
 		{name: "risk reducing exit remains safe and irrelevant to opening caps", order: &interfaces.Order{Status: "pending", ID: "broker-exit", Purpose: "close"}, want: true},
 	}
 	for _, tc := range cases {

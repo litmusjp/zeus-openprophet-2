@@ -253,7 +253,7 @@ func sameOptionalFloat(left, right *float64) bool {
 
 func terminalOrderStatus(status string) bool {
 	switch status {
-	case "filled", "canceled", "cancelled", "rejected", "expired", "done_for_day", "replaced":
+	case "filled", "canceled", "cancelled", "rejected", "rejected_before_submission", "expired", "done_for_day", "replaced":
 		return true
 	default:
 		return false
@@ -386,7 +386,12 @@ func (s *LocalStorage) SaveOrder(order *interfaces.Order) error {
 		}
 	}
 
-	result := query.Save(dbOrder)
+	var result *gorm.DB
+	if existingID != 0 {
+		result = query.Model(&models.DBOrder{}).Where("id = ? AND revision = ?", existingID, existingRevision).Select("*").Updates(dbOrder)
+	} else {
+		result = query.Create(dbOrder)
+	}
 	if result.Error != nil {
 		return fmt.Errorf("failed to save order: %w", result.Error)
 	}
@@ -608,6 +613,7 @@ func (s *LocalStorage) GetOrdersNeedingReconciliation() ([]*interfaces.Order, er
 			ExpiresAt:           dbOrder.ExpiresAt,
 			Revision:            dbOrder.Revision,
 			SubmissionAttempted: dbOrder.SubmissionAttempted,
+			Metadata:            dbOrder.Metadata,
 			OptionLegs:          optionLegs,
 		}
 	}

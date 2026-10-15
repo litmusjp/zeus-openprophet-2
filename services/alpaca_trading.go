@@ -966,44 +966,49 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 		order.AlphaDeskAssessment = nil
 		return nil, err
 	}
+	preRPCAbort := func(err error) error { return &PreSubmissionRejectionError{Err: err} }
 	// Markers can block or trigger cancellation. Complete all final freshness,
 	// session and managed-state checks after that work, directly before the RPC.
 	if err := ctx.Err(); err != nil {
 		order.AlphaDeskAssessment = nil
-		return nil, err
+		return nil, preRPCAbort(err)
 	}
 	paperAdvisoryOpening := strings.HasSuffix(order.PositionIntent, "_to_open") && s.alphaDesk != nil && s.alphaDesk.ExecutionMode == "PAPER_ADVISORY_OP2"
 	if paperAdvisoryOpening {
 		if err := s.validatePaperAdvisoryAtSubmission(ctx, order); err != nil {
 			order.AlphaDeskAssessment = nil
-			return nil, err
+			return nil, preRPCAbort(err)
 		}
 	}
 	if err := checkRegularSession(s.clockReader); err != nil {
 		order.AlphaDeskAssessment = nil
-		return nil, err
+		var closed *MarketClosedError
+		if errors.As(err, &closed) {
+			return nil, err
+		}
+		return nil, preRPCAbort(err)
 	}
 	if err := ctx.Err(); err != nil {
 		order.AlphaDeskAssessment = nil
-		return nil, err
+		return nil, preRPCAbort(err)
 	}
 	if paperAdvisoryOpening {
 		blocked, known := s.managedExecutionIsBlocked()
 		if !known || blocked {
 			order.AlphaDeskAssessment = nil
-			return nil, fmt.Errorf("managed execution is blocked or unavailable at paper advisory order boundary")
+			return nil, preRPCAbort(fmt.Errorf("managed execution is blocked or unavailable at paper advisory order boundary"))
 		}
 		if err := ctx.Err(); err != nil {
 			order.AlphaDeskAssessment = nil
-			return nil, err
+			return nil, preRPCAbort(err)
 		}
 		if err := s.validatePaperAdvisoryReceipt(ctx, order); err != nil {
 			order.AlphaDeskAssessment = nil
-			return nil, err
+			return nil, preRPCAbort(err)
 		}
 		if err := ctx.Err(); err != nil {
 			order.AlphaDeskAssessment = nil
-			return nil, err
+			return nil, preRPCAbort(err)
 		}
 	}
 	order.SubmissionAttempted = true

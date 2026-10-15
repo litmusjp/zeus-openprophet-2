@@ -41,6 +41,26 @@ func standaloneClone(data []byte) map[string]any {
 	}
 	return doc
 }
+func standaloneDiagnostics(doc map[string]any) map[string]any {
+	if doc == nil || doc["decision"] != "PASS" {
+		return doc
+	}
+	expiryText, _ := doc["expires_at"].(string)
+	evidenceText, _ := doc["evidence_observed_at"].(string)
+	expiry, e1 := time.Parse(time.RFC3339Nano, expiryText)
+	evidenceAt, e2 := time.Parse(time.RFC3339Nano, evidenceText)
+	if e1 != nil || e2 != nil {
+		return doc
+	}
+	evidenceDeadline := evidenceAt.Add(brokerQuoteMaxAge)
+	effective := expiry
+	if evidenceDeadline.Before(effective) {
+		effective = evidenceDeadline
+	}
+	doc["op2_evidence_deadline"] = evidenceDeadline.Format(time.RFC3339Nano)
+	doc["op2_effective_expires_at"] = effective.Format(time.RFC3339Nano)
+	return doc
+}
 func standaloneKey(identity models.DurableIdentity, p StandaloneTradeProposal) string {
 	data, _ := json.Marshal(struct {
 		Identity models.DurableIdentity
@@ -91,7 +111,10 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 	if found && c.standaloneNow().Before(entry.expires) {
 		doc := standaloneClone(entry.document)
 		if !verifyPolicy {
-			return doc, nil
+			if err := c.standaloneFresh(ctx, doc); err != nil {
+				return nil, err
+			}
+			return standaloneDiagnostics(doc), nil
 		}
 		version, err := c.standalonePolicyVersion(ctx)
 		if err != nil {
@@ -101,7 +124,7 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 			if err := c.standaloneFresh(ctx, doc); err != nil {
 				return nil, err
 			}
-			return doc, nil
+			return standaloneDiagnostics(doc), nil
 		}
 	}
 	doc, err := c.AssessOptionsTrade(ctx, p)
@@ -147,7 +170,7 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 	}
 	c.standaloneCache[key] = standaloneCacheEntry{data, expiry}
 	c.standaloneMu.Unlock()
-	return standaloneClone(data), nil
+	return standaloneDiagnostics(standaloneClone(data)), nil
 }
 func (c *AlphaDeskClient) standaloneFresh(ctx context.Context, doc map[string]any) error {
 	if ctx.Err() != nil {
@@ -162,13 +185,16 @@ func (c *AlphaDeskClient) standaloneFresh(ctx context.Context, doc map[string]an
 	evidence, e2 := time.Parse(time.RFC3339Nano, evidenceText)
 	now := c.standaloneNow()
 	if e1 != nil || e2 != nil || !now.Before(expiry) || evidence.After(now) || now.Sub(evidence) > brokerQuoteMaxAge {
+		if e1 == nil && e2 == nil && !now.Before(evidence.Add(brokerQuoteMaxAge)) {
+			return &AlphaDeskUnavailableError{Reason: "OP2 market evidence deadline expired", Category: "response_validation", Stage: "evidence_observed_at"}
+		}
 		return &AlphaDeskUnavailableError{Reason: "Standalone receipt expired or evidence is stale"}
 	}
 	return nil
 }
 func (c *AlphaDeskClient) standalonePolicyVersion(ctx context.Context) (string, error) {
 	unavailable := func() (string, error) {
-		return "", &AlphaDeskUnavailableError{Reason: "Current standalone policy is unavailable"}
+		return "", &AlphaDeskUnavailableError{Reason: "Current standalone policy is unavailable", Category: "configuration", Stage: "policy_version"}
 	}
 	if ValidateAlphaDeskURL(c.URL) != nil {
 		return unavailable()
@@ -285,7 +311,15 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 		return err
 	}
 	if doc["decision"] != "PASS" {
-		return &AlphaDeskUnavailableError{Reason: "Standalone assessment is not PASS"}
+		decision, _ := doc["decision"].(string)
+		if decision != "FAIL" && decision != "UNAVAILABLE" {
+			decision = "UNAVAILABLE"
+		}
+		category := "assessment_unavailable"
+		if decision == "FAIL" {
+			category = "assessment_rejected"
+		}
+		return &AlphaDeskUnavailableError{Reason: "Standalone assessment did not approve this proposal", Decision: decision, Category: category, Stage: "decision"}
 	}
 	if doc["advisory_policy_profile"] == "paper_advisory_greeks_v1" && !allowPaperAdvisory {
 		return &AlphaDeskUnavailableError{Reason: "Paper advisory assessment cannot authorize an order"}
@@ -302,12 +336,13 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 		return err
 	}
 	expiry, _ := time.Parse(time.RFC3339Nano, doc["expires_at"].(string))
+	op2Expiry, _ := time.Parse(time.RFC3339Nano, doc["op2_effective_expires_at"].(string))
 	observed, _ := time.Parse(time.RFC3339Nano, doc["observed_at"].(string))
 	market, _ := time.Parse(time.RFC3339Nano, doc["evidence_observed_at"].(string))
 	version, _ := doc["policy_version"].(string)
 	id, _ := doc["assessment_id"].(string)
 	a := &interfaces.AlphaDeskAssessment{Scope: "TRADE_ASSESSMENT", AssessmentID: id, Decision: "PASS", Pass: true, SignalScore: &score, Threshold: &threshold,
-		Evidence: doc, Policy: doc["policy_snapshot"], PolicyVersion: version, ExpiresAt: expiry, ObservedAt: observed, MarketEvidenceAt: market,
+		Evidence: doc, Policy: doc["policy_snapshot"], PolicyVersion: version, ExpiresAt: expiry, OP2EffectiveExpiresAt: op2Expiry, ObservedAt: observed, MarketEvidenceAt: market,
 		Fingerprint: OptionsOrderFingerprint(s.standaloneIdentity(), order), HumanApprovalRequired: true, ExecutionAllowed: false, ScoreSource: "alphadesk_direct_market_data", ScoreObservedAt: market}
 	auditBytes, err := json.Marshal(doc)
 	if err != nil {

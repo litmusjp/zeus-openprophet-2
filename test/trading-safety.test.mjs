@@ -96,6 +96,32 @@ test('ledger canonicalizes compact and padded OCC symbols into one lot', () => {
   assert.equal(trades.length, 1);
   assert.equal(trades[0].pnl, 100);
 });
+
+test('realized ledger carries only verified entry AlphaDesk context, including score zero', () => {
+  const metadata = JSON.stringify({ assessment_id: 'entry-assessment', decision: 'PASS', signal_score: 0,
+    score_source: 'alphadesk_direct_market_data', observed_at: '2026-09-18T12:59:00Z',
+    op2_effective_expires_at: '2026-09-18T13:01:00Z', evidence: { score_profile: 'catalyst_momentum_v1' } });
+  const trades = buildTradeLedger([
+    { ID: 'entry', ClientOrderID: 'entry-client', Symbol: 'AAPL', Side: 'buy', Purpose: 'entry',
+      broker_identity_verified: true, entry_assessment: { assessmentId: 'entry-assessment', decision: 'PASS', signalScore: 0,
+        scoreType: 'alphadesk_direct_market_data', observedAt: '2026-09-18T12:59:00Z', effectiveExpiresAt: '2026-09-18T13:01:00Z', scoreProfile: 'catalyst_momentum_v1' },
+      Status: 'filled', FilledQty: 1, FilledAvgPrice: 100, FilledAt: '2026-09-18T13:00:00Z' },
+    { ID: 'exit', ClientOrderID: 'exit-client', Symbol: 'AAPL', Side: 'sell', Purpose: 'close', broker_identity_verified: true,
+      broker_identity_verified: true, Metadata: JSON.stringify({ assessment_id: 'exit-must-not-attach', decision: 'PASS' }),
+      Status: 'filled', FilledQty: 1, FilledAvgPrice: 110, FilledAt: '2026-09-18T14:00:00Z' },
+  ]);
+  assert.equal(trades.length, 1);
+  assert.deepEqual(trades[0].entryAssessment, {
+    assessmentId: 'entry-assessment', decision: 'PASS', signalScore: 0,
+    scoreSource: 'alphadesk_direct_market_data', scoreProfile: 'catalyst_momentum_v1',
+    observedAt: '2026-09-18T12:59:00Z', effectiveExpiresAt: '2026-09-18T13:01:00Z',
+  });
+  const unverified = buildTradeLedger([
+    { ID: 'entry2', Symbol: 'MSFT', Side: 'buy', Purpose: 'entry', entry_assessment: { assessmentId: 'nope', decision: 'PASS', signalScore: 0 }, Status: 'filled', FilledQty: 1, FilledAvgPrice: 100, FilledAt: '2026-09-18T13:00:00Z' },
+    { ID: 'exit2', Symbol: 'MSFT', Side: 'sell', Status: 'filled', FilledQty: 1, FilledAvgPrice: 110, FilledAt: '2026-09-18T14:00:00Z' },
+  ]);
+  assert.equal(unverified[0].entryAssessment, null);
+});
 test('ledger applies option multiplier to padded OCC symbols', () => {
   const trades = buildTradeLedger([
     { ID: 'entry', Symbol: 'TSLA  251219C00400000', Side: 'buy', Status: 'filled', FilledQty: 1, FilledAvgPrice: 1, FilledAt: '2026-09-18T13:00:00Z' },

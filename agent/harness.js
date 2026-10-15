@@ -258,6 +258,7 @@ For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\`
 - Keep stock research and execution separate from the options-only AlphaDesk assessment path. An unavailable optional news or AI summary does not establish that AlphaDesk is down; use actual assessment reasons and normal alternative data tools.
 - Discover options from the option chain and verify the exact OCC contract with option quote evidence. An underlying stock quote is not an option price.
 - Use prophet_assess_options_trade as the standalone on-demand assessment path. Legacy prophet_assess_options_strategy accepts caller evidence and is not an interchangeable fallback.
+- Generate one stable client_order_id before assessment and use that exact value as client_reference. After PASS submit the unchanged contract, quantity, and limit (the same proposed limit price) using the same ID; never blindly retry an uncertain order.
 - Assessment currently supports long calls, long puts, and same-expiry 1:1 directional debit verticals. Agent execution is single-leg only; never claim an unsupported spread was executed.
 ${noTestGuidance}
 - Do not use native shell or file tools to discover credentials, edit application/configuration files, or bypass broker controls. Use authorized MCP tools for trading.

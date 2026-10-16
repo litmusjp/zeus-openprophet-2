@@ -169,6 +169,15 @@ function parseOpenCodeStderrError(line) {
 }
 
 // ── System Prompt Builder ──────────────────────────────────────────
+function isOwnedHeraldWorkflow(agentConfig) {
+  const prompt = agentConfig?.customSystemPrompt || '';
+  return agentConfig?.id === 'catalyst'
+    && agentConfig?.sandboxId === 'sbx_723be98b'
+    && agentConfig?.systemPromptTemplate === 'custom'
+    && prompt.includes('### MARKET-OPEN ALPHADESK WORKFLOW')
+    && prompt.includes('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
+}
+
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
   const scopedPromptOwner = {
@@ -183,6 +192,7 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   const scopedPrompt = scopedPromptOwner[agentConfig.sandboxId] === agentConfig.id
     && agentConfig.systemPromptTemplate === 'custom';
   const scopedWorkflowPresent = scopedPrompt && workflowStart >= 0 && workflowEnd > workflowStart;
+  const heraldWorkflowActive = isOwnedHeraldWorkflow(agentConfig) && scopedWorkflowPresent;
   const temporaryOverrideActive = scopedWorkflowPresent
     && temporaryStart >= 0
     && temporaryEnd > temporaryStart
@@ -246,7 +256,7 @@ For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session he
     : '- Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.';
   const systemInstructions = `## Available Tools
 
-${renderPrefixedToolMenu()}
+${renderPrefixedToolMenu(heraldWorkflowActive ? { scope: 'herald' } : {})}
 
 OpenCode registers the OpenProphet MCP server as \`prophet\`. Call these tools with their exact registered names using the \`prophet_\` prefix (for example, \`prophet_get_datetime\`, \`prophet_get_account\`, and \`prophet_get_positions\`). Do not emit the unprefixed logical names as text.
 
@@ -761,7 +771,7 @@ The user/operator is sending you a direct message. Read it carefully and respond
 
 ## Your Available Tools (DO NOT call get_agent_config to discover these)
 
-${renderPrefixedToolMenu()}
+${renderPrefixedToolMenu(isOwnedHeraldWorkflow(this._agentConfig) ? { scope: 'herald' } : {})}
 
 ## Instructions
 - If the user asks to create a new agent: use create_agent to create it, then optionally create_strategy for its rules, then assign_agent_to_sandbox to activate it.

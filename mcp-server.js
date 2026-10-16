@@ -82,7 +82,7 @@ let _lastPortCheck = 0;
 
 async function callTradingBot(endpoint, method = 'GET', data = null, options = {}) {
   const safe = method === 'GET' || endpoint === '/options/assessment' || endpoint === '/options/trade-assessment';
-  const budgetMs = endpoint === '/options/trade-assessment' ? 6000 : 3000;
+  const budgetMs = endpoint === '/options/order' ? 15000 : endpoint === '/options/trade-assessment' ? 6000 : 3000;
   const maxAttempts = safe ? 3 : 1;
   const started = Date.now();
   let attempt = 0;

@@ -15,15 +15,29 @@ export const TOOL_CATALOG = {
   'Utility': ['get_datetime', 'wait'],
 };
 
-// Render the catalog as the `**Category**: tool, tool` block used in the prompts.
-export function renderToolMenu() {
-  return Object.entries(TOOL_CATALOG)
+// Herald gets a derived prompt subset; tool registration and permissions stay unchanged.
+const HERALD_OMIT_CATEGORIES = new Set(['Agent Config', 'Heartbeat', 'Intelligence']);
+const HERALD_OMIT_TOOLS = new Set([
+  'place_buy_order', 'place_sell_order', 'place_managed_position', 'get_managed_positions', 'close_managed_position',
+  'analyze_stocks', 'get_quick_market_intelligence', 'get_cleaned_news',
+]);
+export const HERALD_TOOL_CATALOG = Object.fromEntries(
+  Object.entries(TOOL_CATALOG)
+    .filter(([category]) => !HERALD_OMIT_CATEGORIES.has(category))
+    .map(([category, tools]) => [category, tools.filter(tool => !HERALD_OMIT_TOOLS.has(tool))]),
+);
+
+// Render a catalog as the `**Category**: tool, tool` block used in prompts.
+export function renderToolMenu(options = {}) {
+  const catalog = options.scope === 'herald' ? HERALD_TOOL_CATALOG : TOOL_CATALOG;
+  return Object.entries(catalog)
     .map(([category, tools]) => `**${category}**: ${tools.join(', ')}`)
     .join('\n');
 }
 
-export function renderPrefixedToolMenu() {
-  return Object.entries(TOOL_CATALOG)
+export function renderPrefixedToolMenu(options = {}) {
+  const catalog = options.scope === 'herald' ? HERALD_TOOL_CATALOG : TOOL_CATALOG;
+  return Object.entries(catalog)
     .map(([category, tools]) => `**${category}**: ${tools.map(tool => `prophet_${tool}`).join(', ')}`)
     .join('\n');
 }

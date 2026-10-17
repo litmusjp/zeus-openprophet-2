@@ -8,8 +8,21 @@ const BASIC_AUTH_CONTEXT = Symbol('openprophet.basic-authenticated');
 
 // Only the server's Basic Auth middleware may set this request-local context.
 // It is deliberately not derived from headers, query parameters, or source IP.
-export function markBasicAuthContext(req) {
+function markBasicAuthContext(req) {
   Object.defineProperty(req, BASIC_AUTH_CONTEXT, { value: true });
+}
+
+// Management routes must rely on proof from the actual Basic middleware. A
+// generic API bearer (including a loopback request) is not operator authority.
+export function hasBasicAuthContext(req) {
+  return req?.[BASIC_AUTH_CONTEXT] === true;
+}
+
+export function createBasicOperatorOnlyMiddleware() {
+  return function basicOperatorOnly(req, res, next) {
+    if (hasBasicAuthContext(req)) return next();
+    return res.status(403).json({ error: 'operator authorization is required' });
+  };
 }
 
 // The agent API may use a dedicated token when configured. Otherwise, the

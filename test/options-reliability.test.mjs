@@ -31,7 +31,7 @@ test('agent instructions distinguish market closed, provider unavailable, and as
   assert.match(harness, /provider_unavailable.*means fail closed/);
   assert.match(harness, /Decision is PASS, FAIL or UNAVAILABLE/);
   assert.match(harness, /Assessment PASS is trade-quality evidence only, never account permission or broker authorization/);
-  assert.match(harness, /On PASS, attempt .*prophet_place_options_order/);
+  assert.match(harness, /On genuine PASS .*prefer one .*prophet_place_options_order/);
 });
 
 test('agent contract defines the deterministic first-session and managed-leg workflow', () => {

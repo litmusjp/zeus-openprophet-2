@@ -38,9 +38,12 @@ import {
 import { redactSecrets } from './redaction.js';
 import { formatSlackNotification } from './slack-format.js';
 import { accountDailyPnl } from './daily-pnl.js';
-import { createAuthMiddleware, createBasicAuthMiddleware, resolveApiAuthToken } from './auth.js';
+import { createAuthMiddleware, createBasicAuthMiddleware, createBasicOperatorOnlyMiddleware, resolveApiAuthToken } from './auth.js';
+import { createManagedGateProxy, registerManagedGateProxy } from './managed-gate-proxy.js';
+import { createManagedReviewPolicyReader } from './managed-policy-client.js';
+import { savePluginAndApplyRuntime } from './plugin-runtime-apply.js';
 import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
-import { affectedSandboxesForAgentModelChange, hasBusyAffectedSandbox, chatgptStatus, createChatGPTAuthFlow, createChatGPTModelCheck, disconnectChatGPT, nativeOpenCodeEnv, isChatGPTModelVerified, recordChatGPTModelCheck, getVerifiedChatGPTModels } from './chatgpt-oauth.js';
+import { affectedSandboxesForAgentModelChange, hasBusyAffectedSandbox, chatgptStatus, createChatGPTAuthFlow, createChatGPTModelCheck, disconnectChatGPT, nativeOpenCodeEnv, stripOperatorSecrets, isChatGPTModelVerified, recordChatGPTModelCheck, getVerifiedChatGPTModels } from './chatgpt-oauth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -181,6 +184,8 @@ app.use(express.json({ limit: '1mb' }));
 // Token-based auth. The server-owned boundary is fail-closed when the token is absent.
 const authMiddleware = createAuthMiddleware({ token: AUTH_TOKEN });
 app.use('/api', authMiddleware);
+
+const basicOperatorOnly = createBasicOperatorOnlyMiddleware();
 
 // ── Go Backend Manager ─────────────────────────────────────────────
 // Manages the Go trading bot lifecycle, supports restarting with different Alpaca keys
@@ -436,6 +441,11 @@ function createHarnessForActiveSandbox() {
     getStrategyById,
     getHeartbeatForPhase: getHeartbeatForSandboxPhase,
     getPermissions: getPermissionsForSandbox,
+    getManagedReviewPolicy: createManagedReviewPolicyReader({
+      getClient: sandboxId => isActiveSandbox(sandboxId) ? goAxios : orchestrator.getSandboxRuntime(sandboxId)?.goAxios,
+      isAvailable: sandboxId => EXECUTION_START_ENABLED && getSandbox(sandboxId)?.plugins?.alphadesk?.requireManagedApprovalGate === true
+        && (isActiveSandbox(sandboxId) ? goReady : orchestrator.getSandboxRuntime(sandboxId)?.goReady === true),
+    }),
     chatStore,
     opencodeEnv: {
       OPENPROPHET_DATA_DIR: path.join(PROJECT_ROOT, 'data'),
@@ -879,7 +889,7 @@ ${message.trim()}${customPromptAddition}`;
         }
       }
       managerEnv = { ...nativeOpenCodeEnv({ dataDir: path.join(PROJECT_ROOT, 'data') }), OPENCODE_CONFIG_CONTENT: JSON.stringify(managerConfig), OPENPROPHET_ROLE: 'manager' };
-    } else managerEnv = { ...process.env, OPENPROPHET_ROLE: 'manager' };
+    } else managerEnv = { ...stripOperatorSecrets(process.env), OPENPROPHET_ROLE: 'manager' };
     const proc = spawn('opencode', args, {
       cwd: process.cwd(),
       env: managerEnv,
@@ -1839,6 +1849,9 @@ app.get('/api/plugins/:name', (req, res) => {
   res.json(redactSecrets(plugin || {}, req.params.name.toLowerCase() === 'alphadesk'));
 });
 
+const managedGateProxy = createManagedGateProxy({ getSandbox, getPluginForSandbox });
+registerManagedGateProxy(app, { proxy: managedGateProxy, operatorOnly: basicOperatorOnly });
+
 app.put('/api/plugins/:name', (req, res, next) => {
   if (req.params.name === 'alphadesk') return operatorAuthMiddleware(req, res, next);
   next();
@@ -1846,16 +1859,34 @@ app.put('/api/plugins/:name', (req, res, next) => {
   try {
     const { sandboxId, ...pluginBody } = req.body || {};
     if (req.params.name === 'alphadesk' && pluginBody.url) pluginBody.url = validateAlphaDeskUrl(pluginBody.url);
-    if (sandboxId) await updatePluginForSandbox(sandboxId, req.params.name, pluginBody);
-    else await updatePlugin(req.params.name, pluginBody);
-    if (req.params.name === 'alphadesk') {
-      const activeSandbox = sandboxId ? getSandbox(sandboxId) : getActiveSandbox();
-      const account = activeSandbox ? getAccountById(activeSandbox.accountId) : getActiveAccount();
-      if (activeSandbox?.id === getActiveSandbox()?.id && account) await startGoBackend(account);
-    }
+    const targetSandboxId = sandboxId || getActiveSandbox()?.id;
+    const getRunningRuntime = id => {
+      if (!id) return null;
+      if (isActiveSandbox(id)) return goProc && !goProc.killed && goProc.exitCode === null ? { active: true } : null;
+      const runtime = orchestrator.getSandboxRuntime(id);
+      return runtime?.goProc && !runtime.goProc.killed && runtime.goProc.exitCode === null ? runtime : null;
+    };
+    await savePluginAndApplyRuntime({
+      sandboxId: targetSandboxId,
+      pluginName: req.params.name,
+      pluginBody,
+      getRunningRuntime,
+      canRestart: id => EXECUTION_START_ENABLED && Boolean(getSandbox(id)?.accountId && getAccountById(getSandbox(id).accountId)),
+      persist: async (id, name, body) => {
+        if (sandboxId) await updatePluginForSandbox(id, name, body);
+        else await updatePlugin(name, body);
+      },
+      restart: async id => {
+        if (isActiveSandbox(id)) {
+          const result = await startGoBackend(getAccountById(getSandbox(id).accountId));
+          return result === false || !goReady ? false : { goReady };
+        }
+        return orchestrator.startGoBackend(id);
+      },
+    });
     broadcast('config', safeConfig());
     res.json({ ok: true });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
 });
 
 app.post('/api/plugins/alphadesk/test', operatorAuthMiddleware, async (req, res) => {
@@ -2078,7 +2109,7 @@ app.get('/api/auth/status', (req, res) => {
     });
   }
   try {
-    const out = execSync('opencode auth list 2>&1', { timeout: 5000, encoding: 'utf-8' });
+    const out = execSync('opencode auth list 2>&1', { timeout: 5000, encoding: 'utf-8', env: stripOperatorSecrets(process.env) });
     const loggedIn = hasOpenCodeCredential(out, {});
     res.json({
       loggedIn,
@@ -2096,7 +2127,7 @@ app.post('/api/auth/login', (req, res) => {
   // Spawn opencode auth login and capture the URL
   const proc = spawn('opencode', ['auth', 'login'], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, BROWSER: 'echo' }, // prevent auto-opening browser
+    env: { ...stripOperatorSecrets(process.env), BROWSER: 'echo' }, // prevent auto-opening browser; keep operator secrets out of provider CLI
   });
 
   let output = '';

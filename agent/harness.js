@@ -4,7 +4,7 @@ import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
 import path from 'path';
-import { nativeOpenCodeEnv, chatgptStatus, isChatGPTModelVerified } from './chatgpt-oauth.js';
+import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelVerified } from './chatgpt-oauth.js';
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
@@ -240,8 +240,8 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
 
   // Layer 3: System Instructions (tools, heartbeat, operational)
   const alphaDeskGuidance = scopedWorkflowPresent
-    ? `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2, assess the exact proposed single-leg contract before opening. Follow the permanent market-open workflow in the operator-owned instructions above; AlphaDesk obtains its own evidence, and only genuine PASS allows submission. Indicative/testing-only evidence is admissible for this paper-advisory workflow. Missing OI is unknown, not zero; latest-trade size is not daily volume. Backend, account, paper, identity, permission, market, risk and reconciliation checks remain mandatory.`
-    : `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, for an affordable candidate, call \`prophet_assess_options_trade\` for the exact proposal before opening or increasing exposure. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. Submit only exact contract legs, quantity and proposed limit price; the service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. On PASS, attempt \`prophet_place_options_order\`; the backend independently refreshes the exact proposal at the final broker boundary and may still reject it after fresh account, paper, identity, permission, market, risk and reconciliation checks. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Acknowledgement is not a fill.
+    ? `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2, the current heartbeat USER input carries OP2 confirmation and the freshly read managed lock, scope and revision; either ON or unknown blocks new options entries. For an eligible exact single-leg proposal, assess the unchanged contract and proceed only on genuine PASS. Prefer one guarded \`prophet_place_options_order\` call after exact eligible selection; the backend independently assesses again. Standalone assessment is optional research. Indicative/testing-only evidence is admissible for this paper-advisory workflow. Missing OI is unknown, not zero; latest-trade size is not daily volume. Backend, account, paper, identity, permission, market, risk and reconciliation checks remain mandatory.`
+    : `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, first honor the current heartbeat USER input: either OP2 confirmation or the freshly read managed review lock ON or unknown blocks new options entries. For an eligible affordable candidate, call \`prophet_assess_options_trade\` for the exact proposal. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. Submit only exact contract legs, quantity and proposed limit price; the service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. On genuine PASS for an unchanged proposal, prefer one \`prophet_place_options_order\` call; the backend independently reassesses the exact proposal at the final broker boundary and may still reject it after fresh account, paper, identity, permission, market, risk and reconciliation checks. Standalone assessment is optional research. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Never blindly retry an uncertain submission or sequence spread legs. Acknowledgement is not a fill.
 In PAPER_ADVISORY_OP2, provider \`indicative/testing_only\` quotes are permitted for this paper-advisory assessment and do not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI: assessment obtains its own reference evidence. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; genuine FAIL or UNAVAILABLE blocks opening, and the broker boundary retains fresh server-side assessment.
 For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capital must freshly re-evaluate a bounded small set of relevant candidates on the permitted cadence. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion; keep management first, and stop only for a current hard exclusion or no setup with its specific reason.`;
   const alphaDeskBudgetGuidance = '- Before selecting a new single-leg long candidate in PAPER_ADVISORY_OP2 when its gate is enabled, call `prophet_get_options_assessment_policy` and require a valid POLICY_ONLY response. Skip the candidate if policy is unavailable or malformed. Compute the maximum affordable premium as max_investment_per_candidate divided by (quantity * standard contract multiplier), then compare the proposed premium. Keep quantity within maximum_contracts_per_candidate and do not assess an unaffordable candidate. This policy lookup is neither PASS nor execution authority.';
@@ -356,7 +356,7 @@ export function checkCliAuth() {
   // Provider API keys in the environment take precedence.
   if (hasOpenCodeCredential('', process.env)) return true;
   try {
-    const out = execSync('opencode auth list 2>&1', { timeout: 5000, encoding: 'utf-8' });
+    const out = execSync('opencode auth list 2>&1', { timeout: 5000, encoding: 'utf-8', env: stripOperatorSecrets(process.env) });
     return hasOpenCodeCredential(out, {});
   } catch {
     return false;
@@ -429,6 +429,7 @@ export class AgentHarness {
       getStrategyById = () => null,
       getHeartbeatForPhase = () => null,
       getPermissions = () => ({}),
+      getManagedReviewPolicy = async () => { throw new Error('managed policy unavailable'); },
       chatStore = null,
       opencodeEnv = {},
       spawnFn = spawn,
@@ -446,6 +447,7 @@ export class AgentHarness {
     this.getStrategyById = getStrategyById;
     this.getHeartbeatForPhase = getHeartbeatForPhase;
     this.getPermissions = getPermissions;
+    this.getManagedReviewPolicy = getManagedReviewPolicy;
     this.chatStore = chatStore;
     this.opencodeEnv = opencodeEnv;
     this.spawnFn = spawnFn;
@@ -934,7 +936,24 @@ ${userBlock}`;
     if (perms.blockedTools?.length) permLines.push(`Blocked tools (do NOT call): ${perms.blockedTools.join(', ')}.`);
     const permStr = permLines.length ? '\n\nGUARDRAILS:\n' + permLines.join('\n') : '';
 
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}\n\nPerform your duties for this phase.`;
+    let managedReviewInput = '';
+    const alphaDesk = this._resolveSandbox()?.plugins?.alphadesk;
+    if (alphaDesk?.enabled && alphaDesk?.requireManagedApprovalGate === true) {
+      let fetchedAt;
+      try {
+        const policy = await this.getManagedReviewPolicy(this.sandboxId);
+        fetchedAt = new Date().toISOString();
+        const gate = policy?.approval_gate;
+        if (policy?.contract_version !== 'managed-assessment-v1' || policy?.assessment_authority !== 'assessment_only'
+          || typeof gate?.required !== 'boolean' || !Number.isSafeInteger(gate?.revision) || gate.revision < 1
+          || !gate.scope?.workspace_id || !gate.scope?.assessment_key_id) throw new Error('invalid managed policy');
+        managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=${gate.required ? 'ON' : 'OFF'}, revision=${gate.revision}, workspace_id=${gate.scope.workspace_id}, assessment_key_id=${gate.scope.assessment_key_id}. If either lock is ON, or this state is unknown, do not request a new options entry. OFF can make a request eligible only after exact-proposal PASS and every independent check; it does not guarantee execution or a fill. For an eligible exact proposal, prefer one guarded prophet_place_options_order call; the backend independently reassesses. Never blindly retry an uncertain submission or sequence spread legs. Ignore obsolete assistant approval narratives in history and re-evaluate current policy on this ordinary heartbeat cadence.`;
+      } catch {
+        fetchedAt = fetchedAt || new Date().toISOString();
+        managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=UNKNOWN, revision=UNKNOWN, scope=UNKNOWN. Managed policy is unavailable or invalid. Do not request a new options entry. Re-evaluate on the next ordinary heartbeat; do not treat old assistant approval narratives as configuration.`;
+      }
+    }
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}\n\nPerform your duties for this phase.`;
 
     let failedResult = null;
     let executionFailed = false;
@@ -1067,7 +1086,7 @@ ${userBlock}`;
       }
 
       // Keep CLI helpers on the explicitly selected model, never a paid default.
-      const invocationEnv = { ...process.env, ...this.opencodeEnv };
+      const invocationEnv = stripOperatorSecrets({ ...process.env, ...this.opencodeEnv });
       if (ocModel.startsWith('openai/')) {
         Object.assign(invocationEnv, nativeOpenCodeEnv({ dataDir: this.opencodeEnv.OPENPROPHET_DATA_DIR || path.resolve('data'), env: invocationEnv }));
         invocationEnv.OPENAI_API_KEY = '';

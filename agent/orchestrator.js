@@ -24,6 +24,7 @@ import {
 } from './config-store.js';
 import { shouldShowGoLogLine, createGoLogLineBuffer } from './go-log-filter.js';
 import { resolveApiAuthToken } from './auth.js';
+import { createManagedReviewPolicyReader } from './managed-policy-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -82,8 +83,10 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
   if (inheritedTenant && inheritedTenant !== tenantID) {
     throw new Error(`server-owned tenant identity conflicts with inherited tenant for sandbox ${sandboxId}`);
   }
+  const childEnv = Object.fromEntries(Object.entries(baseEnv || {}).filter(([key]) =>
+    !key.startsWith('ALPHADESK_CONTROL_') && !['BASIC_AUTH_USER', 'BASIC_AUTH_PASS'].includes(key)));
   return {
-    ...baseEnv,
+    ...childEnv,
     ALPACA_API_KEY: account.publicKey,
     ALPACA_SECRET_KEY: account.secretKey,
     ALPACA_BASE_URL: alpacaTradingUrl(account.paper, account.baseUrl),
@@ -105,6 +108,7 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     ALPHADESK_EXECUTION_MODE: baseEnv?.ALPHADESK_EXECUTION_MODE || 'ACCOUNT_VERIFIED',
     ALPHADESK_URL: alphaDesk?.url || '',
     ALPHADESK_API_KEY: alphaDesk?.apiKey || '',
+    ALPHADESK_REQUIRE_MANAGED_APPROVAL_GATE: alphaDesk?.requireManagedApprovalGate ? 'true' : 'false',
   };
 }
 
@@ -187,6 +191,10 @@ export class AgentOrchestrator extends EventEmitter {
       getStrategyById,
       getHeartbeatForPhase: getHeartbeatForSandboxPhase,
       getPermissions: getPermissionsForSandbox,
+      getManagedReviewPolicy: createManagedReviewPolicyReader({
+        getClient: id => this.getSandboxRuntime(id)?.goAxios,
+        isAvailable: id => Boolean(this.getSandboxRuntime(id)?.goReady && getSandbox(id)?.plugins?.alphadesk?.requireManagedApprovalGate === true),
+      }),
       chatStore: this.chatStore,
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,

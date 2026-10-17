@@ -27,9 +27,17 @@ function ensurePrivateNativeProfile(dataDir) {
 }
 
 export function nativeOpenCodeEnv({ dataDir = path.resolve('data'), env = process.env } = {}) {
-  const nativeEnv = { ...env, XDG_DATA_HOME: chatgptXdgDataHome(dataDir) };
+  const nativeEnv = { ...stripOperatorSecrets(env), XDG_DATA_HOME: chatgptXdgDataHome(dataDir) };
   for (const key of ['OPENCODE_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT']) delete nativeEnv[key];
   return nativeEnv;
+}
+
+export function stripOperatorSecrets(env = process.env) {
+  const childEnv = { ...env };
+  for (const key of Object.keys(childEnv)) {
+    if (key.startsWith('ALPHADESK_CONTROL_') || ['BASIC_AUTH_USER', 'BASIC_AUTH_PASS'].includes(key)) delete childEnv[key];
+  }
+  return childEnv;
 }
 
 export function affectedSandboxesForAgentModelChange(sandboxes, agentId) {

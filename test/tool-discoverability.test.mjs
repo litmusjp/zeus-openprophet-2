@@ -28,13 +28,13 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   assert.match(prompt, /maximum affordable premium as max_investment_per_candidate divided by \(quantity \* standard contract multiplier\)/);
   assert.match(prompt, /quantity within maximum_contracts_per_candidate/);
   assert.match(prompt, /POLICY_ONLY response/);
-  assert.match(prompt, /before opening or increasing exposure/i);
+  assert.match(prompt, /either OP2 confirmation or the freshly read managed review lock ON or unknown blocks new options entries/i);
   assert.match(prompt, /for the exact proposal/);
   assert.match(prompt, /Decision is PASS, FAIL or UNAVAILABLE/);
   assert.match(prompt, /signal scores are nullable provider-owned evidence/);
   assert.match(prompt, /Assessment PASS is trade-quality evidence only, never account permission or broker authorization/);
-  assert.match(prompt, /independently refreshes the exact proposal at the final broker boundary/);
-  assert.match(prompt, /On PASS, attempt .*prophet_place_options_order/);
+  assert.match(prompt, /independently reassesses the exact proposal at the final broker boundary/);
+  assert.match(prompt, /On genuine PASS .*prefer one .*prophet_place_options_order/);
 });
 
 test('generated system prompt clarifies zero maxOrderValue semantics', async () => {

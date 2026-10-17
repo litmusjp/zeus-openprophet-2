@@ -977,6 +977,11 @@
               <div class="form-group"><label>Assessment URL</label><input type="text" id="alphadesk-url" placeholder="https://alphadesk.example"></div>
               <div class="form-group"><label>API key (write-only)</label><input type="password" id="alphadesk-key" placeholder="Leave blank to keep current key"></div>
               <div class="config-card-actions"><button class="btn primary sm" onclick="saveAlphaDeskConfig()">Save AlphaDesk settings</button><button class="btn primary sm" onclick="testAlphaDesk()">Test connection</button><span id="alphadesk-test-result" style="font-size:12px;color:var(--ink-faint);margin-left:8px"></span></div>
+              <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+                <div class="form-group"><label><input type="checkbox" id="alphadesk-review-required" disabled onchange="saveManagedReviewGate()"> Require human review — pause autonomous new entries</label></div>
+                <div class="config-card-desc">Shared AlphaDesk connection: L1 + L2. ON locks new options entries until an operator turns it OFF. It is not a per-order approval queue and does not cancel orders or close positions. OFF may make a request eligible after all independent checks; it does not guarantee execution or a fill.</div>
+                <div id="alphadesk-review-state" role="status" aria-live="polite" style="margin-top:8px;font-size:12px;color:var(--ink-muted)">Unknown — select a managed sandbox to read the authoritative state.</div>
+              </div>
             </div>
           </div>
         </div>
@@ -4506,6 +4511,53 @@ function renderAlphaDesk() {
   const b = document.getElementById('alphadesk-badge');
   b.textContent = a.enabled && a.url ? 'Enabled' : 'Disabled';
   b.style.color = a.enabled && a.url ? 'var(--success)' : 'var(--ink-faint)';
+  loadManagedReviewGate();
+}
+
+let _managedGateRevision = null;
+let _managedGateSandboxId = null;
+async function loadManagedReviewGate() {
+  const toggle = document.getElementById('alphadesk-review-required');
+  const state = document.getElementById('alphadesk-review-state');
+  const sid = getEffectiveSandboxId();
+  _managedGateRevision = null; _managedGateSandboxId = sid;
+  toggle.disabled = true; state.textContent = 'Loading authoritative state…'; state.style.color = 'var(--ink-muted)';
+  if (!sid || sid === '_manager') { state.textContent = 'Unknown — select a managed sandbox.'; return; }
+  try {
+    const response = await fetch('/api/plugins/alphadesk/managed-review-gate?sandboxId=' + encodeURIComponent(sid), { cache: 'no-store' });
+    const result = await response.json();
+    if (sid !== getEffectiveSandboxId()) return;
+    if (!response.ok || result.status !== 'effective' || !Number.isSafeInteger(result.revision)) throw new Error(result.error || 'Readback unavailable');
+    _managedGateRevision = result.revision;
+    toggle.checked = result.required === true; toggle.disabled = false;
+    const op2 = result.op2RequireConfirmation ? 'ON' : 'OFF';
+    state.textContent = `Effective — shared L1 + L2 review lock ${result.required ? 'ON' : 'OFF'}, revision ${result.revision}; OP2 confirmation ${op2}. Fetched ${result.fetchedAt}.`;
+    state.style.color = 'var(--success)';
+  } catch (error) {
+    if (sid !== getEffectiveSandboxId()) return;
+    toggle.checked = false; state.textContent = `Unknown — ${error.message || 'authoritative read failed'}`; state.style.color = 'var(--error)';
+  }
+}
+
+async function saveManagedReviewGate() {
+  const toggle = document.getElementById('alphadesk-review-required');
+  const state = document.getElementById('alphadesk-review-state');
+  const sid = getEffectiveSandboxId(); const requested = toggle.checked; const revision = _managedGateRevision;
+  if (!sid || sid !== _managedGateSandboxId || !Number.isSafeInteger(revision)) { await loadManagedReviewGate(); return; }
+  toggle.disabled = true; state.textContent = 'Saving — authoritative readback pending…'; state.style.color = 'var(--ink-muted)';
+  try {
+    const response = await fetch('/api/plugins/alphadesk/managed-review-gate', { method: 'PUT', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sandboxId: sid, required: requested, expectedRevision: revision }) });
+    const result = await response.json();
+    if (sid !== getEffectiveSandboxId()) return;
+    if (!response.ok || result.status !== 'effective' || result.required !== requested || !Number.isSafeInteger(result.revision)) {
+      const failure = new Error(result.error || 'Save readback failed'); failure.status = result.status; throw failure;
+    }
+    _managedGateRevision = result.revision; toggle.checked = result.required; toggle.disabled = false;
+    state.textContent = `Effective — shared L1 + L2 review lock ${result.required ? 'ON' : 'OFF'}, revision ${result.revision}; OP2 confirmation ${result.op2RequireConfirmation ? 'ON' : 'OFF'}. Fetched ${result.fetchedAt}.`;
+    state.style.color = 'var(--success)';
+  } catch (error) {
+    toggle.disabled = true; state.textContent = `${error.status === 'stale' ? 'Failed — state changed; reload required.' : 'Unknown —'} ${error.message || 'authoritative readback failed'}`; state.style.color = 'var(--error)';
+  }
 }
 function alphaDeskConfigBody() {
   const body = {

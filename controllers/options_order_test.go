@@ -26,6 +26,36 @@ func TestOptionsOrderRequestHasNoClientAssessmentAuthorizationField(t *testing.T
 	}
 }
 
+func TestManagedAuditProjectionUsesGateContractAndRejectsLegacyClaims(t *testing.T) {
+	managed := `{"scope":"TRADE_ASSESSMENT","assessment_id":"888c17f7-e4af-408f-a8bb-50109488f262","decision":"PASS","pass":true,"contract_version":"managed-assessment-v1","assessment_authority":"assessment_only","approval_gate":{"required":false,"revision":3,"scope":{"workspace_id":"a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1","assessment_key_id":"b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2"}},"policy_version":"standalone-paper-advisory-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:managed:3:False"}`
+	if got := assessmentDecisionFromAudit(managed); got != "PASS" {
+		t.Fatalf("managed audited PASS not projected: %q", got)
+	}
+	for _, invalid := range []string{
+		strings.Replace(managed, `"required":false`, `"required":true`, 1),
+		strings.Replace(managed, `"assessment_authority":"assessment_only"`, `"assessment_authority":"trade_authority"`, 1),
+		strings.Replace(managed, `"assessment_authority":"assessment_only"`, `"assessment_authority":"assessment_only","human_approval_required":true`, 1),
+		strings.Replace(managed, `:managed:3:False`, `:managed:4:False`, 1),
+	} {
+		if got := assessmentDecisionFromAudit(invalid); got != "" {
+			t.Fatalf("contradictory managed audit projected PASS: %q", got)
+		}
+	}
+	legacy := `{"scope":"TRADE_ASSESSMENT","assessment_id":"888c17f7-e4af-408f-a8bb-50109488f262","decision":"PASS","pass":true,"execution_allowed":false,"human_approval_required":true}`
+	if got := assessmentDecisionFromAudit(legacy); got != "PASS" {
+		t.Fatalf("legacy audit semantics changed: %q", got)
+	}
+	for _, invalid := range []string{
+		strings.Replace(legacy, `,"assessment_id":"888c17f7-e4af-408f-a8bb-50109488f262"`, "", 1),
+		strings.Replace(legacy, `"execution_allowed":false`, `"contract_version":"managed-assessment-v9","execution_allowed":false`, 1),
+		strings.Replace(legacy, `"execution_allowed":false`, `"approval_gate":{},"execution_allowed":false`, 1),
+	} {
+		if got := assessmentDecisionFromAudit(invalid); got != "" {
+			t.Fatalf("invalid legacy/unknown contract projected PASS: %q", got)
+		}
+	}
+}
+
 type plannedOptionsTradingService struct {
 	*reconciliationTradingService
 	nextOpen time.Time
@@ -120,6 +150,9 @@ func TestOptionsOrderHTTPPreservesAssessmentOutcomeDiagnostics(t *testing.T) {
 		status                          int
 	}{
 		{name: "AlphaDesk FAIL", decision: "FAIL", category: "assessment_rejected", stage: "decision", err: &services.AlphaDeskUnavailableError{Reason: "AlphaDesk assessment returned FAIL", Decision: "FAIL", Category: "assessment_rejected", Stage: "decision"}, recordPass: true, status: http.StatusBadGateway},
+		{name: "managed human review lock", decision: "UNAVAILABLE", category: "managed_review_required", stage: "approval_gate", err: &services.AlphaDeskUnavailableError{Reason: "AlphaDesk human-review lock is ON", Decision: "UNAVAILABLE", Category: "managed_review_required", Stage: "approval_gate"}, status: http.StatusBadGateway},
+		{name: "managed revised OFF policy", decision: "UNAVAILABLE", category: "response_validation", stage: "approval_gate", err: &services.AlphaDeskUnavailableError{Reason: "Managed AlphaDesk receipt changed", Decision: "UNAVAILABLE", Category: "response_validation", Stage: "approval_gate"}, status: http.StatusBadGateway},
+		{name: "managed unknown policy", decision: "UNAVAILABLE", category: "upstream_service_error", stage: "approval_gate", err: &services.AlphaDeskUnavailableError{Reason: "Managed AlphaDesk policy unavailable", Decision: "UNAVAILABLE", Category: "upstream_service_error", Stage: "approval_gate"}, status: http.StatusBadGateway},
 		{name: "evidence unavailable", decision: "UNAVAILABLE", category: "response_validation", stage: "expires_at", err: &services.AlphaDeskUnavailableError{Reason: "Standalone evidence is unavailable", Decision: "UNAVAILABLE", Category: "response_validation", Stage: "expires_at"}, recordPass: true, status: http.StatusBadGateway},
 		{name: "receipt clock rejection diagnostics", decision: "UNAVAILABLE", category: "response_validation", stage: "observed_at", err: &services.AlphaDeskUnavailableError{Reason: "private body and token", Category: "response_validation", Stage: "observed_at", ProviderDecision: "PASS", AssessmentID: "888c17f7-e4af-408f-a8bb-50109488f262", TimestampRejection: "future", ProviderObservedAt: "2026-10-06T15:00:00Z", ConsumerCheckedAt: "2026-10-06T14:59:59.998Z", ClockDeltaMillis: func() *int64 { value := int64(2); return &value }()}, status: http.StatusBadGateway},
 		{name: "validated PASS then session block", decision: "PASS", category: "execution_blocked", stage: "market_session", recordPass: true, err: &services.MarketClosedError{}, status: http.StatusAccepted},
@@ -165,6 +198,15 @@ func TestOptionsOrderHTTPPreservesAssessmentOutcomeDiagnostics(t *testing.T) {
 			}
 			if tc.name == "AlphaDesk FAIL" && !strings.Contains(body["assessment_reason"].(string), "re-assess") {
 				t.Fatalf("FAIL response lacks actionable safe remediation: %#v", body)
+			}
+			if tc.name == "managed human review lock" && !strings.Contains(body["assessment_reason"].(string), "human-review lock is ON") {
+				t.Fatalf("managed gate response did not explain the operator lock safely: %#v", body)
+			}
+			if strings.HasPrefix(tc.name, "managed ") && tc.name != "managed human review lock" {
+				reason := body["assessment_reason"].(string)
+				if !strings.Contains(reason, "refresh current policy and requalify") || strings.Contains(reason, "human-review lock is ON") {
+					t.Fatalf("changed/unknown gate must request requalification without claiming ON: %q", reason)
+				}
 			}
 			if tc.name == "receipt clock rejection diagnostics" {
 				reason := body["assessment_reason"].(string)

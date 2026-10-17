@@ -94,6 +94,7 @@ func TestOptionsAssessmentPolicyRouteSerializesPolicyOnlyAndFailsClosed(t *testi
 		want      string
 	}{
 		{"valid", map[string]any{"kind": "assessment_policy_metadata", "decision": "POLICY_ONLY", "assessment_performed": false, "policy_version": "v", "max_investment_per_candidate": "750", "maximum_contracts_per_candidate": 3, "standard_contract_multiplier": 100, "execution_allowed": false}, false, 200, `"max_investment_per_candidate":"750"`},
+		{"managed", map[string]any{"kind": "assessment_policy_metadata", "decision": "POLICY_ONLY", "assessment_performed": false, "policy_version": "v:managed:3:True", "contract_version": "managed-assessment-v1", "assessment_authority": "assessment_only", "approval_gate": map[string]any{"required": true, "revision": 3, "scope": map[string]string{"workspace_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "assessment_key_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}}}, false, 200, `"approval_gate":{"required":true`},
 		{"unavailable", nil, true, 503, `"status":"unavailable"`},
 		{"missing_reader", nil, false, 503, `"decision":"POLICY_ONLY"`},
 	} {
@@ -110,6 +111,9 @@ func TestOptionsAssessmentPolicyRouteSerializesPolicyOnlyAndFailsClosed(t *testi
 			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/options/assessment-policy", nil))
 			if response.Code != tc.status || !strings.Contains(response.Body.String(), tc.want) {
 				t.Fatalf("unexpected policy response: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if response.Header().Get("Cache-Control") != "no-store, max-age=0" {
+				t.Fatalf("policy response is cacheable: %v", response.Header())
 			}
 			if strings.Contains(response.Body.String(), "private upstream") || strings.Contains(response.Body.String(), `"signal_score"`) || strings.Contains(response.Body.String(), `"pass"`) {
 				t.Fatalf("policy endpoint exposed internal or assessment data: %s", response.Body.String())

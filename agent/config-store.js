@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { DEFAULT_AGENT_MODEL, alpacaTradingUrl, resolveAgentModel } from './defaults.js';
-import { nativeOpenCodeEnv } from './chatgpt-oauth.js';
+import { nativeOpenCodeEnv, stripOperatorSecrets } from './chatgpt-oauth.js';
 
 function configuredDefaultModel() {
   return resolveAgentModel();
@@ -544,7 +544,7 @@ function defaultStrategies() {
 
 function defaultModels() {
   try {
-    const out = execSync('opencode models 2>&1', { encoding: 'utf-8', timeout: 10000 });
+    const out = execSync('opencode models 2>&1', { encoding: 'utf-8', timeout: 10000, env: stripOperatorSecrets(process.env) });
     const lines = out.trim().split('\n').filter(l => l && l.includes('/'));
     const models = [];
     const seen = new Set();
@@ -698,6 +698,7 @@ function mergePlugins(plugins = {}) {
       enabled: false,
       url: '',
       apiKey: '',
+      requireManagedApprovalGate: false,
       ...(plugins.alphadesk || {}),
     },
   };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthMiddleware, createBasicAuthMiddleware, isValidApiBearerRequest, markBasicAuthContext, resolveApiAuthToken } from '../agent/auth.js';
+import { createAuthMiddleware, createBasicAuthMiddleware, isValidApiBearerRequest, resolveApiAuthToken } from '../agent/auth.js';
 import { enforcePermissions } from '../mcp-permission-guard.js';
 
 function responseDouble() {
@@ -77,12 +77,12 @@ test('agent API auth accepts valid token', () => {
 
 test('agent API auth accepts a request marked by the server Basic Auth middleware', () => {
   const middleware = createAuthMiddleware({ token: 'expected' });
-  const req = { path: '/accounts', headers: {} };
-  markBasicAuthContext(req);
+  const req = { path: '/accounts', headers: { authorization: `Basic ${Buffer.from('operator:pass').toString('base64')}` } };
+  const basic = createBasicAuthMiddleware({ username: 'operator', password: 'pass', apiToken: 'other' });
   const res = responseDouble();
   let called = false;
 
-  middleware(req, res, () => { called = true; });
+  basic(req, res, () => middleware(req, res, () => { called = true; }));
 
   assert.equal(called, true);
   assert.equal(res.statusCode, null);
@@ -131,11 +131,11 @@ test('inert startup does not make the server-owned token an API credential', () 
 
 test('inert API auth remains fail-closed even for a marked request', () => {
   const middleware = createAuthMiddleware({ token: '' });
-  const req = { path: '/accounts', headers: {} };
-  markBasicAuthContext(req);
+  const req = { path: '/accounts', headers: { authorization: `Basic ${Buffer.from('operator:pass').toString('base64')}` } };
+  const basic = createBasicAuthMiddleware({ username: 'operator', password: 'pass', apiToken: 'other' });
   const res = responseDouble();
 
-  middleware(req, res, () => assert.fail('inert request was accepted'));
+  basic(req, res, () => middleware(req, res, () => assert.fail('inert request was accepted')));
 
   assert.equal(res.statusCode, 503);
 });

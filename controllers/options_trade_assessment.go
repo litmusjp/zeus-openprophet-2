@@ -124,6 +124,8 @@ var standaloneUUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4
 // fields needed before selecting a long-options candidate. It is not an
 // assessment and never invokes broker or order methods.
 func (oc *OrderController) ReadOptionsAssessmentPolicy(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, max-age=0")
+	c.Header("Pragma", "no-cache")
 	reader, ok := oc.tradingService.(interface {
 		ReadStandaloneAssessmentPolicy(context.Context) (map[string]any, error)
 	})

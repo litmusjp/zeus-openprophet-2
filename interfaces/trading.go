@@ -2,6 +2,7 @@ package interfaces
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -282,6 +283,11 @@ type AlphaDeskAssessment struct {
 	Fingerprint                  string                        `json:"trade_fingerprint"`
 	HumanApprovalRequired        bool                          `json:"human_approval_required"`
 	ExecutionAllowed             bool                          `json:"execution_allowed"`
+	ManagedContract              bool                          `json:"managed_contract,omitempty"`
+	ManagedGateRequired          bool                          `json:"managed_gate_required,omitempty"`
+	ManagedGateRevision          int64                         `json:"managed_gate_revision,omitempty"`
+	ManagedGateWorkspaceID       string                        `json:"managed_gate_workspace_id,omitempty"`
+	ManagedGateAssessmentKeyID   string                        `json:"managed_gate_assessment_key_id,omitempty"`
 	Pass                         bool                          `json:"pass"`
 	FailedCheckCodes             []string                      `json:"failed_check_codes,omitempty"`
 	PolicyVersion                string                        `json:"policy_version,omitempty"`
@@ -296,6 +302,36 @@ type AlphaDeskAssessment struct {
 	SignalQualityAssessment      *AlphaDeskAssessment          `json:"signal_quality,omitempty"`
 	ExternalIdentity             AlphaDeskExternalIdentity     `json:"external_identity"`
 	ExternalIdentityPresent      bool                          `json:"-"`
+}
+
+func (a AlphaDeskAssessment) MarshalJSON() ([]byte, error) {
+	type plain AlphaDeskAssessment
+	raw, err := json.Marshal(plain(a))
+	if err != nil || !a.ManagedContract {
+		return raw, err
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, err
+	}
+	delete(wire, "human_approval_required")
+	delete(wire, "execution_allowed")
+	delete(wire, "managed_contract")
+	delete(wire, "managed_gate_required")
+	delete(wire, "managed_gate_revision")
+	delete(wire, "managed_gate_workspace_id")
+	delete(wire, "managed_gate_assessment_key_id")
+	wire["contract_version"], _ = json.Marshal("managed-assessment-v1")
+	wire["assessment_authority"], _ = json.Marshal("assessment_only")
+	wire["approval_gate"], _ = json.Marshal(map[string]any{
+		"required": a.ManagedGateRequired,
+		"revision": a.ManagedGateRevision,
+		"scope": map[string]string{
+			"workspace_id":      a.ManagedGateWorkspaceID,
+			"assessment_key_id": a.ManagedGateAssessmentKeyID,
+		},
+	})
+	return json.Marshal(wire)
 }
 
 type AlphaDeskStrategyIdentity struct {

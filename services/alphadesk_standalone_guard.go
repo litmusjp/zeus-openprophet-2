@@ -110,21 +110,53 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 	c.standaloneMu.Unlock()
 	if found && c.standaloneNow().Before(entry.expires) {
 		doc := standaloneClone(entry.document)
+		receiptGate, receiptManaged, receiptErr := parseManagedApprovalGate(doc)
+		if receiptErr != nil || (c.RequireManagedApprovalGate && !receiptManaged) {
+			return nil, &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk approval policy is invalid", Category: "response_validation", Stage: "approval_gate"}
+		}
 		if !verifyPolicy {
-			if err := c.standaloneFresh(ctx, doc); err != nil {
+			if receiptManaged || c.RequireManagedApprovalGate {
+				version, currentGate, err := c.standalonePolicyState(ctx)
+				if err != nil {
+					return nil, err
+				}
+				if currentGate == nil {
+					return nil, &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk approval policy is missing", Category: "configuration", Stage: "approval_gate"}
+				}
+				if currentGate.Required {
+					if receiptManaged && sameManagedApprovalGate(receiptGate, *currentGate) && doc["decision"] == "UNAVAILABLE" {
+						return standaloneDiagnostics(doc), nil
+					}
+					return nil, managedGateUnavailable("AlphaDesk human-review lock is ON", true)
+				}
+				if !receiptManaged || !sameManagedApprovalGate(receiptGate, *currentGate) || version != doc["policy_version"] {
+					found = false
+				} else {
+					if err := c.standaloneFresh(ctx, doc); err != nil {
+						return nil, err
+					}
+					return standaloneDiagnostics(doc), nil
+				}
+			} else {
+				if err := c.standaloneFresh(ctx, doc); err != nil {
+					return nil, err
+				}
+				return standaloneDiagnostics(doc), nil
+			}
+		} else {
+			version, currentGate, err := c.standalonePolicyState(ctx)
+			if err != nil {
 				return nil, err
 			}
-			return standaloneDiagnostics(doc), nil
-		}
-		version, err := c.standalonePolicyVersion(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if version == doc["policy_version"] {
-			if err := c.standaloneFresh(ctx, doc); err != nil {
-				return nil, err
+			if currentGate != nil && currentGate.Required {
+				return nil, managedGateUnavailable("AlphaDesk human-review lock is ON", true)
 			}
-			return standaloneDiagnostics(doc), nil
+			if version == doc["policy_version"] && ((!receiptManaged && currentGate == nil) || (receiptManaged && currentGate != nil && sameManagedApprovalGate(receiptGate, *currentGate))) {
+				if err := c.standaloneFresh(ctx, doc); err != nil {
+					return nil, err
+				}
+				return standaloneDiagnostics(doc), nil
+			}
 		}
 	}
 	doc, err := c.AssessOptionsTrade(ctx, p)
@@ -132,11 +164,18 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 		return nil, err
 	}
 	if doc["decision"] == "PASS" && verifyPolicy {
-		version, err := c.standalonePolicyVersion(ctx)
+		version, currentGate, err := c.standalonePolicyState(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if version != doc["policy_version"] {
+		receiptGate, receiptManaged, receiptErr := parseManagedApprovalGate(doc)
+		if receiptErr != nil || (c.RequireManagedApprovalGate && !receiptManaged) {
+			return nil, &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk approval policy is invalid", Category: "response_validation", Stage: "approval_gate"}
+		}
+		if currentGate != nil && currentGate.Required {
+			return nil, managedGateUnavailable("AlphaDesk human-review lock is ON", true)
+		}
+		if version != doc["policy_version"] || (receiptManaged && (currentGate == nil || !sameManagedApprovalGate(receiptGate, *currentGate))) || (!receiptManaged && currentGate != nil) {
 			return nil, &AlphaDeskUnavailableError{Reason: "Standalone policy changed during assessment"}
 		}
 	}
@@ -192,9 +231,9 @@ func (c *AlphaDeskClient) standaloneFresh(ctx context.Context, doc map[string]an
 	}
 	return nil
 }
-func (c *AlphaDeskClient) standalonePolicyVersion(ctx context.Context) (string, error) {
-	unavailable := func() (string, error) {
-		return "", &AlphaDeskUnavailableError{Reason: "Current standalone policy is unavailable", Category: "configuration", Stage: "policy_version"}
+func (c *AlphaDeskClient) standalonePolicyState(ctx context.Context) (string, *managedApprovalGate, error) {
+	unavailable := func() (string, *managedApprovalGate, error) {
+		return "", nil, &AlphaDeskUnavailableError{Reason: "Current standalone policy is unavailable", Category: "configuration", Stage: "policy_version"}
 	}
 	if ValidateAlphaDeskURL(c.URL) != nil {
 		return unavailable()
@@ -224,10 +263,25 @@ func (c *AlphaDeskClient) standalonePolicyVersion(ctx context.Context) (string, 
 	}
 	doc := standaloneClone(data)
 	version, ok := doc["policy_version"].(string)
+	managedGate, managed, gateErr := parseManagedApprovalGate(doc)
+	if gateErr != nil || (c.RequireManagedApprovalGate && !managed) {
+		return unavailable()
+	}
+	if managed {
+		if version == "" || doc["scope"] != "TRADE_ASSESSMENT" || !validStandalonePolicy(doc["policy_snapshot"], version, func() float64 { n, _ := standaloneNumber(doc["minimum_passing_score"]); return n }()) {
+			return unavailable()
+		}
+		return version, &managedGate, nil
+	}
 	if !ok || version == "" || doc["scope"] != "TRADE_ASSESSMENT" || doc["execution_allowed"] != false || !validStandalonePolicy(doc["policy_snapshot"], version, func() float64 { n, _ := standaloneNumber(doc["minimum_passing_score"]); return n }()) {
 		return unavailable()
 	}
-	return version, nil
+	return version, nil, nil
+}
+
+func (c *AlphaDeskClient) standalonePolicyVersion(ctx context.Context) (string, error) {
+	version, _, err := c.standalonePolicyState(ctx)
+	return version, err
 }
 func (s *AlpacaTradingService) standaloneIdentity() models.DurableIdentity {
 	mode := "live"
@@ -316,16 +370,33 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 			decision = "UNAVAILABLE"
 		}
 		category := "assessment_unavailable"
+		reason := "Standalone assessment did not approve this proposal"
+		if decision == "UNAVAILABLE" {
+			if blockers, ok := doc["blocking_reasons"].([]any); ok && len(blockers) == 1 && blockers[0] == "human_approval_required" {
+				reason = "AlphaDesk human-review lock is ON; new options entries are unavailable"
+				return &AlphaDeskUnavailableError{Reason: reason, Decision: decision, Category: "managed_review_required", Stage: "approval_gate"}
+			}
+		}
 		if decision == "FAIL" {
 			category = "assessment_rejected"
 		}
-		return &AlphaDeskUnavailableError{Reason: "Standalone assessment did not approve this proposal", Decision: decision, Category: category, Stage: "decision"}
+		return &AlphaDeskUnavailableError{Reason: reason, Decision: decision, Category: category, Stage: "decision"}
 	}
 	if doc["advisory_policy_profile"] == "paper_advisory_greeks_v1" && !allowPaperAdvisory {
 		return &AlphaDeskUnavailableError{Reason: "Paper advisory assessment cannot authorize an order"}
 	}
-	if allowPaperAdvisory && (doc["advisory_policy_profile"] != "paper_advisory_greeks_v1" || doc["execution_allowed"] != false || doc["paper_only"] != true || doc["human_approval_required"] != true) {
-		return &AlphaDeskUnavailableError{Reason: "Standalone receipt is not a paper-only advisory assessment"}
+	managedGate, managed, gateErr := parseManagedApprovalGate(doc)
+	if gateErr != nil || (s.alphaDesk.RequireManagedApprovalGate && !managed) {
+		return &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk approval receipt is missing or invalid", Category: "response_validation", Stage: "approval_gate"}
+	}
+	if allowPaperAdvisory {
+		if managed {
+			if managedGate.Required {
+				return managedGateUnavailable("AlphaDesk human-review lock is ON", true)
+			}
+		} else if doc["advisory_policy_profile"] != "paper_advisory_greeks_v1" || doc["execution_allowed"] != false || doc["paper_only"] != true || doc["human_approval_required"] != true {
+			return &AlphaDeskUnavailableError{Reason: "Standalone receipt is not a paper-only advisory assessment"}
+		}
 	}
 	score, err := standaloneNumber(doc["signal_score"])
 	if err != nil {
@@ -343,7 +414,8 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 	id, _ := doc["assessment_id"].(string)
 	a := &interfaces.AlphaDeskAssessment{Scope: "TRADE_ASSESSMENT", AssessmentID: id, Decision: "PASS", Pass: true, SignalScore: &score, Threshold: &threshold,
 		Evidence: doc, Policy: doc["policy_snapshot"], PolicyVersion: version, ExpiresAt: expiry, OP2EffectiveExpiresAt: op2Expiry, ObservedAt: observed, MarketEvidenceAt: market,
-		Fingerprint: OptionsOrderFingerprint(s.standaloneIdentity(), order), HumanApprovalRequired: true, ExecutionAllowed: false, ScoreSource: "alphadesk_direct_market_data", ScoreObservedAt: market}
+		Fingerprint: OptionsOrderFingerprint(s.standaloneIdentity(), order), HumanApprovalRequired: !managed, ExecutionAllowed: false, ScoreSource: "alphadesk_direct_market_data", ScoreObservedAt: market,
+		ManagedContract: managed, ManagedGateRequired: managedGate.Required, ManagedGateRevision: managedGate.Revision, ManagedGateWorkspaceID: managedGate.WorkspaceID, ManagedGateAssessmentKeyID: managedGate.AssessmentKeyID}
 	auditBytes, err := json.Marshal(doc)
 	if err != nil {
 		return &AlphaDeskUnavailableError{Reason: "Standalone assessment audit evidence could not be copied", Err: err}
@@ -358,9 +430,12 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 	if err := order.AssessmentAuditSink(&auditRecord); err != nil {
 		return &AlphaDeskUnavailableError{Reason: "Standalone assessment audit failed", Err: err}
 	}
-	currentVersion, err := s.alphaDesk.standalonePolicyVersion(ctx)
+	currentVersion, currentGate, err := s.alphaDesk.standalonePolicyState(ctx)
 	if err != nil || currentVersion != version {
 		return &AlphaDeskUnavailableError{Reason: "Standalone policy changed during final audit", Err: err}
+	}
+	if managed && (currentGate == nil || currentGate.Required || !sameManagedApprovalGate(managedGate, *currentGate)) {
+		return managedGateUnavailable("Managed AlphaDesk approval policy changed during final audit", currentGate != nil && currentGate.Required)
 	}
 	if s.policy == nil || *s.policy != localPolicy {
 		return &AlphaDeskUnavailableError{Reason: "Local trading policy changed during final audit"}
@@ -379,11 +454,22 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 
 func (s *AlpacaTradingService) validatePaperAdvisoryReceipt(ctx context.Context, order *interfaces.OptionsOrder) error {
 	a := order.AlphaDeskAssessment
-	if a == nil || !a.Pass || a.Decision != "PASS" || a.ExecutionAllowed || !a.HumanApprovalRequired || a.Scope != "TRADE_ASSESSMENT" {
+	if a == nil || !a.Pass || a.Decision != "PASS" || a.ExecutionAllowed || (!a.ManagedContract && !a.HumanApprovalRequired) || a.Scope != "TRADE_ASSESSMENT" {
 		return &AlphaDeskUnavailableError{Reason: "Paper advisory assessment is unavailable at submission boundary"}
 	}
 	doc, ok := a.Evidence.(map[string]any)
-	if !ok || doc["decision"] != "PASS" || doc["advisory_policy_profile"] != "paper_advisory_greeks_v1" || doc["execution_allowed"] != false || doc["paper_only"] != true || doc["human_approval_required"] != true || doc["policy_version"] != a.PolicyVersion {
+	if !ok || doc["decision"] != "PASS" || doc["advisory_policy_profile"] != "paper_advisory_greeks_v1" || doc["paper_only"] != true || doc["policy_version"] != a.PolicyVersion {
+		return &AlphaDeskUnavailableError{Reason: "Trusted paper advisory receipt changed before submission"}
+	}
+	gate, managed, gateErr := parseManagedApprovalGate(doc)
+	if gateErr != nil || managed != a.ManagedContract || (s.alphaDesk.RequireManagedApprovalGate && !managed) {
+		return &AlphaDeskUnavailableError{Reason: "Trusted managed approval receipt changed before submission", Category: "response_validation", Stage: "approval_gate"}
+	}
+	if managed {
+		if gate.Required || a.ManagedGateRequired || gate.Revision != a.ManagedGateRevision || gate.WorkspaceID != a.ManagedGateWorkspaceID || gate.AssessmentKeyID != a.ManagedGateAssessmentKeyID {
+			return managedGateUnavailable("Managed AlphaDesk receipt is locked or its scope changed", gate.Required)
+		}
+	} else if doc["execution_allowed"] != false || doc["paper_only"] != true || doc["human_approval_required"] != true {
 		return &AlphaDeskUnavailableError{Reason: "Trusted paper advisory receipt changed before submission"}
 	}
 	if err := s.alphaDesk.standaloneFresh(ctx, doc); err != nil {
@@ -405,9 +491,21 @@ func (s *AlpacaTradingService) validatePaperAdvisoryAtSubmission(ctx context.Con
 	if err := s.validatePaperAdvisoryReceipt(ctx, order); err != nil {
 		return err
 	}
-	version, err := s.alphaDesk.standalonePolicyVersion(ctx)
+	version, currentGate, err := s.alphaDesk.standalonePolicyState(ctx)
 	if err != nil || version != order.AlphaDeskAssessment.PolicyVersion {
-		return &AlphaDeskUnavailableError{Reason: "Standalone policy changed before paper order submission", Err: err}
+		return &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk policy changed or is unknown before paper order submission", Err: err, Decision: "UNAVAILABLE", Category: "upstream_service_error", Stage: "approval_gate"}
+	}
+	if order.AlphaDeskAssessment.ManagedContract {
+		assessment := order.AlphaDeskAssessment
+		if currentGate == nil || currentGate.Required || assessment.ManagedGateRequired || currentGate.Revision != assessment.ManagedGateRevision || currentGate.WorkspaceID != assessment.ManagedGateWorkspaceID || currentGate.AssessmentKeyID != assessment.ManagedGateAssessmentKeyID {
+			reason := "Managed AlphaDesk policy changed or is unknown before broker submission; refresh policy and requalify the proposal"
+			if currentGate != nil && currentGate.Required {
+				reason = "AlphaDesk human-review lock is ON; new entries are paused until an operator changes the gate"
+			}
+			return managedGateUnavailable(reason, currentGate != nil && currentGate.Required)
+		}
+	} else if s.alphaDesk.RequireManagedApprovalGate || currentGate != nil {
+		return &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk policy is required but unavailable", Category: "configuration", Stage: "approval_gate"}
 	}
 	return nil
 }

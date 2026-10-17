@@ -128,6 +128,7 @@ func standaloneNumber(v any) (float64, error) {
 	return number, nil
 }
 func validStandalonePolicyDigest(snapshot map[string]any, version string) bool {
+	version = managedPolicyVersionBase(version)
 	if len(version) != len("standalone-paper-advisory-v1:")+64 || !bytes.HasPrefix([]byte(version), []byte("standalone-paper-advisory-v1:")) {
 		return false
 	}
@@ -240,6 +241,7 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-AlphaDesk-API-Key", c.APIKey)
+	request.Header.Set("Cache-Control", "no-cache")
 	client := http.Client{Timeout: 5 * time.Second}
 	if c.HTTP != nil {
 		client = *c.HTTP
@@ -282,9 +284,38 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 		return unavailable("response_validation")
 	}
 	providerDecision = decision
-	authority, ok := result["execution_allowed"].(bool)
-	if !ok || authority {
-		return rejectField("execution_allowed")
+	managedGate, managed, managedErr := parseManagedApprovalGate(result)
+	if managedErr != nil || (c.RequireManagedApprovalGate && !managed) {
+		return rejectField("approval_gate")
+	}
+	if managed {
+		if managedGate.Required {
+			score, scoreExists := result["signal_score"]
+			if decision != "UNAVAILABLE" || !scoreExists || score != nil {
+				return rejectField("approval_gate.required")
+			}
+			blockers, ok := result["blocking_reasons"].([]any)
+			if !ok || len(blockers) != 1 || blockers[0] != "human_approval_required" {
+				return rejectField("blocking_reasons")
+			}
+			if value, ok := result["assessment_id"].(string); !ok || !standaloneAssessmentUUID.MatchString(value) {
+				return rejectField("assessment_id")
+			}
+			policySnapshot, ok := result["policy_snapshot"].(map[string]any)
+			threshold, thresholdErr := standaloneNumber(result["minimum_passing_score"])
+			if !ok || thresholdErr != nil || !validStandalonePolicy(policySnapshot, result["policy_version"], threshold) {
+				return rejectField("policy_version")
+			}
+			return result, nil
+		}
+		if result["advisory_policy_profile"] != "paper_advisory_greeks_v1" || result["advisory_policy_hash"] != "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca" || result["paper_only"] != true {
+			return rejectField("advisory_policy_profile")
+		}
+	} else {
+		authority, ok := result["execution_allowed"].(bool)
+		if !ok || authority {
+			return rejectField("execution_allowed")
+		}
 	}
 	if decision == "PASS" {
 		if passValue, exists := result["pass"]; exists && passValue != true {
@@ -302,19 +333,25 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 		if result["retryable"] != false {
 			return rejectField("retryable")
 		}
-		if result["advisory_policy_profile"] != "paper_advisory_greeks_v1" {
-			return rejectField("advisory_policy_profile")
+		if managed {
+			if managedGate.Required {
+				return rejectField("approval_gate.required")
+			}
+		} else {
+			if result["advisory_policy_profile"] != "paper_advisory_greeks_v1" {
+				return rejectField("advisory_policy_profile")
+			}
+			if result["advisory_policy_hash"] != "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca" {
+				return rejectField("advisory_policy_hash")
+			}
+			if result["paper_only"] != true {
+				return rejectField("paper_only")
+			}
+			if result["human_approval_required"] != true {
+				return rejectField("human_approval_required")
+			}
 		}
-		if result["advisory_policy_hash"] != "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca" {
-			return rejectField("advisory_policy_hash")
-		}
-		if result["paper_only"] != true {
-			return rejectField("paper_only")
-		}
-		if result["human_approval_required"] != true {
-			return rejectField("human_approval_required")
-		}
-		if value, ok := result["assessment_id"].(string); !ok || value == "" {
+		if value, ok := result["assessment_id"].(string); !ok || value == "" || (managed && !standaloneAssessmentUUID.MatchString(value)) {
 			return rejectField("assessment_id")
 		} else if standaloneAssessmentUUID.MatchString(value) {
 			assessmentID = strings.ToLower(value)
@@ -538,6 +575,7 @@ func (c *AlphaDeskClient) ReadAssessmentPolicy(ctx context.Context) (map[string]
 		return unavailable("configuration")
 	}
 	request.Header.Set("X-AlphaDesk-API-Key", c.APIKey)
+	request.Header.Set("Cache-Control", "no-cache")
 	client := http.Client{Timeout: 5 * time.Second}
 	if c.HTTP != nil {
 		client = *c.HTTP
@@ -572,7 +610,23 @@ func (c *AlphaDeskClient) ReadAssessmentPolicy(ctx context.Context) (map[string]
 	version, versionOK := document["policy_version"].(string)
 	scopeOK := document["scope"] == "TRADE_ASSESSMENT"
 	threshold, thresholdErr := standaloneNumber(document["minimum_passing_score"])
-	if !ok || !versionOK || !scopeOK || document["execution_allowed"] != false || document["paper_only"] != true || document["human_approval_required"] != true || document["advisory_policy_profile"] != "paper_advisory_greeks_v1" || document["advisory_policy_hash"] != "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca" || thresholdErr != nil || !validStandalonePolicy(snapshot, version, threshold) {
+	gate, managed, gateErr := parseManagedApprovalGate(document)
+	if gateErr != nil || (c.RequireManagedApprovalGate && !managed) {
+		return unavailable("response_validation")
+	}
+	baseVersion := version
+	if managed {
+		if authority, ok := document["assessment_authority"].(string); !ok || authority != "assessment_only" {
+			return unavailable("response_validation")
+		}
+		baseVersion = managedPolicyVersionBase(version)
+	} else if document["execution_allowed"] != false || document["human_approval_required"] != true {
+		return unavailable("response_validation")
+	}
+	if !managed && strings.Contains(version, ":managed:") {
+		return unavailable("response_validation")
+	}
+	if !ok || !versionOK || !scopeOK || document["paper_only"] != true || document["advisory_policy_profile"] != "paper_advisory_greeks_v1" || document["advisory_policy_hash"] != "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca" || thresholdErr != nil || !validStandalonePolicy(snapshot, baseVersion, threshold) {
 		return unavailable("response_validation")
 	}
 	budget, budgetOK := snapshot["max_investment_per_candidate"].(string)
@@ -581,11 +635,22 @@ func (c *AlphaDeskClient) ReadAssessmentPolicy(ctx context.Context) (map[string]
 	if !budgetOK || budgetErr != nil || budgetValue <= 0 || contractsErr != nil || contractsValue < 1 || math.Trunc(contractsValue) != contractsValue {
 		return unavailable("response_validation")
 	}
-	return map[string]any{
+	result := map[string]any{
 		"kind": "assessment_policy_metadata", "decision": "POLICY_ONLY", "assessment_performed": false, "scope": "TRADE_ASSESSMENT",
 		"policy_version": version, "max_investment_per_candidate": budget,
 		"maximum_contracts_per_candidate": snapshot["maximum_contracts_per_candidate"],
 		"standard_contract_multiplier":    100, "paper_only": true,
-		"human_approval_required": true, "execution_allowed": false,
-	}, nil
+	}
+	if managed {
+		result["contract_version"] = "managed-assessment-v1"
+		result["assessment_authority"] = "assessment_only"
+		result["approval_gate"] = map[string]any{
+			"required": gate.Required, "revision": gate.Revision,
+			"scope": map[string]any{"workspace_id": gate.WorkspaceID, "assessment_key_id": gate.AssessmentKeyID},
+		}
+	} else {
+		result["human_approval_required"] = true
+		result["execution_allowed"] = false
+	}
+	return result, nil
 }

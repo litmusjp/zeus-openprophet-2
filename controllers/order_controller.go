@@ -698,19 +698,72 @@ func (oc *OrderController) optionsResponseWithIdentity(intent *interfaces.Order,
 		result.Message = message
 	}
 	if intent != nil && intent.Metadata != "" && len(intent.Metadata) <= 262144 {
-		var audit struct {
-			Scope                 string `json:"scope"`
-			AssessmentID          string `json:"assessment_id"`
-			Decision              string `json:"decision"`
-			Pass                  bool   `json:"pass"`
-			ExecutionAllowed      bool   `json:"execution_allowed"`
-			HumanApprovalRequired bool   `json:"human_approval_required"`
-		}
-		if json.Unmarshal([]byte(intent.Metadata), &audit) == nil && audit.Scope == "TRADE_ASSESSMENT" && audit.AssessmentID != "" && audit.Decision == "PASS" && audit.Pass && !audit.ExecutionAllowed && audit.HumanApprovalRequired {
-			result.AssessmentDecision = "PASS"
-		}
+		result.AssessmentDecision = assessmentDecisionFromAudit(intent.Metadata)
 	}
 	return result
+}
+
+func assessmentDecisionFromAudit(metadata string) string {
+	var audit map[string]any
+	decoder := json.NewDecoder(strings.NewReader(metadata))
+	decoder.UseNumber()
+	if decoder.Decode(&audit) != nil || audit["scope"] != "TRADE_ASSESSMENT" || audit["decision"] != "PASS" || audit["pass"] != true {
+		return ""
+	}
+	if audit["contract_version"] == "managed-assessment-v1" {
+		_, executionClaim := audit["execution_allowed"]
+		_, approvalClaim := audit["human_approval_required"]
+		if audit["assessment_authority"] != "assessment_only" || executionClaim || approvalClaim || !standaloneUUID.MatchString(fmt.Sprint(audit["assessment_id"])) {
+			return ""
+		}
+		gate, ok := audit["approval_gate"].(map[string]any)
+		if !ok || gate["required"] != false {
+			return ""
+		}
+		revision, ok := gate["revision"].(json.Number)
+		if !ok {
+			return ""
+		}
+		rev, err := revision.Int64()
+		if err != nil || rev <= 0 {
+			return ""
+		}
+		scope, ok := gate["scope"].(map[string]any)
+		if !ok {
+			return ""
+		}
+		workspaceID, wok := scope["workspace_id"].(string)
+		keyID, kok := scope["assessment_key_id"].(string)
+		if !wok || !kok || !standaloneUUID.MatchString(workspaceID) || !standaloneUUID.MatchString(keyID) {
+			return ""
+		}
+		version, ok := audit["policy_version"].(string)
+		marker := strings.LastIndex(version, ":managed:")
+		base := ""
+		if marker >= 0 {
+			base = version[:marker]
+		}
+		hexHash := strings.TrimPrefix(base, "standalone-paper-advisory-v1:")
+		if !ok || marker < 0 || len(hexHash) != 64 || strings.Trim(hexHash, "0123456789abcdef") != "" || version != base+fmt.Sprintf(":managed:%d:False", rev) {
+			return ""
+		}
+		return "PASS"
+	}
+	if _, hasContract := audit["contract_version"]; hasContract {
+		return ""
+	}
+	if _, partial := audit["approval_gate"]; partial || audit["assessment_authority"] != nil {
+		return ""
+	}
+	var legacy struct {
+		AssessmentID          string `json:"assessment_id"`
+		ExecutionAllowed      bool   `json:"execution_allowed"`
+		HumanApprovalRequired bool   `json:"human_approval_required"`
+	}
+	if json.Unmarshal([]byte(metadata), &legacy) == nil && standaloneUUID.MatchString(legacy.AssessmentID) && !legacy.ExecutionAllowed && legacy.HumanApprovalRequired {
+		return "PASS"
+	}
+	return ""
 }
 
 func attachAssessmentError(result *interfaces.OrderResult, err error) {
@@ -756,6 +809,10 @@ func attachAssessmentError(result *interfaces.OrderResult, err error) {
 	result.AssessmentStage = safeAssessmentStage(assessmentErr.Stage)
 	if decision == "FAIL" {
 		result.AssessmentReason = "AlphaDesk returned FAIL; re-assess this exact proposal to retrieve current checks and remediation"
+	} else if assessmentErr.Category == "managed_review_required" {
+		result.AssessmentReason = "AlphaDesk human-review lock is ON; new entries are paused until an operator changes the gate"
+	} else if assessmentErr.Stage == "approval_gate" && (assessmentErr.Category == "response_validation" || assessmentErr.Category == "upstream_service_error" || assessmentErr.Category == "transport_error" || assessmentErr.Category == "deadline_exceeded") {
+		result.AssessmentReason = "AlphaDesk managed policy changed or is unknown; refresh current policy and requalify this proposal before a new entry"
 	} else {
 		result.AssessmentReason = "AlphaDesk evidence is unavailable; re-assess after addressing the reported evidence stage"
 	}
@@ -786,14 +843,14 @@ func attachAssessmentError(result *interfaces.OrderResult, err error) {
 }
 func safeAssessmentCategory(value string) string {
 	switch value {
-	case "assessment_rejected", "assessment_decision", "configuration", "response_validation", "transport_error", "deadline_exceeded", "upstream_service_error", "upstream_authentication":
+	case "assessment_rejected", "assessment_decision", "managed_review_required", "configuration", "response_validation", "transport_error", "deadline_exceeded", "upstream_service_error", "upstream_authentication":
 		return value
 	}
 	return "assessment_unavailable"
 }
 func safeAssessmentStage(value string) string {
 	switch value {
-	case "decision", "response_read", "observed_at", "evidence_observed_at", "expires_at", "policy_version", "trade_fingerprint", "checks", "market_data", "market_data.source_quote_times", "signal_score", "policy_snapshot", "trade_echo":
+	case "decision", "response_read", "observed_at", "evidence_observed_at", "expires_at", "policy_version", "trade_fingerprint", "checks", "market_data", "market_data.source_quote_times", "signal_score", "policy_snapshot", "trade_echo", "approval_gate":
 		return value
 	}
 	return "assessment"

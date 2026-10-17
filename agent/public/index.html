@@ -4516,17 +4516,27 @@ function renderAlphaDesk() {
 
 let _managedGateRevision = null;
 let _managedGateSandboxId = null;
+let _managedGateGeneration = 0;
+let _managedGateSavePending = false;
+let _managedGateSaveSandboxId = null;
+let _managedGateSaveGeneration = null;
 async function loadManagedReviewGate() {
   const toggle = document.getElementById('alphadesk-review-required');
   const state = document.getElementById('alphadesk-review-state');
   const sid = getEffectiveSandboxId();
-  _managedGateRevision = null; _managedGateSandboxId = sid;
-  toggle.disabled = true; state.textContent = 'Loading authoritative state…'; state.style.color = 'var(--ink-muted)';
+  const saveOwnsScope = _managedGateSavePending && sid === _managedGateSaveSandboxId;
+  const generation = saveOwnsScope ? _managedGateGeneration : ++_managedGateGeneration;
+  if (!saveOwnsScope) {
+    _managedGateRevision = null; _managedGateSandboxId = sid;
+    toggle.disabled = true; state.textContent = 'Loading authoritative state…'; state.style.color = 'var(--ink-muted)';
+  } else if (_managedGateSaveGeneration !== generation) {
+    toggle.disabled = true; state.textContent = 'Saving authoritative state…'; state.style.color = 'var(--ink-muted)';
+  }
   if (!sid || sid === '_manager') { state.textContent = 'Unknown — select a managed sandbox.'; return; }
   try {
     const response = await fetch('/api/plugins/alphadesk/managed-review-gate?sandboxId=' + encodeURIComponent(sid), { cache: 'no-store' });
     const result = await response.json();
-    if (sid !== getEffectiveSandboxId()) return;
+    if (generation !== _managedGateGeneration || sid !== getEffectiveSandboxId() || _managedGateSavePending) return;
     if (!response.ok || result.status !== 'effective' || !Number.isSafeInteger(result.revision)) throw new Error(result.error || 'Readback unavailable');
     _managedGateRevision = result.revision;
     toggle.checked = result.required === true; toggle.disabled = false;
@@ -4534,7 +4544,7 @@ async function loadManagedReviewGate() {
     state.textContent = `Effective — shared L1 + L2 review lock ${result.required ? 'ON' : 'OFF'}, revision ${result.revision}; OP2 confirmation ${op2}. Fetched ${result.fetchedAt}.`;
     state.style.color = 'var(--success)';
   } catch (error) {
-    if (sid !== getEffectiveSandboxId()) return;
+    if (generation !== _managedGateGeneration || sid !== getEffectiveSandboxId() || _managedGateSavePending) return;
     toggle.checked = false; state.textContent = `Unknown — ${error.message || 'authoritative read failed'}`; state.style.color = 'var(--error)';
   }
 }
@@ -4543,12 +4553,15 @@ async function saveManagedReviewGate() {
   const toggle = document.getElementById('alphadesk-review-required');
   const state = document.getElementById('alphadesk-review-state');
   const sid = getEffectiveSandboxId(); const requested = toggle.checked; const revision = _managedGateRevision;
+  if (_managedGateSavePending) return;
   if (!sid || sid !== _managedGateSandboxId || !Number.isSafeInteger(revision)) { await loadManagedReviewGate(); return; }
+  const generation = ++_managedGateGeneration;
+  _managedGateSavePending = true; _managedGateSaveSandboxId = sid; _managedGateSaveGeneration = generation;
   toggle.disabled = true; state.textContent = 'Saving — authoritative readback pending…'; state.style.color = 'var(--ink-muted)';
   try {
     const response = await fetch('/api/plugins/alphadesk/managed-review-gate', { method: 'PUT', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sandboxId: sid, required: requested, expectedRevision: revision }) });
     const result = await response.json();
-    if (sid !== getEffectiveSandboxId()) return;
+    if (generation !== _managedGateGeneration || sid !== getEffectiveSandboxId()) return;
     if (!response.ok || result.status !== 'effective' || result.required !== requested || !Number.isSafeInteger(result.revision)) {
       const failure = new Error(result.error || 'Save readback failed'); failure.status = result.status; throw failure;
     }
@@ -4556,7 +4569,13 @@ async function saveManagedReviewGate() {
     state.textContent = `Effective — shared L1 + L2 review lock ${result.required ? 'ON' : 'OFF'}, revision ${result.revision}; OP2 confirmation ${result.op2RequireConfirmation ? 'ON' : 'OFF'}. Fetched ${result.fetchedAt}.`;
     state.style.color = 'var(--success)';
   } catch (error) {
-    toggle.disabled = true; state.textContent = `${error.status === 'stale' ? 'Failed — state changed; reload required.' : 'Unknown —'} ${error.message || 'authoritative readback failed'}`; state.style.color = 'var(--error)';
+    if (generation === _managedGateGeneration && sid === getEffectiveSandboxId()) {
+      toggle.disabled = true; state.textContent = `${error.status === 'stale' ? 'Failed — state changed; reload required.' : 'Unknown —'} ${error.message || 'authoritative readback failed'}`; state.style.color = 'var(--error)';
+    }
+  } finally {
+    _managedGateSavePending = false; _managedGateSaveSandboxId = null; _managedGateSaveGeneration = null;
+    if (generation === _managedGateGeneration) _managedGateGeneration++;
+    else void loadManagedReviewGate();
   }
 }
 function alphaDeskConfigBody() {

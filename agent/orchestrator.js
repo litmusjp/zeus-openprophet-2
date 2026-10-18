@@ -9,7 +9,7 @@ import axios from 'axios';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
 import { enqueueProphetBotBinaryOperation } from './binary-operation-lock.js';
 
-import { AgentHarness } from './harness.js';
+import { AgentHarness, AgentState } from './harness.js';
 import { alpacaTradingUrl, portForAgent, tradingPolicyEnvironment } from './defaults.js';
 import {
   getSandbox,
@@ -455,7 +455,11 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   getState(sandboxId) {
-    const runtime = this.ensureRuntime(sandboxId);
+    const runtime = this.getSandboxRuntime(sandboxId);
+    if (!runtime) {
+      if (!getSandbox(sandboxId)) throw new Error(`Sandbox not found: ${sandboxId}`);
+      return new AgentState().toJSON();
+    }
     return runtime.harness.state.toJSON();
   }
 

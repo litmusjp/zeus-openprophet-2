@@ -45,6 +45,9 @@ func TestManagedGateStatesAndBrokerBoundary(t *testing.T) {
 	pass3 := managedFixture(t, "managed-review-pass.json")
 	locked4 := managedFixture(t, "managed-review-locked.json")
 	pass5 := managedFixture(t, "managed-review-pass-r5.json")
+	for _, receipt := range []map[string]any{pass3, locked4, pass5} {
+		receipt["policy_version"] = receipt["policy_version"].(string) + ":quality:2"
+	}
 	now, err := time.Parse(time.RFC3339Nano, pass3["observed_at"].(string))
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +96,7 @@ func TestManagedGateStatesAndBrokerBoundary(t *testing.T) {
 						stateText = "True"
 					}
 					baseVersion := managedPolicyVersionBase(doc["policy_version"].(string))
-					_ = json.NewEncoder(w).Encode(map[string]any{"scope": "TRADE_ASSESSMENT", "contract_version": doc["contract_version"], "assessment_authority": doc["assessment_authority"], "approval_gate": gate, "policy_version": fmt.Sprintf("%s:managed:%d:%s", baseVersion, stateRevision, stateText), "policy_snapshot": doc["policy_snapshot"], "minimum_passing_score": doc["minimum_passing_score"]})
+					_ = json.NewEncoder(w).Encode(map[string]any{"scope": "TRADE_ASSESSMENT", "contract_version": doc["contract_version"], "assessment_authority": doc["assessment_authority"], "approval_gate": gate, "policy_version": fmt.Sprintf("%s:managed:%d:%s:quality:2", baseVersion, stateRevision, stateText), "policy_snapshot": doc["policy_snapshot"], "minimum_passing_score": doc["minimum_passing_score"]})
 					return
 				}
 				assessmentPosts++

@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,10 +23,12 @@ func TestStandaloneReceiptsSingleFlightSeparateAccountsAndPolicyChanges(t *testi
 	now := time.Now().UTC()
 	var posts atomic.Int32
 	minimum := "65"
+	qualityRevision := 1
 	p := StandaloneTradeProposal{Legs: []StandaloneTradeLeg{{Symbol: "AAPL261106C00200000", Side: "buy"}}, Quantity: 1, LimitPrice: json.Number("2")}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			snapshot, version := standaloneFixturePolicyAt(minimum)
+			version += fmt.Sprintf(":quality:%d", qualityRevision)
 			json.NewEncoder(w).Encode(map[string]any{"scope": "TRADE_ASSESSMENT", "execution_allowed": false, "policy_version": version, "policy_snapshot": snapshot, "minimum_passing_score": minimum})
 			return
 		}
@@ -32,7 +36,10 @@ func TestStandaloneReceiptsSingleFlightSeparateAccountsAndPolicyChanges(t *testi
 		time.Sleep(10 * time.Millisecond)
 		var echo StandaloneTradeProposal
 		json.NewDecoder(r.Body).Decode(&echo)
-		json.NewEncoder(w).Encode(standaloneFixtureReceiptAt(echo, now, minimum))
+		receipt := standaloneFixtureReceiptAt(echo, now, minimum)
+		_, receiptVersion := standaloneFixturePolicyAt(minimum)
+		receipt["policy_version"] = fmt.Sprintf("%s:quality:%d", receiptVersion, qualityRevision)
+		json.NewEncoder(w).Encode(receipt)
 	}))
 	defer server.Close()
 	c := &AlphaDeskClient{Enabled: true, SignalQualityEnabled: true, URL: server.URL, APIKey: "fixture-only", HTTP: server.Client(), Now: func() time.Time { return now }}
@@ -75,11 +82,18 @@ func TestStandaloneReceiptsSingleFlightSeparateAccountsAndPolicyChanges(t *testi
 	if posts.Load() != 3 {
 		t.Fatal("policy change did not reassess")
 	}
+	qualityRevision++
+	if _, err := c.cachedStandalone(context.Background(), l1, p, true); err != nil {
+		t.Fatal(err)
+	}
+	if posts.Load() != 4 {
+		t.Fatal("quality policy version change reused an old PASS")
+	}
 	p.Quantity = 2
 	if _, err := c.cachedStandalone(context.Background(), l1, p, false); err != nil {
 		t.Fatal(err)
 	}
-	if posts.Load() != 4 {
+	if posts.Load() != 5 {
 		t.Fatal("changed proposal reused receipt")
 	}
 	if len(c.standaloneLocks) != 0 {
@@ -205,7 +219,15 @@ func TestBoundedSkewCachedPASSPreservesReceiptAndOpeningAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	policyHash := sha256.Sum256(policyBytes)
-	receipt["policy_version"] = "standalone-paper-advisory-v1:" + hex.EncodeToString(policyHash[:])
+	baseVersion := "standalone-paper-advisory-v1:" + hex.EncodeToString(policyHash[:])
+	policyVersion := baseVersion + ":managed:9:False:quality:2"
+	receipt["policy_version"] = policyVersion
+	receipt["contract_version"] = "managed-assessment-v1"
+	receipt["assessment_authority"] = "assessment_only"
+	delete(receipt, "execution_allowed")
+	delete(receipt, "human_approval_required")
+	receipt["approval_gate"] = map[string]any{"required": false, "revision": json.Number("9"), "scope": map[string]any{
+		"workspace_id": "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1", "assessment_key_id": "b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2"}}
 	body, err := json.Marshal(receipt)
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +236,7 @@ func TestBoundedSkewCachedPASSPreservesReceiptAndOpeningAudit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			gets++
-			_ = json.NewEncoder(w).Encode(map[string]any{"scope": "TRADE_ASSESSMENT", "execution_allowed": false, "policy_version": receipt["policy_version"], "policy_snapshot": snapshot, "minimum_passing_score": receipt["minimum_passing_score"]})
+			_ = json.NewEncoder(w).Encode(map[string]any{"scope": "TRADE_ASSESSMENT", "contract_version": "managed-assessment-v1", "assessment_authority": "assessment_only", "approval_gate": receipt["approval_gate"], "policy_version": policyVersion, "policy_snapshot": snapshot, "minimum_passing_score": receipt["minimum_passing_score"]})
 			return
 		}
 		posts++
@@ -225,7 +247,7 @@ func TestBoundedSkewCachedPASSPreservesReceiptAndOpeningAudit(t *testing.T) {
 	identity := models.DurableIdentity{BrokerAccountID: "paper", PaperLive: "paper", TenantID: "tenant", SandboxID: "sandbox"}
 	cached, err := client.cachedStandalone(context.Background(), identity, proposal, true)
 	if err != nil {
-		t.Fatalf("cached standalone PASS rejected: %v", err)
+		t.Fatalf("cached standalone PASS rejected: %#v (%v)", err, err)
 	}
 	effectiveDeadline := evidenceAt.Add(brokerQuoteMaxAge)
 	cacheEntry := client.standaloneCache[standaloneKey(identity, proposal)]
@@ -271,5 +293,31 @@ func TestBoundedSkewCachedPASSPreservesReceiptAndOpeningAudit(t *testing.T) {
 	}
 	if posts != 1 {
 		t.Fatalf("valid cache reuse caused another assessment POST: %d", posts)
+	}
+}
+
+func TestAssessmentFailureDiagnosticsAreWhitelistedAndPreserved(t *testing.T) {
+	retryable := false
+	doc := map[string]any{
+		"decision": "FAIL", "assessment_id": "888c17f7-e4af-408f-a8bb-50109488f262", "policy_version": "standalone-paper-advisory-v1:abc123:quality:2",
+		"retryable": retryable, "failed_check_codes": []any{"minimum_catalyst_confidence", "bad\nsecret"},
+		"expires_at": "2026-10-06T15:02:00Z", "evidence_observed_at": "2026-10-06T15:00:00Z", "blocking_reasons": []any{"minimum_catalyst_confidence", "bad\nsecret"},
+		"checks": []any{map[string]any{"code": "minimum_catalyst_confidence", "passed": false, "actual": json.Number("0.12"), "threshold": "0.15", "message": "secret upstream body"}, map[string]any{"code": "leg_liquidity", "actual": map[string]any{"open_interest": 1000, "api_key": "secret"}, "threshold": map[string]any{"open_interest": 25}}, map[string]any{"code": "private token", "actual": map[string]any{"secret": "x"}}},
+	}
+	result := &AlphaDeskUnavailableError{Decision: "FAIL", Category: "assessment_rejected", Stage: "decision"}
+	addAssessmentReceiptDiagnostics(result, doc)
+	if result.Decision != "FAIL" || len(result.FailedCheckCodes) != 1 || result.FailedCheckCodes[0] != "minimum_catalyst_confidence" || result.AssessmentID == "" || result.PolicyVersion == "" || result.Retryable == nil || *result.Retryable || result.ExpiresAt.IsZero() || result.EvidenceObservedAt.IsZero() || len(result.BlockingReasons) != 1 {
+		t.Fatalf("failure receipt fields lost or invalid: %#v", result)
+	}
+	if len(result.AssessmentChecks) != 2 || result.AssessmentChecks[0].Actual != json.Number("0.12") || result.AssessmentChecks[0].Threshold != "0.15" || result.AssessmentChecks[0].Passed == nil || *result.AssessmentChecks[0].Passed {
+		t.Fatalf("safe actual/required diagnostics missing: %#v", result.AssessmentChecks)
+	}
+	liquidityActual := result.AssessmentChecks[1].Actual.(map[string]any)
+	if liquidityActual["open_interest"] != 1000 || liquidityActual["api_key"] != nil {
+		t.Fatalf("unsafe nested actual was not filtered: %#v", liquidityActual)
+	}
+	serialized, _ := json.Marshal(result)
+	if strings.Contains(string(serialized), "secret upstream body") || strings.Contains(string(serialized), "bad\\nsecret") || strings.Contains(string(serialized), "private token") {
+		t.Fatalf("unsafe upstream values leaked: %s", serialized)
 	}
 }

@@ -27,7 +27,7 @@ func TestOptionsOrderRequestHasNoClientAssessmentAuthorizationField(t *testing.T
 }
 
 func TestManagedAuditProjectionUsesGateContractAndRejectsLegacyClaims(t *testing.T) {
-	managed := `{"scope":"TRADE_ASSESSMENT","assessment_id":"888c17f7-e4af-408f-a8bb-50109488f262","decision":"PASS","pass":true,"contract_version":"managed-assessment-v1","assessment_authority":"assessment_only","approval_gate":{"required":false,"revision":3,"scope":{"workspace_id":"a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1","assessment_key_id":"b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2"}},"policy_version":"standalone-paper-advisory-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:managed:3:False"}`
+	managed := `{"scope":"TRADE_ASSESSMENT","assessment_id":"888c17f7-e4af-408f-a8bb-50109488f262","decision":"PASS","pass":true,"contract_version":"managed-assessment-v1","assessment_authority":"assessment_only","approval_gate":{"required":false,"revision":9,"scope":{"workspace_id":"a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1","assessment_key_id":"b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2"}},"policy_version":"standalone-paper-advisory-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:managed:9:False:quality:2"}`
 	if got := assessmentDecisionFromAudit(managed); got != "PASS" {
 		t.Fatalf("managed audited PASS not projected: %q", got)
 	}
@@ -35,7 +35,8 @@ func TestManagedAuditProjectionUsesGateContractAndRejectsLegacyClaims(t *testing
 		strings.Replace(managed, `"required":false`, `"required":true`, 1),
 		strings.Replace(managed, `"assessment_authority":"assessment_only"`, `"assessment_authority":"trade_authority"`, 1),
 		strings.Replace(managed, `"assessment_authority":"assessment_only"`, `"assessment_authority":"assessment_only","human_approval_required":true`, 1),
-		strings.Replace(managed, `:managed:3:False`, `:managed:4:False`, 1),
+		strings.Replace(managed, `:managed:9:False`, `:managed:8:False`, 1),
+		strings.Replace(managed, `:managed:9:False`, `:managed:9:True`, 1),
 	} {
 		if got := assessmentDecisionFromAudit(invalid); got != "" {
 			t.Fatalf("contradictory managed audit projected PASS: %q", got)

@@ -14,7 +14,7 @@ import (
 
 func standaloneUnavailable(code string, stages ...string) gin.H {
 	result := gin.H{"decision": "UNAVAILABLE", "signal_score": nil, "execution_allowed": false,
-		"scope": "TRADE_ASSESSMENT", "retryable": true, "score_profile": "catalyst_momentum_v1", "score_components": nil,
+		"scope": "TRADE_ASSESSMENT", "retryable": nil, "score_profile": "catalyst_momentum_v1", "score_components": nil,
 		"advisory_policy_profile": "paper_advisory_greeks_v1", "advisory_policy_hash": "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca", "policy_version": nil, "paper_only": true, "human_approval_required": true,
 		"market_data": gin.H{"source": "unknown", "feed": nil, "requested_feed": "indicative", "quality": "testing_only", "greeks_calculation_provenance": nil, "greeks_calculation_freshness": "unknown", "warnings": []string{"greek_calculation_time_unknown"}},
 		"checks":      []any{}, "blocking_reasons": []string{code},
@@ -107,6 +107,30 @@ func addStandaloneErrorDiagnostics(result gin.H, unavailable *services.AlphaDesk
 	}
 	if unavailable.ClockDeltaMillis != nil && *unavailable.ClockDeltaMillis >= 0 && *unavailable.ClockDeltaMillis <= 60000 {
 		result["clock_delta_millis"] = *unavailable.ClockDeltaMillis
+	}
+	if unavailable.AssessmentID != "" && standaloneUUID.MatchString(unavailable.AssessmentID) {
+		result["assessment_id"] = unavailable.AssessmentID
+	}
+	if unavailable.PolicyVersion != "" {
+		result["policy_version"] = unavailable.PolicyVersion
+	}
+	if len(unavailable.FailedCheckCodes) > 0 {
+		result["failed_check_codes"] = unavailable.FailedCheckCodes
+	}
+	if len(unavailable.AssessmentChecks) > 0 {
+		result["checks"] = unavailable.AssessmentChecks
+	}
+	if unavailable.Retryable != nil {
+		result["retryable"] = *unavailable.Retryable
+	}
+	if !unavailable.ExpiresAt.IsZero() {
+		result["expires_at"] = unavailable.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !unavailable.EvidenceObservedAt.IsZero() {
+		result["evidence_observed_at"] = unavailable.EvidenceObservedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if len(unavailable.BlockingReasons) > 0 {
+		result["blocking_reasons"] = unavailable.BlockingReasons
 	}
 }
 

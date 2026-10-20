@@ -113,37 +113,52 @@ type MarketClock struct {
 
 // OrderResult describes broker acknowledgement separately from confirmed execution.
 type OrderResult struct {
-	BrokerAccountID    string     `json:"broker_account_id,omitempty"`
-	PaperLive          string     `json:"paper_live,omitempty"`
-	TenantID           string     `json:"tenant_id,omitempty"`
-	SandboxID          string     `json:"sandbox_id,omitempty"`
-	OrderID            string     `json:"order_id,omitempty"`
-	Status             string     `json:"status"`
-	Message            string     `json:"message"`
-	ClientOrderID      string     `json:"client_order_id,omitempty"`
-	FilledQty          float64    `json:"filled_qty"`
-	FilledAvgPrice     *float64   `json:"filled_avg_price,omitempty"`
-	SubmittedAt        time.Time  `json:"submitted_at,omitempty"`
-	FilledAt           *time.Time `json:"filled_at,omitempty"`
-	CanceledAt         *time.Time `json:"canceled_at,omitempty"`
-	Symbol             string     `json:"symbol,omitempty"`
-	Side               string     `json:"side,omitempty"`
-	Qty                float64    `json:"qty,omitempty"`
-	Type               string     `json:"type,omitempty"`
-	TimeInForce        string     `json:"time_in_force,omitempty"`
-	LimitPrice         *float64   `json:"limit_price,omitempty"`
-	StopPrice          *float64   `json:"stop_price,omitempty"`
-	AssetClass         string     `json:"asset_class,omitempty"`
-	Underlying         string     `json:"underlying,omitempty"`
-	PositionIntent     string     `json:"position_intent,omitempty"`
-	Purpose            string     `json:"purpose,omitempty"`
-	ExecutionConfirmed bool       `json:"execution_confirmed"`
-	FullyFilled        bool       `json:"fully_filled"`
-	NextEligibleAt     *time.Time `json:"next_eligible_at,omitempty"`
-	AssessmentDecision string     `json:"assessment_decision,omitempty"`
-	AssessmentCategory string     `json:"assessment_category,omitempty"`
-	AssessmentStage    string     `json:"assessment_stage,omitempty"`
-	AssessmentReason   string     `json:"assessment_reason,omitempty"`
+	BrokerAccountID              string                      `json:"broker_account_id,omitempty"`
+	PaperLive                    string                      `json:"paper_live,omitempty"`
+	TenantID                     string                      `json:"tenant_id,omitempty"`
+	SandboxID                    string                      `json:"sandbox_id,omitempty"`
+	OrderID                      string                      `json:"order_id,omitempty"`
+	Status                       string                      `json:"status"`
+	Message                      string                      `json:"message"`
+	ClientOrderID                string                      `json:"client_order_id,omitempty"`
+	FilledQty                    float64                     `json:"filled_qty"`
+	FilledAvgPrice               *float64                    `json:"filled_avg_price,omitempty"`
+	SubmittedAt                  time.Time                   `json:"submitted_at,omitempty"`
+	FilledAt                     *time.Time                  `json:"filled_at,omitempty"`
+	CanceledAt                   *time.Time                  `json:"canceled_at,omitempty"`
+	Symbol                       string                      `json:"symbol,omitempty"`
+	Side                         string                      `json:"side,omitempty"`
+	Qty                          float64                     `json:"qty,omitempty"`
+	Type                         string                      `json:"type,omitempty"`
+	TimeInForce                  string                      `json:"time_in_force,omitempty"`
+	LimitPrice                   *float64                    `json:"limit_price,omitempty"`
+	StopPrice                    *float64                    `json:"stop_price,omitempty"`
+	AssetClass                   string                      `json:"asset_class,omitempty"`
+	Underlying                   string                      `json:"underlying,omitempty"`
+	PositionIntent               string                      `json:"position_intent,omitempty"`
+	Purpose                      string                      `json:"purpose,omitempty"`
+	ExecutionConfirmed           bool                        `json:"execution_confirmed"`
+	FullyFilled                  bool                        `json:"fully_filled"`
+	NextEligibleAt               *time.Time                  `json:"next_eligible_at,omitempty"`
+	AssessmentDecision           string                      `json:"assessment_decision,omitempty"`
+	AssessmentCategory           string                      `json:"assessment_category,omitempty"`
+	AssessmentStage              string                      `json:"assessment_stage,omitempty"`
+	AssessmentReason             string                      `json:"assessment_reason,omitempty"`
+	AssessmentID                 string                      `json:"assessment_id,omitempty"`
+	AssessmentPolicyVersion      string                      `json:"assessment_policy_version,omitempty"`
+	FailedCheckCodes             []string                    `json:"failed_check_codes,omitempty"`
+	AssessmentChecks             []AssessmentCheckDiagnostic `json:"assessment_checks,omitempty"`
+	AssessmentRetryable          *bool                       `json:"assessment_retryable,omitempty"`
+	AssessmentExpiresAt          *time.Time                  `json:"assessment_expires_at,omitempty"`
+	AssessmentEvidenceObservedAt *time.Time                  `json:"assessment_evidence_observed_at,omitempty"`
+	AssessmentBlockingReasons    []string                    `json:"assessment_blocking_reasons,omitempty"`
+}
+
+type AssessmentCheckDiagnostic struct {
+	Code      string `json:"code"`
+	Passed    *bool  `json:"passed,omitempty"`
+	Actual    any    `json:"actual,omitempty"`
+	Threshold any    `json:"threshold,omitempty"`
 }
 
 type Position struct {
@@ -290,6 +305,9 @@ type AlphaDeskAssessment struct {
 	ManagedGateAssessmentKeyID   string                        `json:"managed_gate_assessment_key_id,omitempty"`
 	Pass                         bool                          `json:"pass"`
 	FailedCheckCodes             []string                      `json:"failed_check_codes,omitempty"`
+	BlockingReasons              []string                      `json:"blocking_reasons,omitempty"`
+	Remediation                  []string                      `json:"remediation,omitempty"`
+	Retryable                    *bool                         `json:"retryable,omitempty"`
 	PolicyVersion                string                        `json:"policy_version,omitempty"`
 	MarketEvidenceAt             time.Time                     `json:"market_evidence_at,omitempty"`
 	ObservedAt                   time.Time                     `json:"observed_at,omitempty"`

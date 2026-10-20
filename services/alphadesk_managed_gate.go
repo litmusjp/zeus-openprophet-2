@@ -17,6 +17,8 @@ type managedApprovalGate struct {
 }
 
 var managedScopeUUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var managedPolicyQualitySuffix = regexp.MustCompile(`:quality:[1-9][0-9]*$`)
+var managedPolicyGateSuffix = regexp.MustCompile(`:managed:[1-9][0-9]*:(?:True|False)$`)
 
 func managedGateUnavailable(reason string, currentlyRequired bool) error {
 	category := "response_validation"
@@ -82,22 +84,33 @@ func parseManagedApprovalGate(doc map[string]any) (managedApprovalGate, bool, er
 		return gate, true, errors.New("managed gate assessment key scope is invalid")
 	}
 	version, ok := doc["policy_version"].(string)
-	stateText := "False"
-	if gate.Required {
-		stateText = "True"
-	}
-	if !ok || version != managedPolicyVersionBase(version)+fmt.Sprintf(":managed:%d:%s", gate.Revision, stateText) {
+	if !ok || !ManagedPolicyVersionMatchesGate(version, gate.Revision, gate.Required) {
 		return gate, true, errors.New("managed policy version does not bind the gate revision and state")
 	}
 	return gate, true, nil
 }
 
 func managedPolicyVersionBase(version string) string {
+	version = managedPolicyQualitySuffix.ReplaceAllString(version, "")
 	marker := strings.LastIndex(version, ":managed:")
-	if marker < 0 {
+	if marker < 0 || !managedPolicyGateSuffix.MatchString(version[marker:]) {
 		return version
 	}
 	return version[:marker]
+}
+
+// ManagedPolicyVersionBase removes only the supported managed and quality suffixes.
+func ManagedPolicyVersionBase(version string) string { return managedPolicyVersionBase(version) }
+
+// ManagedPolicyVersionMatchesGate accepts the legacy managed suffix and its additive quality suffix.
+func ManagedPolicyVersionMatchesGate(version string, revision int64, required bool) bool {
+	stateText := "False"
+	if required {
+		stateText = "True"
+	}
+	base := managedPolicyVersionBase(version)
+	return revision > 0 && version == base+fmt.Sprintf(":managed:%d:%s", revision, stateText) ||
+		revision > 0 && managedPolicyQualitySuffix.MatchString(version) && strings.TrimSuffix(version, managedPolicyQualitySuffix.FindString(version)) == base+fmt.Sprintf(":managed:%d:%s", revision, stateText)
 }
 
 func sameManagedApprovalGate(a, b managedApprovalGate) bool {

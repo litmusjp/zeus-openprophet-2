@@ -61,6 +61,127 @@ func standaloneDiagnostics(doc map[string]any) map[string]any {
 	doc["op2_effective_expires_at"] = effective.Format(time.RFC3339Nano)
 	return doc
 }
+
+func safeAssessmentDiagnosticText(value string, limit int, allowed string) string {
+	if value == "" || len(value) > limit {
+		return ""
+	}
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || containsRune(allowed, r)) {
+			return ""
+		}
+	}
+	return value
+}
+
+func containsRune(value string, target rune) bool {
+	for _, r := range value {
+		if r == target {
+			return true
+		}
+	}
+	return false
+}
+
+func safeAssessmentDiagnosticValue(value any) any {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case json.Number:
+		if number, err := typed.Float64(); err == nil && !math.IsNaN(number) && !math.IsInf(number, 0) {
+			return typed
+		}
+	case float64:
+		if !math.IsNaN(typed) && !math.IsInf(typed, 0) {
+			return typed
+		}
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return typed
+	case string:
+		return safeAssessmentDiagnosticText(typed, 128, " _.,:%/+()-")
+	case map[string]any:
+		allowed := map[string]bool{"open_interest": true, "quote_size": true, "bid_size": true, "ask_size": true, "delta": true, "gamma": true, "theta": true, "vega": true, "spread_ratio": true, "price": true, "volume": true, "tradable": true, "fresh": true, "status": true, "minimum": true, "maximum": true}
+		clean := make(map[string]any)
+		for key, item := range typed {
+			if !allowed[key] {
+				continue
+			}
+			if scalar := safeAssessmentDiagnosticValue(item); scalar != nil {
+				clean[key] = scalar
+			}
+		}
+		if len(clean) > 0 {
+			return clean
+		}
+	}
+	return nil
+}
+
+func addAssessmentReceiptDiagnostics(target *AlphaDeskUnavailableError, doc map[string]any) {
+	if target == nil || doc == nil {
+		return
+	}
+	if id, ok := doc["assessment_id"].(string); ok && standaloneAssessmentUUID.MatchString(id) {
+		target.AssessmentID = id
+	}
+	if version, ok := doc["policy_version"].(string); ok {
+		target.PolicyVersion = safeAssessmentDiagnosticText(version, 256, ":._-")
+	}
+	if retryable, ok := doc["retryable"].(bool); ok {
+		target.Retryable = &retryable
+	}
+	if expires, ok := doc["expires_at"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, expires); err == nil {
+			target.ExpiresAt = parsed.UTC()
+		}
+	}
+	if evidence, ok := doc["evidence_observed_at"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, evidence); err == nil {
+			target.EvidenceObservedAt = parsed.UTC()
+		}
+	}
+	if reasons, ok := doc["blocking_reasons"].([]any); ok {
+		for _, item := range reasons {
+			if reason, ok := item.(string); ok {
+				if safe := safeAssessmentDiagnosticText(reason, 128, "_.:-"); safe != "" {
+					target.BlockingReasons = append(target.BlockingReasons, safe)
+				}
+			}
+		}
+	}
+	if codes, ok := doc["failed_check_codes"].([]any); ok {
+		for _, item := range codes {
+			if code, ok := item.(string); ok {
+				if safe := safeAssessmentDiagnosticText(code, 128, "_.:-"); safe != "" {
+					target.FailedCheckCodes = append(target.FailedCheckCodes, safe)
+				}
+			}
+		}
+	}
+	if checks, ok := doc["checks"].([]any); ok {
+		for _, item := range checks {
+			check, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			code, ok := check["code"].(string)
+			if !ok {
+				continue
+			}
+			code = safeAssessmentDiagnosticText(code, 128, "_.:-")
+			if code == "" {
+				continue
+			}
+			diagnostic := interfaces.AssessmentCheckDiagnostic{Code: code}
+			if passed, ok := check["passed"].(bool); ok {
+				diagnostic.Passed = &passed
+			}
+			diagnostic.Actual = safeAssessmentDiagnosticValue(check["actual"])
+			diagnostic.Threshold = safeAssessmentDiagnosticValue(check["threshold"])
+			target.AssessmentChecks = append(target.AssessmentChecks, diagnostic)
+		}
+	}
+}
 func standaloneKey(identity models.DurableIdentity, p StandaloneTradeProposal) string {
 	data, _ := json.Marshal(struct {
 		Identity models.DurableIdentity
@@ -380,7 +501,9 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 		if decision == "FAIL" {
 			category = "assessment_rejected"
 		}
-		return &AlphaDeskUnavailableError{Reason: reason, Decision: decision, Category: category, Stage: "decision"}
+		assessmentError := &AlphaDeskUnavailableError{Reason: reason, Decision: decision, Category: category, Stage: "decision"}
+		addAssessmentReceiptDiagnostics(assessmentError, doc)
+		return assessmentError
 	}
 	if doc["advisory_policy_profile"] == "paper_advisory_greeks_v1" && !allowPaperAdvisory {
 		return &AlphaDeskUnavailableError{Reason: "Paper advisory assessment cannot authorize an order"}

@@ -113,6 +113,13 @@ type AlphaDeskUnavailableError struct {
 	ProviderObservedAt string
 	ConsumerCheckedAt  string
 	ClockDeltaMillis   *int64
+	FailedCheckCodes   []string
+	AssessmentChecks   []interfaces.AssessmentCheckDiagnostic
+	PolicyVersion      string
+	Retryable          *bool
+	ExpiresAt          time.Time
+	EvidenceObservedAt time.Time
+	BlockingReasons    []string
 }
 
 type AlphaDeskConfigurationError struct{ Reason string }
@@ -267,6 +274,9 @@ func (c *AlphaDeskClient) assess(ctx context.Context, req AlphaDeskAssessmentReq
 		Policy                       any                                      `json:"policy_snapshot"`
 		Evidence                     any                                      `json:"checks"`
 		FailedCheckCodes             []string                                 `json:"failed_check_codes"`
+		BlockingReasons              []string                                 `json:"blocking_reasons"`
+		Remediation                  []string                                 `json:"remediation"`
+		Retryable                    *bool                                    `json:"retryable"`
 		PolicyVersion                string                                   `json:"policy_version"`
 		MarketEvidenceAt             time.Time                                `json:"market_evidence_at"`
 		ObservedAt                   time.Time                                `json:"observed_at"`
@@ -323,7 +333,7 @@ func (c *AlphaDeskClient) assess(ctx context.Context, req AlphaDeskAssessmentReq
 	if v.StrategyIdentity != nil {
 		strategyIdentity = *v.StrategyIdentity
 	}
-	return &interfaces.AlphaDeskAssessment{Scope: v.Scope, AssessmentID: v.AssessmentID, Decision: v.Decision, Pass: v.Pass != nil && *v.Pass, SignalScore: signalScore, Threshold: thresholdValue, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed, FailedCheckCodes: v.FailedCheckCodes, PolicyVersion: v.PolicyVersion, MarketEvidenceAt: v.MarketEvidenceAt, ObservedAt: v.ObservedAt, ScoreSource: v.ScoreSource, ScoreObservedAt: v.ScoreObservedAt, StrategyIdentity: strategyIdentity, AutonomousPaperAuthorization: v.AutonomousPaperAuthorization, ExternalIdentity: identity, ExternalIdentityPresent: identityPresent}, nil
+	return &interfaces.AlphaDeskAssessment{Scope: v.Scope, AssessmentID: v.AssessmentID, Decision: v.Decision, Pass: v.Pass != nil && *v.Pass, SignalScore: signalScore, Threshold: thresholdValue, Policy: v.Policy, Evidence: v.Evidence, ExpiresAt: v.ExpiresAt, Fingerprint: req.TradeFingerprint, HumanApprovalRequired: v.HumanApprovalRequired, ExecutionAllowed: v.ExecutionAllowed, FailedCheckCodes: v.FailedCheckCodes, BlockingReasons: v.BlockingReasons, Remediation: v.Remediation, Retryable: v.Retryable, PolicyVersion: v.PolicyVersion, MarketEvidenceAt: v.MarketEvidenceAt, ObservedAt: v.ObservedAt, ScoreSource: v.ScoreSource, ScoreObservedAt: v.ScoreObservedAt, StrategyIdentity: strategyIdentity, AutonomousPaperAuthorization: v.AutonomousPaperAuthorization, ExternalIdentity: identity, ExternalIdentityPresent: identityPresent}, nil
 }
 
 func ValidateAlphaDeskSignalQuality(a *interfaces.AlphaDeskAssessment, expectedFingerprint string, identity models.DurableIdentity, now time.Time) error {

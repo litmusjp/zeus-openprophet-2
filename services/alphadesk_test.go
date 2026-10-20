@@ -67,7 +67,7 @@ func TestAlphaDeskAssessmentUsesExactContractAndMapsLiveResponse(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		_, _ = w.Write([]byte(`{"pass":true,"decision":"PASS","assessment_id":"a-1","market_scanner_signal_score":72.5,"policy_snapshot":{"minimum_signal_score":"65"},"policy_version":"v1","market_evidence_at":"2026-09-22T01:00:00Z","observed_at":"2026-09-22T01:00:01Z","expires_at":"2026-09-22T01:01:00Z","paper_only":true,"human_approval_required":true,"execution_allowed":false}`))
+		_, _ = w.Write([]byte(`{"pass":true,"decision":"PASS","assessment_id":"a-1","market_scanner_signal_score":72.5,"policy_snapshot":{"minimum_signal_score":"65"},"policy_version":"v1","market_evidence_at":"2026-09-22T01:00:00Z","observed_at":"2026-09-22T01:00:01Z","expires_at":"2026-09-22T01:01:00Z","paper_only":true,"human_approval_required":true,"execution_allowed":false,"failed_check_codes":[],"blocking_reasons":[],"remediation":[],"retryable":false,"checks":[{"code":"price_action_not_confirming","actual":"weak","threshold":"confirmed","passed":true}]}`))
 	}))
 	defer ts.Close()
 	c := &AlphaDeskClient{Enabled: true, URL: ts.URL, APIKey: "secret", HTTP: ts.Client(), Now: time.Now}
@@ -90,6 +90,9 @@ func TestAlphaDeskAssessmentUsesExactContractAndMapsLiveResponse(t *testing.T) {
 	}
 	if a.SignalScore == nil || *a.SignalScore != 72.5 || a.Threshold == nil || *a.Threshold != 65 {
 		t.Fatalf("mapped assessment = %#v", a)
+	}
+	if a.Retryable == nil || *a.Retryable || a.Evidence == nil || len(a.BlockingReasons) != 0 || len(a.Remediation) != 0 {
+		t.Fatalf("assessment diagnostics were not preserved: %#v", a)
 	}
 }
 

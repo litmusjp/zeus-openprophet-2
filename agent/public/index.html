@@ -982,6 +982,14 @@
                 <div class="config-card-desc">Shared AlphaDesk connection: L1 + L2. ON locks new options entries until an operator turns it OFF. It is not a per-order approval queue and does not cancel orders or close positions. OFF may make a request eligible after all independent checks; it does not guarantee execution or a fill.</div>
                 <div id="alphadesk-review-state" role="status" aria-live="polite" style="margin-top:8px;font-size:12px;color:var(--ink-muted)">Unknown — select a managed sandbox to read the authoritative state.</div>
               </div>
+              <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+                <div class="config-card-title">Managed assessment quality — shared L1 + L2</div>
+                <div class="config-card-desc">Operator-only quality settings for the shared managed connection. These do not change other workspace or scanner policies.</div>
+                <div class="form-group" style="margin-top:12px"><label for="alphadesk-quality-score">Minimum signal score <span style="font-weight:400;color:var(--ink-muted)">Default: 30</span></label><input type="number" id="alphadesk-quality-score" min="0" max="100" step="0.01" value="25" oninput="markManagedQualityDirty()"></div>
+                <div class="form-group"><label for="alphadesk-quality-catalyst">Minimum catalyst confidence <span style="font-weight:400;color:var(--ink-muted)">Default: 0.20</span></label><input type="number" id="alphadesk-quality-catalyst" min="0" max="1" step="0.01" value="0.15" oninput="markManagedQualityDirty()"></div>
+                <div class="form-group"><label><input type="checkbox" id="alphadesk-quality-price" checked onchange="markManagedQualityDirty()"> Require price-action confirmation</label></div>
+                <div class="config-card-actions"><button class="btn primary sm" id="alphadesk-quality-save" onclick="saveManagedQuality()" disabled>Save quality settings</button><span id="alphadesk-quality-state" role="status" aria-live="polite" style="font-size:12px;color:var(--ink-muted);margin-left:8px">Unknown — select a managed sandbox to read authoritative settings.</span></div>
+              </div>
             </div>
           </div>
         </div>
@@ -4512,6 +4520,7 @@ function renderAlphaDesk() {
   b.textContent = a.enabled && a.url ? 'Enabled' : 'Disabled';
   b.style.color = a.enabled && a.url ? 'var(--success)' : 'var(--ink-faint)';
   loadManagedReviewGate();
+  loadManagedQuality();
 }
 
 let _managedGateRevision = null;
@@ -4576,6 +4585,100 @@ async function saveManagedReviewGate() {
     _managedGateSavePending = false; _managedGateSaveSandboxId = null; _managedGateSaveGeneration = null;
     if (generation === _managedGateGeneration) _managedGateGeneration++;
     else void loadManagedReviewGate();
+  }
+}
+let _managedQualityRevision = null;
+let _managedQualityCurrent = null;
+let _managedQualitySandboxId = null;
+let _managedQualityGeneration = 0;
+let _managedQualityDirty = false;
+let _managedQualityDirtyScope = null;
+let _managedQualitySavePending = false;
+function managedQualityValues() {
+  return { minimumSignalScore: Number(document.getElementById('alphadesk-quality-score').value),
+    minimumCatalystConfidence: Number(document.getElementById('alphadesk-quality-catalyst').value),
+    requirePriceActionConfirmation: document.getElementById('alphadesk-quality-price').checked };
+}
+function markManagedQualityDirty() {
+  if (!_managedQualityDirty) _managedQualityDirtyScope = getEffectiveSandboxId();
+  _managedQualityDirty = true; document.getElementById('alphadesk-quality-save').disabled = false;
+}
+function validManagedQuality(v) {
+  return Number.isFinite(v.minimumSignalScore) && v.minimumSignalScore >= 0 && v.minimumSignalScore <= 100
+    && Number.isFinite(v.minimumCatalystConfidence) && v.minimumCatalystConfidence >= 0 && v.minimumCatalystConfidence <= 1
+    && typeof v.requirePriceActionConfirmation === 'boolean';
+}
+async function loadManagedQuality() {
+  const state = document.getElementById('alphadesk-quality-state'); const save = document.getElementById('alphadesk-quality-save');
+  const sid = getEffectiveSandboxId();
+  const sharedManagedScope = ['sbx_723be98b', 'sbx_956ff9e4'];
+  if (_managedQualitySavePending) return;
+  if (_managedQualityDirty) {
+    if (sharedManagedScope.includes(sid) && sharedManagedScope.includes(_managedQualityDirtyScope)) {
+      _managedQualitySandboxId = sid; save.disabled = !Number.isSafeInteger(_managedQualityRevision);
+      state.textContent = 'Pending edits — shared L1 + L2 settings; save to apply.'; state.style.color = 'var(--ink-muted)'; return;
+    }
+    _managedQualityGeneration++; _managedQualitySandboxId = sid; save.disabled = true;
+    state.textContent = 'Unknown — pending edits belong to the managed L1 + L2 connection; select it to continue.'; state.style.color = 'var(--ink-muted)'; return;
+  }
+  const generation = ++_managedQualityGeneration; _managedQualitySandboxId = sid; _managedQualityRevision = null;
+  save.disabled = true; state.textContent = 'Loading authoritative settings…'; state.style.color = 'var(--ink-muted)';
+  if (!sid || sid === '_manager') { state.textContent = 'Unknown — select a managed sandbox.'; return; }
+  try {
+    const response = await fetch('/api/plugins/alphadesk/managed-quality-settings?sandboxId=' + encodeURIComponent(sid), { cache: 'no-store' });
+    const result = await response.json();
+    if (generation !== _managedQualityGeneration || sid !== getEffectiveSandboxId() || _managedQualitySavePending) return;
+    const effective = result.effective || {};
+    if (!response.ok || result.status !== 'effective' || !Number.isSafeInteger(result.revision) || result.revision < 1
+      || !validManagedQuality({ minimumSignalScore: effective.minimum_signal_score, minimumCatalystConfidence: effective.minimum_catalyst_confidence, requirePriceActionConfirmation: effective.require_price_action_confirmation })
+      || typeof effective.require_price_action_confirmation !== 'boolean'
+      || result.defaults?.minimum_signal_score !== 30 || result.defaults?.minimum_catalyst_confidence !== 0.2 || result.defaults?.require_price_action_confirmation !== true) throw new Error(result.error || 'Readback unavailable or invalid');
+    _managedQualityRevision = result.revision;
+    _managedQualityCurrent = { minimumSignalScore: effective.minimum_signal_score, minimumCatalystConfidence: effective.minimum_catalyst_confidence, requirePriceActionConfirmation: effective.require_price_action_confirmation };
+    if (_managedQualityDirty) {
+      save.disabled = false; state.textContent = 'Pending edits — authoritative revision loaded; save to apply.'; state.style.color = 'var(--ink-muted)'; return;
+    }
+    document.getElementById('alphadesk-quality-score').value = effective.minimum_signal_score;
+    document.getElementById('alphadesk-quality-catalyst').value = effective.minimum_catalyst_confidence;
+    document.getElementById('alphadesk-quality-price').checked = effective.require_price_action_confirmation;
+    state.textContent = `Effective — shared L1 + L2; revision ${result.revision}. Fetched ${result.fetchedAt}.`;
+    state.style.color = 'var(--success)';
+  } catch (error) {
+    if (generation !== _managedQualityGeneration || sid !== getEffectiveSandboxId() || _managedQualitySavePending) return;
+    state.textContent = `Unknown — ${error.message || 'authoritative read failed'}`; state.style.color = 'var(--error)';
+  }
+}
+async function saveManagedQuality() {
+  const state = document.getElementById('alphadesk-quality-state'); const save = document.getElementById('alphadesk-quality-save');
+  const sid = getEffectiveSandboxId(); const requested = managedQualityValues(); const revision = _managedQualityRevision;
+  if (_managedQualitySavePending) return;
+  if (!document.getElementById('alphadesk-quality-score').value.trim() || !document.getElementById('alphadesk-quality-catalyst').value.trim() || !validManagedQuality(requested)) { state.textContent = 'Failed — values must be finite (score 0–100; catalyst 0–1).'; state.style.color = 'var(--error)'; return; }
+  if (!sid || sid !== _managedQualitySandboxId || !Number.isSafeInteger(revision)) { state.textContent = 'Unknown — load authoritative settings before saving.'; state.style.color = 'var(--error)'; return; }
+  const changed = !_managedQualityCurrent || requested.minimumSignalScore !== _managedQualityCurrent.minimumSignalScore
+    || requested.minimumCatalystConfidence !== _managedQualityCurrent.minimumCatalystConfidence
+    || requested.requirePriceActionConfirmation !== _managedQualityCurrent.requirePriceActionConfirmation;
+  const generation = ++_managedQualityGeneration; _managedQualitySavePending = true; save.disabled = true;
+  state.textContent = 'Saving — independent authoritative readback pending…'; state.style.color = 'var(--ink-muted)';
+  try {
+    const response = await fetch('/api/plugins/alphadesk/managed-quality-settings', { method: 'PUT', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sandboxId: sid, ...requested, expectedRevision: revision }) });
+    const result = await response.json();
+    if (generation !== _managedQualityGeneration || sid !== getEffectiveSandboxId()) return;
+    const validRevision = changed ? result.revision === revision + 1
+      : result.revision === revision || result.revision === revision + 1;
+    if (!response.ok || result.status !== 'effective' || !Number.isSafeInteger(result.revision) || result.revision < 1 || !validRevision
+      || result.effective?.minimum_signal_score !== requested.minimumSignalScore
+      || result.effective?.minimum_catalyst_confidence !== requested.minimumCatalystConfidence
+      || result.effective?.require_price_action_confirmation !== requested.requirePriceActionConfirmation) throw Object.assign(new Error(result.error || 'Readback did not match'), { status: result.status });
+    _managedQualityRevision = result.revision; _managedQualityCurrent = requested; _managedQualityDirty = false; _managedQualityDirtyScope = null;
+    state.textContent = `Effective — shared L1 + L2; revision ${result.revision}. Independently read back ${result.fetchedAt}.`; state.style.color = 'var(--success)';
+  } catch (error) {
+    if (generation === _managedQualityGeneration && sid === getEffectiveSandboxId()) {
+      const label = error.status === 'stale' ? 'Failed — policy changed; reload required.' : error.status === 'failed' ? 'Failed —' : 'Unknown —';
+      state.textContent = `${label} ${error.message || 'authoritative readback failed'}`; state.style.color = 'var(--error)';
+    }
+  } finally {
+    _managedQualitySavePending = false;
+    if (generation === _managedQualityGeneration) save.disabled = false; else void loadManagedQuality();
   }
 }
 function alphaDeskConfigBody() {

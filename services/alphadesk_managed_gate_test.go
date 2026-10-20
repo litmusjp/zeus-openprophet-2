@@ -28,13 +28,18 @@ func TestAlphaDeskClientReadsManagedGateRequirementFromGoEnvironment(t *testing.
 func TestManagedApprovalContractStrictValidation(t *testing.T) {
 	good := map[string]any{
 		"contract_version": "managed-assessment-v1", "assessment_authority": "assessment_only",
-		"approval_gate": map[string]any{"required": false, "revision": json.Number("3"),
+		"approval_gate": map[string]any{"required": false, "revision": json.Number("9"),
 			"scope": map[string]any{"workspace_id": "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1", "assessment_key_id": "b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2"}},
-		"policy_version": "base:managed:3:False",
+		"policy_version": "base:managed:9:False:quality:2",
 	}
 	gate, managed, err := parseManagedApprovalGate(good)
-	if err != nil || !managed || gate.Required || gate.Revision != 3 || gate.WorkspaceID != "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1" || gate.AssessmentKeyID != "b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2" {
+	if err != nil || !managed || gate.Required || gate.Revision != 9 || gate.WorkspaceID != "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1" || gate.AssessmentKeyID != "b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2" {
 		t.Fatalf("parse managed gate=%+v managed=%v err=%v", gate, managed, err)
+	}
+	legacy := standaloneClone(mustJSON(t, good))
+	legacy["policy_version"] = "base:managed:9:False"
+	if _, managed, err := parseManagedApprovalGate(legacy); err != nil || !managed {
+		t.Fatalf("legacy managed policy version was rejected: managed=%v err=%v", managed, err)
 	}
 	for name, mutate := range map[string]func(map[string]any){
 		"wrong revision type": func(doc map[string]any) { doc["approval_gate"].(map[string]any)["revision"] = float64(3) },
@@ -44,7 +49,9 @@ func TestManagedApprovalContractStrictValidation(t *testing.T) {
 		"missing scope": func(doc map[string]any) {
 			delete(doc["approval_gate"].(map[string]any)["scope"].(map[string]any), "workspace_id")
 		},
-		"wrong bool suffix":        func(doc map[string]any) { doc["policy_version"] = "base:managed:3:True" },
+		"wrong bool suffix":        func(doc map[string]any) { doc["policy_version"] = "base:managed:9:True:quality:2" },
+		"wrong revision suffix":    func(doc map[string]any) { doc["policy_version"] = "base:managed:8:False:quality:2" },
+		"malformed quality suffix": func(doc map[string]any) { doc["policy_version"] = "base:managed:9:False:quality:02" },
 		"legacy contradiction":     func(doc map[string]any) { doc["human_approval_required"] = true },
 		"unknown version":          func(doc map[string]any) { doc["contract_version"] = "managed-assessment-v9" },
 		"partial managed contract": func(doc map[string]any) { delete(doc, "contract_version") },

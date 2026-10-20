@@ -738,13 +738,9 @@ func assessmentDecisionFromAudit(metadata string) string {
 			return ""
 		}
 		version, ok := audit["policy_version"].(string)
-		marker := strings.LastIndex(version, ":managed:")
-		base := ""
-		if marker >= 0 {
-			base = version[:marker]
-		}
+		base := services.ManagedPolicyVersionBase(version)
 		hexHash := strings.TrimPrefix(base, "standalone-paper-advisory-v1:")
-		if !ok || marker < 0 || len(hexHash) != 64 || strings.Trim(hexHash, "0123456789abcdef") != "" || version != base+fmt.Sprintf(":managed:%d:False", rev) {
+		if !ok || !services.ManagedPolicyVersionMatchesGate(version, rev, false) || len(hexHash) != 64 || strings.Trim(hexHash, "0123456789abcdef") != "" {
 			return ""
 		}
 		return "PASS"
@@ -840,6 +836,24 @@ func attachAssessmentError(result *interfaces.OrderResult, err error) {
 	if value := safeStandaloneTimestamp(assessmentErr.ConsumerCheckedAt); value != "" {
 		result.AssessmentReason += "; consumer checked_at " + value
 	}
+	if assessmentErr.AssessmentID != "" && standaloneUUID.MatchString(assessmentErr.AssessmentID) {
+		result.AssessmentID = assessmentErr.AssessmentID
+	}
+	if assessmentErr.PolicyVersion != "" {
+		result.AssessmentPolicyVersion = assessmentErr.PolicyVersion
+	}
+	result.FailedCheckCodes = append([]string(nil), assessmentErr.FailedCheckCodes...)
+	result.AssessmentChecks = append([]interfaces.AssessmentCheckDiagnostic(nil), assessmentErr.AssessmentChecks...)
+	result.AssessmentRetryable = assessmentErr.Retryable
+	if !assessmentErr.ExpiresAt.IsZero() {
+		expires := assessmentErr.ExpiresAt
+		result.AssessmentExpiresAt = &expires
+	}
+	if !assessmentErr.EvidenceObservedAt.IsZero() {
+		evidenceAt := assessmentErr.EvidenceObservedAt
+		result.AssessmentEvidenceObservedAt = &evidenceAt
+	}
+	result.AssessmentBlockingReasons = append([]string(nil), assessmentErr.BlockingReasons...)
 }
 func safeAssessmentCategory(value string) string {
 	switch value {

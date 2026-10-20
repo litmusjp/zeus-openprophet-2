@@ -22,3 +22,16 @@ test('AlphaDesk UI tests saved sandbox settings without saving or restarting', (
   assert.match(testSource, /JSON\.stringify\(\{sandboxId:sid\}\)/);
   assert.doesNotMatch(testSource, /apiKey/);
 });
+
+test('managed quality controls are separate, default ON, shared, and require authoritative scoped readback', () => {
+  assert.match(html, /Managed assessment quality — shared L1 \+ L2/);
+  assert.match(html, /Default: 30/);
+  assert.match(html, /Default: 0\.20/);
+  assert.match(html, /id="alphadesk-quality-price" checked/);
+  assert.match(html, /managed-quality-settings\?sandboxId=/);
+  assert.match(html, /expectedRevision: revision/);
+  assert.match(html, /Independent(?:ly)? authoritative readback|independent authoritative readback/i);
+  assert.match(html, /_managedQualityGeneration/);
+  assert.match(html, /_managedQualityDirty/);
+  assert.match(html, /typeof v\.requirePriceActionConfirmation === 'boolean'/);
+});

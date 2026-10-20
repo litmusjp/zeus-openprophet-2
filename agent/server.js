@@ -39,7 +39,7 @@ import { redactSecrets } from './redaction.js';
 import { formatSlackNotification } from './slack-format.js';
 import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, createBasicAuthMiddleware, createBasicOperatorOnlyMiddleware, resolveApiAuthToken } from './auth.js';
-import { createManagedGateProxy, registerManagedGateProxy } from './managed-gate-proxy.js';
+import { createManagedGateProxy, registerManagedGateProxy, createManagedQualityProxy, registerManagedQualityProxy } from './managed-gate-proxy.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
 import { savePluginAndApplyRuntime } from './plugin-runtime-apply.js';
 import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
@@ -1851,6 +1851,8 @@ app.get('/api/plugins/:name', (req, res) => {
 
 const managedGateProxy = createManagedGateProxy({ getSandbox, getPluginForSandbox });
 registerManagedGateProxy(app, { proxy: managedGateProxy, operatorOnly: basicOperatorOnly });
+const managedQualityProxy = createManagedQualityProxy({ getSandbox, getPluginForSandbox });
+registerManagedQualityProxy(app, { proxy: managedQualityProxy, operatorOnly: basicOperatorOnly });
 
 app.put('/api/plugins/:name', (req, res, next) => {
   if (req.params.name === 'alphadesk') return operatorAuthMiddleware(req, res, next);

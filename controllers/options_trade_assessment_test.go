@@ -22,6 +22,7 @@ type standaloneOnlyService struct {
 	policyErr     bool
 	policyCalls   int
 	assessmentErr *services.AlphaDeskUnavailableError
+	assessment    map[string]any
 }
 
 func (s *standaloneOnlyService) ReadStandaloneAssessmentPolicy(_ context.Context) (map[string]any, error) {
@@ -40,7 +41,37 @@ func (s *standaloneOnlyService) AssessOptionsTradeReadOnly(_ context.Context, p 
 		}
 		return nil, &services.AlphaDeskUnavailableError{Reason: "private upstream detail", Category: s.errorCategory, Stage: s.errorStage}
 	}
+	if s.assessment != nil {
+		return s.assessment, nil
+	}
 	return map[string]any{"decision": "FAIL", "signal_score": 40, "execution_allowed": false, "remediation": []string{"genuine stronger signal required"}}, nil
+}
+
+func TestStandaloneFailDiagnosticsRemainActionableThroughController(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	checks := []map[string]any{{"code": "minimum_catalyst_confidence", "passed": false, "actual": 0.12, "threshold": 0.15, "message": "Catalyst confidence is below policy."}}
+	service := &standaloneOnlyService{assessment: map[string]any{"decision": "FAIL", "signal_score": 28.0, "failed_check_codes": []string{"minimum_catalyst_confidence"}, "checks": checks, "policy_version": "v:quality:2", "retryable": false, "blocking_reasons": []string{"minimum_catalyst_confidence"}, "execution_allowed": false}}
+	router := gin.New()
+	router.POST("/options/trade-assessment", NewOrderController(service, nil, nil).AssessOptionsTrade)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/options/trade-assessment", strings.NewReader(`{"legs":[{"symbol":"AAPL261106C00200000","side":"buy"}],"quantity":1,"limit_price":1.84}`)))
+	body := w.Body.String()
+	for _, want := range []string{`"decision":"FAIL"`, `"failed_check_codes":["minimum_catalyst_confidence"]`, `"actual":0.12`, `"threshold":0.15`, `"policy_version":"v:quality:2"`, `"retryable":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing actionable assessment diagnostic %s: %s", want, body)
+		}
+	}
+}
+
+func TestFinalOrderAssessmentFailureCarriesSafeCheckDetails(t *testing.T) {
+	passed := false
+	retryable := false
+	result := &interfaces.OrderResult{}
+	err := &services.AlphaDeskUnavailableError{Decision: "FAIL", Category: "assessment_rejected", Stage: "decision", AssessmentID: "888c17f7-e4af-408f-a8bb-50109488f262", PolicyVersion: "standalone-paper-advisory-v1:abc123:quality:2", FailedCheckCodes: []string{"minimum_catalyst_confidence"}, Retryable: &retryable, AssessmentChecks: []interfaces.AssessmentCheckDiagnostic{{Code: "minimum_catalyst_confidence", Passed: &passed, Actual: 0.12, Threshold: 0.15}}}
+	attachAssessmentError(result, err)
+	if result.AssessmentDecision != "FAIL" || result.AssessmentID == "" || result.AssessmentPolicyVersion == "" || result.AssessmentRetryable == nil || *result.AssessmentRetryable || len(result.FailedCheckCodes) != 1 || len(result.AssessmentChecks) != 1 || result.AssessmentChecks[0].Actual != 0.12 || result.AssessmentChecks[0].Threshold != 0.15 {
+		t.Fatalf("final order failure diagnostics lost: %#v", result)
+	}
 }
 
 func TestStandaloneUnavailableProjectsOnlySafeReceiptDiagnostics(t *testing.T) {

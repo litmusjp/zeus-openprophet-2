@@ -48,9 +48,10 @@ test('Herald-owned prompt alone gets a focused supported menu and coherent asses
 
 test('options order alone receives 15 seconds while unsafe mutation failures remain one attempt', async () => {
   assert.match(mcp, /endpoint === '\/options\/order' \? 15000 : endpoint === '\/options\/trade-assessment' \? 6000 : 3000/);
-  const begin = mcp.indexOf('async function callTradingBot(');
-  const end = mcp.indexOf('\n}', begin) + 2;
-  assert.ok(begin >= 0 && end > begin);
+  const begin = mcp.indexOf('function formatTradingBotFailure(');
+  const callStart = mcp.indexOf('async function callTradingBot(', begin);
+  const end = mcp.indexOf('\n}', callStart) + 2;
+  assert.ok(begin >= 0 && callStart > begin && end > callStart);
   const callTradingBot = mcp.slice(begin, end);
   const context = {
     Date,

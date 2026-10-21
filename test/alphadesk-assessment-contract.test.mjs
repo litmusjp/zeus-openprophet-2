@@ -17,8 +17,10 @@ test('OpenProphet exposes AlphaDesk as read-only assessment, not an order route'
 });
 
 test('assessment tool returns structured local 400 validation', async () => {
-  const start = source.indexOf('async function callTradingBot(');
-  const end = source.indexOf('// Automatic memory', start);
+  const start = source.indexOf('function formatTradingBotFailure(');
+  const callStart = source.indexOf('async function callTradingBot(', start);
+  const end = source.indexOf('// Automatic memory', callStart);
+  assert.ok(start >= 0 && callStart > start && end > callStart);
   const validation = { status: 'invalid_request', category: 'local_validation', fields: { symbol: 'OCC symbol required' } };
   const context = {
     Date, JSON, Promise, setTimeout,

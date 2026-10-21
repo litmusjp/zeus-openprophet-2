@@ -970,17 +970,6 @@
           </div>
         </div>
 
-        <div class="section" style="margin-top:24px">
-          <div class="section-title">More Plugins Coming</div>
-          <div class="config-card" style="opacity:0.5">
-            <div class="config-card-header"><span class="config-card-title">Discord</span><span class="badge" style="border-color:var(--ink-faint);color:var(--ink-faint)">Coming Soon</span></div>
-            <div class="config-card-desc">Discord webhook notifications</div>
-          </div>
-          <div class="config-card" style="opacity:0.5">
-            <div class="config-card-header"><span class="config-card-title">Telegram</span><span class="badge" style="border-color:var(--ink-faint);color:var(--ink-faint)">Coming Soon</span></div>
-            <div class="config-card-desc">Telegram bot notifications</div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -3739,12 +3728,14 @@ async function _builderSubmit() {
       systemPromptTemplate: v('f-ag-ptype'),
       customSystemPrompt: v('f-ag-prompt') || '',
     };
-    const url = _builder.isEdit ? '/api/agents/' + encodeURIComponent(_builder.agentId) : '/api/agents';
-    const method = _builder.isEdit ? 'PUT' : 'POST';
+    const updatingAgent = _builder.isEdit || !!_builder.agentId;
+    const url = updatingAgent ? '/api/agents/' + encodeURIComponent(_builder.agentId) : '/api/agents';
+    const method = updatingAgent ? 'PUT' : 'POST';
     const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || 'Failed to save agent');
-    const savedId = _builder.isEdit ? _builder.agentId : d.agent?.id;
+    const savedId = updatingAgent ? _builder.agentId : d.agent?.id;
+    if (savedId) _builder.agentId = savedId;
 
     if (_builder.sandboxId && _builder.permsDirty) {
       const blocked = (document.getElementById('b-perm-blocked')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -3763,16 +3754,26 @@ async function _builderSubmit() {
         blockedTools: blocked,
         sandboxId: _builder.sandboxId,
       };
-      await fetch('/api/permissions', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(permBody) });
+      const permissionResponse = await fetch('/api/permissions', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(permBody) });
+      let permissionResult = {};
+      try { permissionResult = await permissionResponse.json(); } catch { /* some successful write routes have no JSON body */ }
+      if (!permissionResponse.ok || permissionResult.error || permissionResult.ok === false) {
+        throw new Error(String(permissionResult.error || 'Failed to save permissions').slice(0, 180));
+      }
     }
 
     const activateEl = document.getElementById('review-activate');
     let activated = false;
     if (_builder.sandboxId && savedId && activateEl && activateEl.checked) {
-      await fetch('/api/sandboxes/' + encodeURIComponent(_builder.sandboxId) + '/agent', {
+      const activationResponse = await fetch('/api/sandboxes/' + encodeURIComponent(_builder.sandboxId) + '/agent', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ activeAgentId: savedId }),
       });
+      let activationResult = {};
+      try { activationResult = await activationResponse.json(); } catch { /* some successful write routes have no JSON body */ }
+      if (!activationResponse.ok || activationResult.error || activationResult.ok === false) {
+        throw new Error(String(activationResult.error || 'Failed to activate agent').slice(0, 180));
+      }
       activated = true;
     }
 
@@ -3783,7 +3784,7 @@ async function _builderSubmit() {
     showToast((_builder.isEdit ? 'Saved "' : 'Created "') + body.name + '"' + (activated ? ' and activated for ' + _builder.accountLabel : ''), 'success');
     _builder = null;
   } catch (e) {
-    _builderShowError(e.message);
+    _builderShowError(String(e.message || 'Request failed').slice(0, 240));
     btn.disabled = false;
     btn.textContent = original;
   }
@@ -4045,26 +4046,35 @@ function renderPermissions() {
 let _permTimer = null;
 function savePermissions() {
   clearTimeout(_permTimer);
+  const body = {
+    allowPaperTrading: document.getElementById('perm-paper').checked,
+    allowOptions: document.getElementById('perm-options').checked,
+    allowStocks: document.getElementById('perm-stocks').checked,
+    allow0DTE: document.getElementById('perm-0dte').checked,
+    requireConfirmation: document.getElementById('perm-confirm').checked,
+    maxPositionPct: parseInt(document.getElementById('perm-maxpos').value) || 15,
+    maxDeployedPct: parseInt(document.getElementById('perm-maxdeploy').value) || 80,
+    maxDailyLoss: parseInt(document.getElementById('perm-maxloss').value) || 5,
+    maxOpenPositions: parseInt(document.getElementById('perm-maxopen').value) || 10,
+    maxOrderValue: parseInt(document.getElementById('perm-maxorder').value) || 0,
+    maxToolRoundsPerBeat: parseInt(document.getElementById('perm-maxtools').value) || 25,
+    blockedTools: document.getElementById('perm-blocked').value.split(',').map(s => s.trim()).filter(Boolean),
+  };
+  const sid = getEffectiveSandboxId();
+  if (sid) body.sandboxId = sid;
   _permTimer = setTimeout(async () => {
-    const blocked = document.getElementById('perm-blocked').value.split(',').map(s => s.trim()).filter(Boolean);
-    const body = {
-      allowPaperTrading: document.getElementById('perm-paper').checked,
-      allowOptions: document.getElementById('perm-options').checked,
-      allowStocks: document.getElementById('perm-stocks').checked,
-      allow0DTE: document.getElementById('perm-0dte').checked,
-      requireConfirmation: document.getElementById('perm-confirm').checked,
-      maxPositionPct: parseInt(document.getElementById('perm-maxpos').value) || 15,
-      maxDeployedPct: parseInt(document.getElementById('perm-maxdeploy').value) || 80,
-      maxDailyLoss: parseInt(document.getElementById('perm-maxloss').value) || 5,
-      maxOpenPositions: parseInt(document.getElementById('perm-maxopen').value) || 10,
-      maxOrderValue: parseInt(document.getElementById('perm-maxorder').value) || 0,
-      maxToolRoundsPerBeat: parseInt(document.getElementById('perm-maxtools').value) || 25,
-      blockedTools: blocked,
-    };
-    const sid = getEffectiveSandboxId();
-    if (sid) body.sandboxId = sid;
-    await fetch('/api/permissions', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    await refreshSelectedSandboxConfig();
+    try {
+      const response = await fetch('/api/permissions', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      let result = {};
+      try { result = await response.json(); } catch { /* some successful write routes have no JSON body */ }
+      if (!response.ok || result.error || result.ok === false) {
+        const message = result.error || 'Failed to save permissions';
+        throw new Error(String(message).slice(0, 180));
+      }
+      if (getEffectiveSandboxId() === sid) await refreshSelectedSandboxConfig();
+    } catch (error) {
+      if (getEffectiveSandboxId() === sid) showToast('Failed to save permissions: ' + String(error.message || 'Request failed').slice(0, 180), 'error');
+    }
   }, 600);
 }
 

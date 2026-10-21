@@ -40,9 +40,10 @@ test('late dashboard and portfolio responses cannot repaint another selected san
   const positions = { l1: deferred(), l2: deferred() };
   const dom = new Map();
   const element = id => dom.get(id) || (dom.set(id, { textContent: '', innerHTML: '', className: '', style: {} }), dom.get(id));
+  const statElement = key => element('stat:' + key);
   const ctx = {
     selectedSandboxId: 'l1', sandboxScoped: {}, config: { sandboxes: { l1: {}, l2: {} } },
-    document: { getElementById: element, querySelector: () => null },
+    document: { getElementById: element, querySelector: selector => statElement(selector.match(/data-stat="([^"]+)"/)?.[1] || '') },
     fetch: url => {
       if (url.includes('/dashboard')) return dashboards[url.includes('l1') ? 'l1' : 'l2'].promise;
       if (url.includes('/portfolio/account')) return accounts[url.includes('l1') ? 'l1' : 'l2'].promise;
@@ -50,7 +51,7 @@ test('late dashboard and portfolio responses cannot repaint another selected san
       return Promise.resolve({ ok: true, json: async () => ({}) });
     },
     renderHeartbeat() {}, renderPermissions() {}, renderSlack() {}, renderAlphaDesk() {}, renderPromptPreview() {},
-    updateState(s) { ctx.state = s; }, log() {}, _setData() {},
+    updateState(s) { ctx.state = s; }, log() {}, _setData(key, value) { statElement(key).textContent = value; },
     clearPortfolioView() {},
   };
   vm.createContext(ctx);
@@ -70,7 +71,8 @@ test('late dashboard and portfolio responses cannot repaint another selected san
   await Promise.all([oldConfig, oldPortfolio]);
   assert.equal(ctx.sandboxScoped.agent.id, 'l2-agent');
   assert.equal(ctx.state.sandboxId, 'l2');
-  assert.equal(element('portfolio-value').textContent, '$200.00');
+  assert.equal(statElement('l2-portfolio').textContent, '$200.00');
+  assert.equal(statElement('l1-portfolio').textContent, '');
 });
 
 test('late failed positions response cannot clear a newly selected portfolio', async () => {
@@ -80,11 +82,11 @@ test('late failed positions response cannot clear a newly selected portfolio', a
   const element = id => dom.get(id) || (dom.set(id, { textContent: '', innerHTML: '', style: {} }), dom.get(id));
   const ctx = {
     selectedSandboxId: 'l1', config: { sandboxes: { l1: {}, l2: {} } },
-    document: { getElementById: element, querySelector: () => null },
+    document: { getElementById: element, querySelector: selector => element('stat:' + (selector.match(/data-stat="([^"]+)"/)?.[1] || '')) },
     fetch: url => url.includes('l1') ? (url.includes('/positions') ? oldPositions.promise : oldAccount.promise) : Promise.resolve({
       ok: true, json: async () => url.includes('/positions') ? [] : { PortfolioValue: 200, Cash: 200, BuyingPower: 200 },
     }),
-    _setData() {},
+    _setData(key, value) { element('stat:' + key).textContent = value; },
   };
   vm.createContext(ctx);
   vm.runInContext(sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', '// ──'), ctx);
@@ -94,8 +96,8 @@ test('late failed positions response cannot clear a newly selected portfolio', a
   oldAccount.resolve({ ok: false });
   oldPositions.resolve({ ok: false });
   await oldRefresh;
-  assert.equal(element('portfolio-value').textContent, '$200.00');
-  assert.match(element('positions-container').innerHTML, /No open positions/);
+  assert.equal(element('stat:l2-portfolio').textContent, '$200.00');
+  assert.match(element('stat:l2-positions').innerHTML, /No open positions/);
 });
 
 test('state and health null schedules clear the selected countdown', async () => {
@@ -103,7 +105,7 @@ test('state and health null schedules clear the selected countdown', async () =>
   const element = id => dom.get(id) || (dom.set(id, { textContent: '', style: {}, classList: { add() {}, toggle() {} } }), dom.get(id));
   const ctx = {
     selectedSandboxId: 'l1', sandboxSchedule: {}, sandboxRuntime: {}, config: { sandboxes: { l1: {} } }, window: {},
-    document: { getElementById: element, querySelector: () => null },
+    document: { getElementById: element, querySelector: selector => element('stat:' + (selector.match(/data-stat="([^"]+)"/)?.[1] || '')) },
     _set: (id, value) => { element(id).textContent = value; }, _setData() {}, fmtInt: String,
     updateInitialStateLabel() {}, updateOperatorCard() {}, updatePhase() {}, updateButtons() {}, startProgress() {},
     addTradeCard() {}, renderAccounts() {}, renderAgents() {}, renderSandboxTabs() {}, refreshSandboxButtons() {},
@@ -153,16 +155,17 @@ test('uncached tab switch shows selected identity and hides mutation buttons whi
 test('portfolio uses the Go fractional UnrealizedPLPC as a percentage', async () => {
   const dom = new Map();
   const element = id => dom.get(id) || (dom.set(id, { textContent: '', innerHTML: '', className: '', style: {} }), dom.get(id));
+  const queryStat = selector => element('stat:' + (selector.match(/data-stat="([^"]+)"/)?.[1] || ''));
   const ctx = {
     selectedSandboxId: 'l1', config: { sandboxes: { l1: {} } },
-    document: { getElementById: element, querySelector: () => null },
+    document: { getElementById: element, querySelector: queryStat },
     fetch: async url => ({ ok: true, json: async () => url.includes('/positions') ? [{ Symbol: 'IWM', UnrealizedPL: 5, UnrealizedPLPC: 0.125, Qty: 1, AvgEntryPrice: 40 }] : { PortfolioValue: 100, Cash: 100, BuyingPower: 100 } }),
-    _setData() {}, clearPortfolioView() {},
+    _setData(key, value) { element('stat:' + key).textContent = value; }, clearPortfolioView() {},
   };
   vm.createContext(ctx);
   vm.runInContext(sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', 'function clearPortfolioView('), ctx);
   await ctx.refreshPortfolio();
-  assert.match(element('positions-container').innerHTML, /12\.5%/);
+  assert.match(element('stat:l1-positions').innerHTML, /12\.5%/);
 });
 
 test('SSE schedules stay sandbox scoped and reconnect refreshes stale state', () => {

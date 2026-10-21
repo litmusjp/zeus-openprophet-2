@@ -692,8 +692,6 @@
       .log-entry .time { font-size: 9px; margin-right: 4px; }
       .terminal { padding: 8px 10px; }
       
-      /* Show portfolio tab on mobile instead of sidebar */
-      .tab-portfolio-mobile { display: inline-flex !important; }
 
       /* Control console mobile - allow the action buttons to wrap inside the console */
       .cc-account { max-width: 96px; }
@@ -703,9 +701,6 @@
       .cc-account { max-width: 74px; padding: 3px 7px; }
       .cc-account-label { display: none; }
       .cc-actions { padding: 5px 7px; gap: 6px; }
-    }
-    @media (min-width: 769px) {
-      .tab-portfolio-mobile { display: none !important; }
     }
   </style>
 </head>
@@ -762,12 +757,10 @@
     <button class="tab active" data-tab="terminal" onclick="switchTab('terminal')"><span class="tab-full">Terminal</span><span class="tab-short">Term</span></button>
     <button class="tab" data-tab="trades" onclick="switchTab('trades')">Trades</button>
     <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
-    <button class="tab tab-portfolio-mobile" data-tab="portfolio" onclick="switchTab('portfolio')"><span class="tab-full">Portfolio</span><span class="tab-short">Port</span></button>
     <button class="tab" data-tab="agents" onclick="switchTab('agents')">Agents</button>
     <button class="tab" data-tab="accounts" onclick="switchTab('accounts')"><span class="tab-full">Accounts</span><span class="tab-short">Accts</span></button>
     <button class="tab" data-tab="plugins" onclick="switchTab('plugins')"><span class="tab-full">Plugins</span><span class="tab-short">Plug</span></button>
     <button class="tab" data-tab="settings" onclick="switchTab('settings')"><span class="tab-full">Settings</span><span class="tab-short">&#9881;</span></button>
-    <button class="tab" data-tab="about" onclick="switchTab('about')">About</button>
   </div>
 
   <!-- Panel Container -->
@@ -844,23 +837,6 @@
           <div class="terminal" id="history-transcript" style="min-height:280px;max-height:520px">
             <div class="log-entry info"><span class="time">--:--:--</span>Select a prior session to view the transcript.</div>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Portfolio Panel (mobile) -->
-    <div class="panel" id="panel-portfolio">
-      <div class="settings-content">
-        <h2>Portfolio</h2>
-        <div class="section">
-          <div class="stat-row"><span class="stat-label">Portfolio Value</span><span class="stat-value" id="m-portfolio">--</span></div>
-          <div class="stat-row"><span class="stat-label">Cash</span><span class="stat-value" id="m-cash">--</span></div>
-          <div class="stat-row"><span class="stat-label">Buying Power</span><span class="stat-value" id="m-bp">--</span></div>
-          <div class="stat-row"><span class="stat-label">Day P&L</span><span class="stat-value" id="m-pnl">--</span></div>
-        </div>
-        <div class="section">
-          <div class="section-title">Positions</div>
-          <div id="m-positions"><div class="no-data">No positions</div></div>
         </div>
       </div>
     </div>
@@ -1047,7 +1023,6 @@
             <div class="section-title" style="font-size:12px;margin-bottom:12px">Trading Controls</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">
               <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-paper" onchange="savePermissions()"> Allow Paper Trading</label>
-              <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-live" onchange="savePermissions()"> Legacy Live Capability</label>
               <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-options" onchange="savePermissions()"> Allow Options</label>
               <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-stocks" onchange="savePermissions()"> Allow Stocks</label>
               <label style="text-transform:none;font-weight:400;font-size:13px"><input type="checkbox" id="perm-0dte" onchange="savePermissions()"> Allow 0DTE</label>
@@ -1087,132 +1062,6 @@
           </div>
           <p style="font-size:11px;color:var(--ink-faint);margin-top:6px">Export agents, strategies, heartbeat settings, and permissions as JSON. Does not include API keys.</p>
         </div>
-      </div>
-    </div>
-    <!-- About Panel -->
-    <div class="panel" id="panel-about">
-      <div class="settings-content" style="max-width:720px;margin:0 auto">
-        
-        <!-- Hero -->
-        <div style="text-align:center;padding:40px 0 32px">
-          <h1 style="font-family:'Crimson Pro',Georgia,serif;font-size:36px;font-weight:700;color:var(--text);margin:0">
-            <span style="color:var(--accent)">Open</span>Prophet
-          </h1>
-          <p style="font-size:15px;color:var(--ink-muted);margin-top:8px;line-height:1.6">
-            Autonomous AI trading agent powered by <a href="https://opencode.ai" target="_blank" style="color:var(--accent);text-decoration:none;font-weight:600">OpenCode</a>.<br>
-            Use any model you want. Multi-account, multi-agent orchestration<br>with real-time market intelligence.
-          </p>
-        </div>
-
-        <!-- Disclaimer -->
-        <div style="padding:14px 18px;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.25);border-radius:8px;margin-bottom:24px">
-          <div style="font-size:12px;font-weight:700;color:#eab308;margin-bottom:4px">Disclaimer</div>
-          <p style="font-size:11px;color:var(--ink-muted);line-height:1.6;margin:0">
-            This software is provided as-is with <strong>no warranties of any kind</strong>, express or implied.
-            This is <strong>not financial advice</strong>. The creator is not a licensed financial professional.
-            Use of live trading (non-paper) accounts is <strong>strongly discouraged</strong> and entirely at your own risk.
-            You are solely responsible for any trades executed and any financial losses incurred.
-            Paper trading is recommended for experimentation and learning purposes only.
-          </p>
-        </div>
-
-        <!-- Creator -->
-        <div style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--bg-dark);border:1px solid var(--border);border-radius:8px;margin-bottom:24px">
-          <img src="img/jake.jpg" alt="Jake Nesler" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:2px solid var(--border)">
-          <div style="flex:1">
-            <div style="font-size:15px;font-weight:600;color:var(--text)">Jake Nesler</div>
-            <div style="font-size:12px;color:var(--ink-muted);margin-top:2px">Creator</div>
-            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:6px">
-              <a href="https://github.com/jakenesler" target="_blank" style="font-size:12px;color:var(--accent);text-decoration:none">GitHub</a>
-              <a href="https://www.linkedin.com/in/jakenesler" target="_blank" style="font-size:12px;color:var(--accent);text-decoration:none">LinkedIn</a>
-              <a href="https://medium.com/@jakenesler" target="_blank" style="font-size:12px;color:var(--accent);text-decoration:none">Medium</a>
-              <a href="https://buymeacoffee.com/jakenesleri" target="_blank" style="font-size:12px;color:var(--accent);text-decoration:none">Buy me a coffee</a>
-            </div>
-          </div>
-        </div>
-
-        <!-- Featured Article -->
-        <a href="https://medium.com/@jakenesler/i-gave-claude-code-100k-to-trade-with-in-the-last-month-and-beat-the-market-ece3fd6dcebc" target="_blank" rel="noopener" style="display:block;padding:16px 20px;background:var(--bg-dark);border:1px solid var(--border);border-radius:8px;text-decoration:none;margin-bottom:24px;transition:border-color 0.2s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
-          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--accent);margin-bottom:6px">Featured on Medium</div>
-          <div style="font-size:14px;font-weight:600;color:var(--text);line-height:1.4">I Gave Claude Code $100K to Trade With in the Last Month and Beat the Market</div>
-          <div style="font-size:11px;color:var(--ink-faint);margin-top:6px">medium.com/@jakenesler &rarr;</div>
-        </a>
-
-        <!-- Support -->
-        <div style="text-align:center;margin-bottom:32px">
-          <a href="https://buymeacoffee.com/jakenesleri" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:10px;padding:12px 28px;background:#FFDD00;color:#000;border-radius:10px;text-decoration:none;font-size:15px;font-weight:600;transition:transform 0.15s,box-shadow 0.15s;box-shadow:0 2px 8px rgba(255,221,0,0.3)" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 14px rgba(255,221,0,0.4)'" onmouseout="this.style.transform='';this.style.boxShadow='0 2px 8px rgba(255,221,0,0.3)'">
-            <span style="font-size:22px">&#9749;</span> Buy me a coffee
-          </a>
-        </div>
-
-        <!-- Also By -->
-        <div style="margin-bottom:32px">
-          <h3 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--ink-muted);margin-bottom:16px">Also by Jake</h3>
-
-          <!-- Cartogopher -->
-          <a href="https://cartogopher.com" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--bg-dark);border:1px solid var(--border);border-radius:8px;text-decoration:none;margin-bottom:12px;transition:border-color 0.2s,transform 0.15s" onmouseover="this.style.borderColor='#7B68EE';this.style.transform='translateY(-1px)'" onmouseout="this.style.borderColor='var(--border)';this.style.transform=''">
-            <div style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#4A90E2,#7B68EE);display:flex;align-items:center;justify-content:center;flex-shrink:0">
-              <span style="font-size:22px;color:#fff;font-weight:800;font-family:'Crimson Pro',Georgia,serif">CG</span>
-            </div>
-            <div style="flex:1">
-              <div style="font-size:16px;font-weight:600;color:var(--text)">CartoGopher</div>
-              <div style="font-size:13px;color:var(--ink-muted);margin-top:2px">AI-powered codebase intelligence. Understand any codebase instantly with 99% token reduction. Maps architecture, dependencies, and code flow for AI agents.</div>
-              <div style="font-size:11px;color:var(--accent);margin-top:6px">cartogopher.com &rarr;</div>
-            </div>
-          </a>
-
-          <!-- AnyRentCloud -->
-          <a href="https://anyrentcloud.com" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:16px;padding:20px;background:var(--bg-dark);border:1px solid var(--border);border-radius:8px;text-decoration:none;margin-bottom:12px;transition:border-color 0.2s,transform 0.15s" onmouseover="this.style.borderColor='#22c55e';this.style.transform='translateY(-1px)'" onmouseout="this.style.borderColor='var(--border)';this.style.transform=''">
-            <img src="img/anyrentcloud.png" alt="AnyRentCloud" style="width:48px;height:48px;border-radius:12px;object-fit:contain;flex-shrink:0;background:#fff;padding:4px">
-            <div style="flex:1">
-              <div style="font-size:16px;font-weight:600;color:var(--text)">AnyRentCloud</div>
-              <div style="font-size:13px;color:var(--ink-muted);margin-top:2px">AI-powered property management platform. Automates tenant communication, maintenance tickets, lease management, and financials with agentic AI workers.</div>
-              <div style="font-size:11px;color:#22c55e;margin-top:6px">anyrentcloud.com &rarr;</div>
-            </div>
-          </a>
-        </div>
-
-        <!-- Tech Stack -->
-        <div style="margin-bottom:32px">
-          <h3 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--ink-muted);margin-bottom:16px">Tech Stack</h3>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:8px">
-            <div style="padding:10px 14px;background:var(--bg-dark);border:1px solid var(--border);border-radius:6px;font-size:12px">
-              <div style="font-weight:600;color:var(--text)">Claude</div>
-              <div style="color:var(--ink-faint);font-size:11px">AI Agent Brain</div>
-            </div>
-            <div style="padding:10px 14px;background:var(--bg-dark);border:1px solid var(--border);border-radius:6px;font-size:12px">
-              <div style="font-weight:600;color:var(--text)">OpenCode</div>
-              <div style="color:var(--ink-faint);font-size:11px">Agent Runtime</div>
-            </div>
-            <div style="padding:10px 14px;background:var(--bg-dark);border:1px solid var(--border);border-radius:6px;font-size:12px">
-              <div style="font-weight:600;color:var(--text)">Go</div>
-              <div style="color:var(--ink-faint);font-size:11px">Trading Backend</div>
-            </div>
-            <div style="padding:10px 14px;background:var(--bg-dark);border:1px solid var(--border);border-radius:6px;font-size:12px">
-              <div style="font-weight:600;color:var(--text)">Node.js</div>
-              <div style="color:var(--ink-faint);font-size:11px">Agent Orchestrator</div>
-            </div>
-            <div style="padding:10px 14px;background:var(--bg-dark);border:1px solid var(--border);border-radius:6px;font-size:12px">
-              <div style="font-weight:600;color:var(--text)">Alpaca</div>
-              <div style="color:var(--ink-faint);font-size:11px">Brokerage API</div>
-            </div>
-            <div style="padding:10px 14px;background:var(--bg-dark);border:1px solid var(--border);border-radius:6px;font-size:12px">
-              <div style="font-weight:600;color:var(--text)">MCP</div>
-              <div style="color:var(--ink-faint);font-size:11px">Tool Protocol</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Links -->
-        <div style="text-align:center;padding:20px 0;border-top:1px solid var(--border);font-size:12px;color:var(--ink-faint)">
-          <a href="https://github.com/jakenesler" target="_blank" style="color:var(--accent);text-decoration:none;margin:0 8px">GitHub</a>
-          &middot;
-          <a href="https://github.com/jakenesler/openprophet" target="_blank" style="color:var(--accent);text-decoration:none;margin:0 8px">Source Code</a>
-          &middot;
-          <a href="https://buymeacoffee.com/jakenesleri" target="_blank" style="color:var(--accent);text-decoration:none;margin:0 8px">Support</a>
-          <div style="margin-top:8px;color:var(--ink-faint)">&copy; 2025-2026 Jake Nesler. All rights reserved.</div>
-        </div>
-
       </div>
     </div>
 
@@ -2046,10 +1895,6 @@ async function refreshPortfolio() {
       const pnlStr = pnl === null ? '--' : (pnl>=0?'+':'') + '$' + pnl.toLocaleString('en-US',{minimumFractionDigits:2});
       const cls = pnl === null ? '' : (pnl>=0? 'positive' : 'negative');
       // Update legacy static IDs
-      ['portfolio-value','m-portfolio'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = pv; });
-      ['cash-value','m-cash'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = cv; });
-      ['bp-value','m-bp'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = bv; });
-      ['day-pnl','m-pnl'].forEach(id => { const e = document.getElementById(id); if(e) { e.textContent = pnlStr; e.className = 'stat-value ' + cls; } });
       // Update per-sandbox sidebar
       if (sid) {
         _setData(sid + '-portfolio', pv);
@@ -2069,7 +1914,6 @@ async function refreshPortfolio() {
         const c = pnl>=0? 'var(--success)' : 'var(--error)';
         return '<div class="card"><div style="display:flex;justify-content:space-between"><span class="symbol">'+sym+'</span><span class="pnl" style="color:'+c+'">'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+pct+'%)</span></div><div style="color:var(--ink-faint);font-size:11px;margin-top:3px">Qty: '+(pos.Qty||pos.qty)+' | Avg: $'+Number(pos.AvgEntryPrice||pos.avg_entry_price||0).toFixed(2)+'</div></div>';
       }).join('') : '<div class="no-data">No open positions</div>';
-      ['positions-container','m-positions'].forEach(id => { const e = document.getElementById(id); if(e) e.innerHTML = html; });
       // Update per-sandbox positions
       if (sid) {
         const posEl = document.querySelector('[data-stat="' + sid + '-positions"]');
@@ -2084,14 +1928,6 @@ async function refreshPortfolio() {
 }
 
 function clearPortfolioView(sid) {
-  ['portfolio-value','cash-value','bp-value','day-pnl','m-portfolio','m-cash','m-bp','m-pnl'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = '--';
-  });
-  ['positions-container','m-positions'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.innerHTML = '<div class="no-data">Sandbox backend unavailable</div>';
-  });
   if (sid) {
     _setData(sid + '-portfolio', '--');
     _setData(sid + '-cash', '--');
@@ -3648,7 +3484,6 @@ async function openAgentBuilder(mode, agent, models, strategies, sandboxId) {
     '<div class="scope-banner">Risk controls belong to <strong>' + esc(accountLabel) + '</strong>\'s account, not to this one agent &mdash; whichever agent runs there is bound by these limits. Adjust them here for convenience, or later from Settings.</div>'
     + '<div class="toggle-grid">'
     + '<label class="toggle-row"><input type="checkbox" id="b-perm-paper" onchange="_builderMarkPermsDirty()"' + (p.allowPaperTrading !== false ? ' checked' : '') + '> Allow paper trading</label>'
-    + '<label class="toggle-row"><input type="checkbox" id="b-perm-live" onchange="_builderMarkPermsDirty()"' + (p.allowLiveTrading !== false ? ' checked' : '') + '> Legacy live capability</label>'
     + '<label class="toggle-row"><input type="checkbox" id="b-perm-options" onchange="_builderMarkPermsDirty()"' + (p.allowOptions !== false ? ' checked' : '') + '> Allow options</label>'
     + '<label class="toggle-row"><input type="checkbox" id="b-perm-stocks" onchange="_builderMarkPermsDirty()"' + (p.allowStocks !== false ? ' checked' : '') + '> Allow stocks</label>'
     + '<label class="toggle-row"><input type="checkbox" id="b-perm-0dte" onchange="_builderMarkPermsDirty()"' + (p.allow0DTE ? ' checked' : '') + '> Allow 0DTE</label>'
@@ -3858,10 +3693,9 @@ function _builderRenderReview() {
     ['Prompt', ptype === 'custom' ? 'Custom' : 'Default template'],
   ];
   if (_builder.sandboxId) {
-    const live = document.getElementById('b-perm-live')?.checked;
     const maxpos = document.getElementById('b-perm-maxpos')?.value;
     const maxloss = document.getElementById('b-perm-maxloss')?.value;
-    rows.push(['Risk (' + esc(_builder.accountLabel) + ')', (live ? 'Live trading allowed' : 'Paper-only') + ' &middot; ' + esc(maxpos) + '% max position &middot; ' + esc(maxloss) + '% max daily loss' + (_builder.permsDirty ? ' (changed)' : '')]);
+    rows.push(['Risk (' + esc(_builder.accountLabel) + ')', esc(maxpos) + '% max position &middot; ' + esc(maxloss) + '% max daily loss' + (_builder.permsDirty ? ' (changed)' : '')]);
   }
 
   const el = document.getElementById('review-content');
@@ -3916,7 +3750,6 @@ async function _builderSubmit() {
       const blocked = (document.getElementById('b-perm-blocked')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
       const permBody = {
         allowPaperTrading: document.getElementById('b-perm-paper').checked,
-        allowLiveTrading: document.getElementById('b-perm-live').checked,
         allowOptions: document.getElementById('b-perm-options').checked,
         allowStocks: document.getElementById('b-perm-stocks').checked,
         allow0DTE: document.getElementById('b-perm-0dte').checked,
@@ -4196,7 +4029,6 @@ function saveHeartbeat() {
 function renderPermissions() {
   const p = sandboxScoped.permissions || config.permissions || {};
   document.getElementById('perm-paper').checked = p.allowPaperTrading !== false;
-  document.getElementById('perm-live').checked = p.allowLiveTrading !== false;
   document.getElementById('perm-options').checked = p.allowOptions !== false;
   document.getElementById('perm-stocks').checked = p.allowStocks !== false;
   document.getElementById('perm-0dte').checked = !!p.allow0DTE;
@@ -4217,7 +4049,6 @@ function savePermissions() {
     const blocked = document.getElementById('perm-blocked').value.split(',').map(s => s.trim()).filter(Boolean);
     const body = {
       allowPaperTrading: document.getElementById('perm-paper').checked,
-      allowLiveTrading: document.getElementById('perm-live').checked,
       allowOptions: document.getElementById('perm-options').checked,
       allowStocks: document.getElementById('perm-stocks').checked,
       allow0DTE: document.getElementById('perm-0dte').checked,

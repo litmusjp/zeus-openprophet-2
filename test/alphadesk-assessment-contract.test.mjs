@@ -42,7 +42,7 @@ test('trade assessment has a six-second read-only budget while ordinary and muta
       OPENPROPHET_SANDBOX_ID: 'sandbox', OPENPROPHET_ACCOUNT_ID: 'account', OPENPROPHET_PROCESS_NONCE: 'nonce',
       axios: config => axios(config, clock),
     };
-    vm.runInNewContext(`${source.slice(source.indexOf('async function callTradingBot('), source.indexOf('// Automatic memory'))}\nthis.callTradingBot = callTradingBot;`, context);
+    vm.runInNewContext(`${source.slice(source.indexOf('function formatTradingBotFailure('), source.indexOf('// Automatic memory'))}\nthis.callTradingBot = callTradingBot;`, context);
     return context.callTradingBot(endpoint, method, {});
   }
 

@@ -80,6 +80,65 @@ async function getTradingBotUrl() {
 let _tradingBotUrl = TRADING_BOT_URL;
 let _lastPortCheck = 0;
 
+function formatTradingBotFailure(endpoint, status, responseDetail, attempts = 0, retryable = false) {
+  const detail = {
+    endpoint,
+    tool: endpoint.replace(/^\//, '').split('/')[0] || 'trading_bot',
+    status: status || null,
+    category: status ? 'upstream_http' : 'transport',
+    attempts,
+    retryable,
+  };
+  if (responseDetail && typeof responseDetail === 'object' && !Array.isArray(responseDetail)) {
+    Object.assign(detail, responseDetail);
+    detail.http_status = status || null;
+  }
+
+  const summary = {};
+  const source = responseDetail && typeof responseDetail === 'object' && !Array.isArray(responseDetail)
+    ? responseDetail : null;
+  if (source) {
+    const addLiteral = (key, maxLength) => {
+      if (typeof source[key] === 'string' && source[key] && source[key].length <= maxLength) summary[key] = source[key];
+    };
+    addLiteral('assessment_decision', 32);
+    addLiteral('assessment_id', 80);
+    addLiteral('assessment_category', 80);
+    addLiteral('assessment_stage', 80);
+    addLiteral('assessment_reason', 180);
+    if (Array.isArray(source.failed_check_codes)) {
+      const codes = source.failed_check_codes.filter(value => typeof value === 'string' && value && value.length <= 100).slice(0, 12);
+      if (codes.length) summary.failed_check_codes = codes;
+    }
+    if (Array.isArray(source.assessment_checks)) {
+      const failed = source.assessment_checks.filter(check => check && typeof check === 'object' && check.passed === false)
+        .slice(0, 12).map(check => ({
+          ...(typeof check.code === 'string' && check.code && check.code.length <= 100 ? { code: check.code } : {}),
+          ...(typeof check.reason === 'string' && check.reason && check.reason.length <= 120 ? { reason: check.reason } : {}),
+        })).filter(check => Object.keys(check).length);
+      if (failed.length) summary.failed_checks = failed;
+    }
+  }
+  let prefix = '';
+  if (Object.keys(summary).length) {
+    const wireLength = () => JSON.stringify(JSON.stringify(summary)).length;
+    while (wireLength() > 1000 && summary.failed_checks?.length) summary.failed_checks.pop();
+    while (wireLength() > 1000 && summary.failed_check_codes?.length > 1) summary.failed_check_codes.pop();
+    if (wireLength() > 1000) delete summary.assessment_reason;
+    if (wireLength() > 1000) delete summary.assessment_stage;
+    if (wireLength() > 1000) delete summary.assessment_category;
+    if (wireLength() > 1000 && summary.failed_check_codes?.length) delete summary.failed_check_codes;
+    if (wireLength() > 1000 && summary.assessment_id) delete summary.assessment_id;
+    if (wireLength() > 1000 && summary.assessment_decision) delete summary.assessment_decision;
+    const encoded = JSON.stringify(summary);
+    prefix = `Assessment diagnostic summary: ${encoded}\n`;
+  }
+  if (status === 404 && /^\/options\/position\/[^/]+$/.test(endpoint)) {
+    prefix += 'Single options-position lookup: no open position found; this is not confirmation of a successful closure.\n';
+  }
+  return { diagnostics: detail, message: `${prefix}Trading bot request failed: ${JSON.stringify(detail)}` };
+}
+
 async function callTradingBot(endpoint, method = 'GET', data = null, options = {}) {
   const safe = method === 'GET' || endpoint === '/options/assessment' || endpoint === '/options/trade-assessment';
   const budgetMs = endpoint === '/options/order' ? 15000 : endpoint === '/options/trade-assessment' ? 6000 : 3000;
@@ -131,21 +190,10 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
   }
   const status = lastError?.response?.status || 0;
   const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
-  const detail = {
-    endpoint,
-    tool: endpoint.replace(/^\//, '').split('/')[0] || 'trading_bot',
-    status: status || null,
-    category: status ? 'upstream_http' : 'transport',
-    attempts: attempt,
-    retryable,
-  };
   const responseDetail = lastError?.response?.data;
-  if (responseDetail && typeof responseDetail === 'object' && !Array.isArray(responseDetail)) {
-    Object.assign(detail, responseDetail);
-    detail.http_status = status || null;
-  }
-  const err = new Error(`Trading bot request failed: ${JSON.stringify(detail)}`);
-  err.diagnostics = detail;
+  const formatted = formatTradingBotFailure(endpoint, status, responseDetail, attempt, retryable);
+  const err = new Error(formatted.message);
+  err.diagnostics = formatted.diagnostics;
   throw err;
 }
 
@@ -974,7 +1022,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_options_position',
-        description: 'Get the broker-reconciled position and remaining quantity for this exact OCC symbol. Use it to size a same-contract sell_to_close; managed-position tools are equities-only.',
+        description: 'Get the broker-reconciled position and remaining quantity for this exact OCC symbol. A 404 means no open position was found, not successful closure; reconcile broker-confirmed exit fills and all options positions to confirm zero remaining contracts. Use the result to size a same-contract sell_to_close; managed-position tools are equities-only.',
         inputSchema: {
           type: 'object',
           properties: {

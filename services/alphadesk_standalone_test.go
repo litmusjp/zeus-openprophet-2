@@ -108,6 +108,15 @@ func TestStandaloneConsumerAcceptsProducerGeneratedFastAPIReceipt(t *testing.T) 
 	if result["decision"] != "PASS" || result["execution_allowed"] != false {
 		t.Fatalf("unexpected producer receipt result: %#v", result)
 	}
+	confidence, ok := result["catalyst_confidence"].(json.Number)
+	if !ok || confidence.String() != "0.9" {
+		t.Fatalf("optional raw producer confidence was not preserved: %#v", result["catalyst_confidence"])
+	}
+	components, ok := result["score_components"].(map[string]any)
+	component, componentOK := components["catalyst_confidence"].(json.Number)
+	if !ok || !componentOK || component.String() != "0.27" {
+		t.Fatalf("weighted score component changed or missing: %#v", result["score_components"])
+	}
 }
 
 func TestProducerDerivedReceiptAllowsBoundedAssessorClockSkew(t *testing.T) {

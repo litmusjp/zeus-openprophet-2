@@ -784,7 +784,7 @@
         <div class="trade-analytics-card">
           <div class="trade-chart-toolbar">
             <div class="trade-chart-controls">
-              <label>Range <select id="trade-range" onchange="updateTradeChart()"><option value="all">Since trading began</option><option value="7d">Past week</option><option value="1d">Last trading day</option></select></label>
+              <label>Range <select id="trade-range" onchange="updateTradeChart()"><option value="all">All time (since trading began)</option><option value="7d">Past week</option><option value="1d">Last trading day</option></select></label>
               <label>View <select id="trade-mode" onchange="updateTradeChart()"><option value="timeseries">Time-series</option><option value="cumulative">Cumulative P/L</option></select></label>
           <span id="trade-account-toggles"></span>
             </div>
@@ -796,7 +796,7 @@
         </div>
         <div class="trade-section-heading"><span>Verified Trade History</span><span id="trade-ledger-status" class="trade-ledger-status"></span></div>
         <div class="verified-filter-bar" id="verified-trade-filters" aria-label="Filters applying only to verified trade history">
-          <strong>Filters apply only to history</strong>
+          <strong>Filters and fill dates apply to verified fills; realized P/L appears on closing fills.</strong>
           <div class="verified-filter-group" id="verified-account-filters"></div><div class="verified-filter-group" id="verified-agent-filters"></div>
           <div class="verified-filter-group" id="verified-asset-filters"></div><div class="verified-filter-group" id="verified-right-filters"></div><div class="verified-filter-group" id="verified-side-filters"></div>
           <div class="verified-filter-group"><strong>Fill date</strong><select id="verified-date-preset"><option value="all">All dates</option><option value="today">Today</option><option value="7">Past 7 days</option><option value="30">Past 30 days</option><option value="custom">Custom</option></select><input type="date" id="verified-date-from" aria-label="From fill date"><input type="date" id="verified-date-to" aria-label="To fill date"><span id="verified-timezone"></span><span id="verified-date-error" role="alert"></span></div>
@@ -1957,7 +1957,12 @@ function isBrokerConfirmedFill(order) {
 
 function tradeAccountKey(item) { return item.accountId || item.accountName || ''; }
 function tradeAgentKey(item) { return item.agentId || '__unassigned__'; }
-function tradeOrderKey(item) { return tradeAccountKey(item) + '\u0000' + (item.ID || item.id || item.orderId || item.BrokerOrderID || item.brokerOrderId || ''); }
+function tradeOrderKey(item) {
+  const account = item?.accountId;
+  const order = item?.orderId ?? item?.ID ?? item?.id ?? item?.BrokerOrderID ?? item?.brokerOrderId;
+  const valid = value => typeof value === 'string' && value.length > 0 && value.trim() === value;
+  return valid(account) && valid(order) ? account + '\u0000' + order : null;
+}
 function tradeAssetInfo(order) {
   const symbol = String(order.Symbol || order.symbol || '').trim().toUpperCase();
   const explicit = String(order.AssetClass || order.assetClass || order.asset_class || '').toLowerCase();
@@ -2106,7 +2111,7 @@ function renderVerifiedTradeFeed() {
   const feed = clearTradeFeed();
   const allFilled = verifiedOrders.filter(isBrokerConfirmedFill), matching = filteredVerifiedOrders();
   const count=document.getElementById('verified-trade-count'), more=document.getElementById('verified-trade-more');
-  if(count) count.textContent=`${matching.length} matching / ${Math.min(matching.length,verifiedTradeFilterState.pageSize)} displayed`;
+  if(count) count.textContent=`${matching.length} matching fills / ${Math.min(matching.length,verifiedTradeFilterState.pageSize)} displayed`;
   if(more) more.hidden=matching.length<=verifiedTradeFilterState.pageSize;
   const dateError=document.getElementById('verified-date-error');
   const invalidRange=Boolean(verifiedTradeFilterState.from && verifiedTradeFilterState.to && verifiedTradeFilterState.from>verifiedTradeFilterState.to);
@@ -2114,22 +2119,32 @@ function renderVerifiedTradeFeed() {
   if(invalidRange) { feed.innerHTML='<div class="no-data">Invalid fill date range.</div>'; return; }
   if (!allFilled.length) { feed.innerHTML = verifiedReconciliationComplete ? '<div class="no-data">No verified fills.</div>' : '<div class="no-data">Verified ledger unavailable or incomplete; complete account data is shown only when available.</div>'; return; }
   if (!matching.length) { feed.innerHTML='<div class="no-data">No verified fills match these filters.</div>'; return; }
-  const realizedByOrder = new Map();
   const realizedEntriesByOrder = new Map();
+  const realizedByEntryOrder = new Map();
   verifiedTrades.forEach(t => {
     const key = tradeOrderKey(t);
-    realizedByOrder.set(key, t);
+    if (!key) return;
     if (!realizedEntriesByOrder.has(key)) realizedEntriesByOrder.set(key, []);
     realizedEntriesByOrder.get(key).push(t);
+    const entryKey = t.entryOrderId ? tradeOrderKey({ accountId: t.accountId, orderId: t.entryOrderId }) : null;
+    if (entryKey) {
+      if (!realizedByEntryOrder.has(entryKey)) realizedByEntryOrder.set(entryKey, []);
+      realizedByEntryOrder.get(entryKey).push(t);
+    }
   });
   matching.slice(0, verifiedTradeFilterState.pageSize).forEach(order => {
     const side = String(order.Side || order.side || '').toLowerCase();
     const price = Number(order.FilledAvgPrice ?? order.filledAvgPrice);
     const quantity = Number(order.FilledQty ?? order.filledQty);
-    const trade = realizedByOrder.get(tradeOrderKey(order));
     const realizedForOrder = realizedEntriesByOrder.get(tradeOrderKey(order)) || [];
-    const entryAssessment = realizedForOrder.length === 1 && realizedForOrder[0].entryOrderId
-      ? realizedForOrder[0].entryAssessment : null;
+    const realizedPnl = realizedForOrder.length && realizedForOrder.every(row => typeof row.pnl === 'number' && Number.isFinite(row.pnl))
+      ? realizedForOrder.reduce((sum, row) => sum + row.pnl, 0) : null;
+    const entryKey = tradeOrderKey(order);
+    const closedBy = realizedByEntryOrder.get(entryKey) || [];
+    const directAssessment = order.broker_identity_verified === true && order.Purpose === 'entry' ? order.entry_assessment : null;
+    const entryAssessment = realizedForOrder.length
+      ? realizedForOrder.length === 1 ? realizedForOrder[0].entryAssessment : null
+      : side === 'buy' ? directAssessment : null;
     const card = document.createElement('div');
     card.className = 'trade-card';
     const header = document.createElement('div'); header.className = 'trade-header';
@@ -2137,11 +2152,28 @@ function renderVerifiedTradeFeed() {
     const sideEl = document.createElement('span'); sideEl.className = 'trade-side ' + side; sideEl.textContent = side || '--';
     header.append(symbol, sideEl); card.appendChild(header);
     const details = document.createElement('div'); details.className = 'trade-details';
-    details.textContent = `${order.accountName || 'Unknown account'} / ${order.agentName || 'Unassigned'} | ${quantity || '?'} @ ${Number.isFinite(price) ? '$' + price.toFixed(2) : 'price pending'} | ${trade ? fmtPnl(trade.pnl) : 'P/L pending'}`;
+    const matchedClosedQuantity = closedBy.reduce((sum, row) => sum + (typeof row.quantity === 'number' && Number.isFinite(row.quantity) ? row.quantity : 0), 0);
+    const entryDisposition = side === 'buy' && !realizedForOrder.length
+      ? closedBy.length
+        ? matchedClosedQuantity < quantity - 1e-8
+          ? `Partial close — ${matchedClosedQuantity} matched closed; ${Math.max(0, quantity - matchedClosedQuantity)} remainder`
+          : 'Closed entry — result on closing fill'
+        : 'No matched exit — realized P/L after exit'
+      : null;
+    const resultLabel = realizedForOrder.length
+      ? Number.isFinite(realizedPnl) ? fmtPnl(realizedPnl) : 'Realized P/L unavailable'
+      : entryDisposition || 'Realized P/L shown on closing fills';
+    details.textContent = `${order.accountName || 'Unknown account'} / ${order.agentName || 'Unassigned'} | ${quantity || '?'} @ ${Number.isFinite(price) ? '$' + price.toFixed(2) : 'price pending'} | ${resultLabel}`;
     const context = document.createElement('div'); context.className = 'trade-assessment-context';
     const assessment = entryAssessment;
-    const score = assessment && typeof assessment.signalScore === 'number' && Number.isFinite(assessment.signalScore) ? assessment.signalScore : 'N/A';
-    const contextValue = assessment ? `assessment ${assessment.assessmentId || 'N/A'} | ${assessment.decision || 'N/A'} | score ${score} (${assessment.scoreProfile || 'profile N/A'}; ${assessment.scoreSource || 'type N/A'}) | observed ${assessment.observedAt || 'N/A'}${assessment.effectiveExpiresAt ? ` | OP2 deadline ${assessment.effectiveExpiresAt}` : ''}` : (realizedForOrder.length > 1 ? 'multiple entry lots; N/A' : 'N/A');
+    const score = assessment && typeof assessment.signalScore === 'number' && Number.isFinite(assessment.signalScore) ? assessment.signalScore : 'Not recorded';
+    const confidence = assessment && typeof assessment.catalystConfidence === 'number' && Number.isFinite(assessment.catalystConfidence) && assessment.catalystConfidence >= 0 && assessment.catalystConfidence <= 1 ? assessment.catalystConfidence : null;
+    const confidenceLabel = confidence === null ? 'catalyst confidence Not recorded' : `raw catalyst confidence ${confidence} (0–1 scale; AlphaDesk evidence)`;
+    const openingStatus = side === 'buy' && !realizedForOrder.length
+      ? closedBy.length ? (matchedClosedQuantity < quantity - 1e-8 ? `Partial close — ${matchedClosedQuantity} matched closed quantity; remainder ${Math.max(0, quantity - matchedClosedQuantity)}; results shown on closing fills` : 'Closed entry — result on closing fill') : 'No matched exit — realized P/L after exit'
+      : '';
+    const scoreSource = assessment?.scoreSource || assessment?.scoreType;
+    const contextValue = assessment ? `assessment ${assessment.assessmentId || 'Not recorded'} | ${assessment.decision || 'Not recorded'} | signal score ${score} (${assessment.scoreProfile || 'profile Not recorded'}; ${scoreSource || 'source Not recorded'}) | ${confidenceLabel} | observed ${assessment.observedAt || 'Not recorded'}${assessment.effectiveExpiresAt ? ` | OP2 deadline ${assessment.effectiveExpiresAt}` : ''}${openingStatus ? ` | ${openingStatus}` : ''}` : (realizedForOrder.length > 1 ? 'Multiple matched entry lots — see entry fills' : realizedForOrder.length === 1 ? 'Closing fill — entry assessment Not recorded' : side === 'buy' && closedBy.length ? `${openingStatus}` : side === 'buy' ? `No matched exit — realized P/L after exit; assessment Not recorded; ${confidenceLabel}` : `Assessment Not recorded; ${confidenceLabel}`);
     context.textContent = `AlphaDesk entry catalyst/momentum context (not a trade quality grade): ${contextValue}`;
     const stamp = document.createElement('div'); stamp.className = 'trade-time'; stamp.textContent = tradeFillDate(order) ? tradeFillDate(order).toLocaleString() : 'Fill date unknown';
     card.append(details, context, stamp); feed.appendChild(card);
@@ -2289,7 +2321,7 @@ async function loadVerifiedTrades() {
     }
     const summary=document.getElementById('trade-chart-summary');
     const pnl=verifiedTrades.reduce((sum,t)=>sum+Number(t.pnl||0),0);
-    if(summary) summary.textContent=`${verifiedTrades.length} verified realized trade${verifiedTrades.length===1?'':'s'} | Net P/L ${fmtPnl(pnl)}`;
+    if(summary) summary.textContent=`${verifiedOrders.filter(isBrokerConfirmedFill).length} verified fills | ${verifiedTrades.length} realized matches | Gross P/L ${fmtPnl(pnl)} (fees not included)`;
     const status=document.getElementById('trade-ledger-status'); if(status) status.textContent=(!verifiedReconciliationComplete ? 'Some account reconciliations are incomplete; verified data shown per account' : 'Updated '+new Date(data.generatedAt||Date.now()).toLocaleTimeString());
     renderTradeChart(); renderVerifiedTradeFeed();
   } catch(err) {
@@ -2297,7 +2329,7 @@ async function loadVerifiedTrades() {
     verifiedTrades = []; verifiedOrders = [];
     const summary=document.getElementById('trade-chart-summary'); if(summary) summary.textContent='Unable to load the verified trade ledger: '+err.message;
     const count=document.getElementById('verified-trade-count'), more=document.getElementById('verified-trade-more');
-    if(count) count.textContent='0 matching / 0 displayed';
+    if(count) count.textContent='0 matching fills / 0 displayed';
     if(more) more.hidden=true;
     const feed=clearTradeFeed(); if(feed) feed.innerHTML='<div class="no-data">Trade ledger unavailable.</div>';
   } finally { verifiedTradesLoading=false; }

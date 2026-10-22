@@ -82,11 +82,12 @@ test('matches local orders by either identity and rejects ambiguous collisions',
 test('entry assessment joins only one exact identity-scoped entry order and keeps score zero', () => {
   const identity = { brokerAccountId: 'acct', tenantId: 'tenant', sandboxId: 'sandbox' };
   const broker = normalizeBrokerOrder({ id: 'broker-entry', client_order_id: 'entry-client' });
-  const metadata = JSON.stringify({ assessment_id: 'assessment-1', decision: 'PASS', signal_score: 0, observed_at: '2026-09-18T12:59:00Z', evidence: { score_profile: 'catalyst_momentum_v1', score_source: 'alphadesk_direct_market_data' } });
+  const metadata = JSON.stringify({ assessment_id: 'assessment-1', decision: 'PASS', signal_score: 0, observed_at: '2026-09-18T12:59:00Z', evidence: { score_profile: 'catalyst_momentum_v1', score_source: 'alphadesk_direct_market_data', catalyst_confidence: 0.71 } });
   const entry = { ID: 'broker-entry', ClientOrderID: 'entry-client', Purpose: 'entry', BrokerAccountID: 'acct', PaperLive: 'paper', TenantID: 'tenant', SandboxID: 'sandbox', Metadata: metadata };
   const joined = entryAssessmentsByBroker([entry], [broker], identity);
   assert.equal(joined.get(broker).signalScore, 0);
   assert.equal(joined.get(broker).assessmentId, 'assessment-1');
+  assert.equal(joined.get(broker).catalystConfidence, 0.71);
   assert.equal(entryAssessmentsByBroker([{ ...entry, TenantID: 'other' }], [broker], identity).size, 0);
   assert.equal(entryAssessmentsByBroker([{ ...entry, Purpose: 'close' }], [broker], identity).size, 0);
   assert.equal(entryAssessmentsByBroker([entry, { ...entry }], [broker], identity).size, 0);
@@ -94,6 +95,17 @@ test('entry assessment joins only one exact identity-scoped entry order and keep
   assert.equal(entryAssessmentsByBroker([{ ...entry, ID: 'wrong-broker-id' }], [broker], identity).size, 0);
   assert.equal(entryAssessmentsByBroker([{ ...entry, ClientOrderID: 'wrong-client-id' }], [broker], identity).size, 0);
   assert.equal(entryAssessmentsByBroker([{ ...entry, id: 'wrong-alias-id' }], [broker], identity).size, 0);
+});
+
+test('entry catalyst confidence accepts only finite numeric values in range', () => {
+  const identity = { brokerAccountId: 'acct', tenantId: 'tenant', sandboxId: 'sandbox' };
+  const broker = normalizeBrokerOrder({ id: 'broker-entry', client_order_id: 'entry-client' });
+  const entry = value => ({ ID: 'broker-entry', ClientOrderID: 'entry-client', Purpose: 'entry', BrokerAccountID: 'acct', PaperLive: 'paper', TenantID: 'tenant', SandboxID: 'sandbox', Metadata: JSON.stringify({ assessment_id: 'assessment-1', decision: 'PASS', evidence: { catalyst_confidence: value } }) });
+  for (const value of [true, '', '0.71', -0.01, 1.01, null]) {
+    assert.equal(entryAssessmentsByBroker([entry(value)], [broker], identity).get(broker)?.catalystConfidence, undefined, String(value));
+  }
+  assert.equal(entryAssessmentsByBroker([entry(0)], [broker], identity).get(broker).catalystConfidence, 0);
+  assert.equal(entryAssessmentsByBroker([entry(1)], [broker], identity).get(broker).catalystConfidence, 1);
 });
 
 test('excludes broker identity collisions instead of overwriting records', () => {

@@ -49,12 +49,15 @@ function boundedAssessment(order) {
   const score = doc.signal_score;
   if (score !== undefined && (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100)) return null;
   const evidence = doc.evidence && typeof doc.evidence === 'object' && !Array.isArray(doc.evidence) ? doc.evidence : {};
+  const confidence = evidence.catalyst_confidence;
+  const catalystConfidence = typeof confidence === 'number' && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1 ? confidence : undefined;
   const safeText = value => typeof value === 'string' && value.length <= 128 ? value : null;
   return {
     assessmentId: doc.assessment_id.slice(0, 128), decision: doc.decision,
     signalScore: score === undefined ? null : score,
     scoreProfile: safeText(evidence.score_profile), scoreType: safeText(evidence.score_source),
     observedAt: safeText(doc.observed_at), effectiveExpiresAt: safeText(doc.op2_effective_expires_at),
+    ...(catalystConfidence !== undefined ? { catalystConfidence } : {}),
   };
 }
 

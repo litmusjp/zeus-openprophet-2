@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { buildTradeLedger } from '../agent/trade-ledger.js';
+import { entryAssessmentsByBroker, normalizeBrokerOrder } from '../agent/broker-history.js';
 
 const page = fs.readFileSync(new URL('../agent/public/index.html', import.meta.url), 'utf8');
 const filterStart = page.indexOf('function tradeAccountKey(item)');
@@ -84,7 +86,91 @@ function setup(orders = [], { trades = [], accounts = [], fetchImpl } = {}) {
   return { ctx, elements };
 }
 
-test('entry assessment detail is text-only, shows zero and historical N/A', () => {
+test('actual realized DTO joins the renderer by broker exit order ID', () => {
+  const entry = fill({ ID: 'broker-entry', ClientOrderID: 'entry-client', Side: 'buy', FilledAt: '2026-01-01T10:00:00Z', broker_identity_verified: true, Purpose: 'entry', entry_assessment: { assessmentId: 'assessment-1', decision: 'PASS', signalScore: 71, catalystConfidence: 0.71, scoreProfile: 'catalyst_momentum_v1', scoreType: 'alphadesk_direct_market_data', observedAt: '2026-01-01T09:59:00Z' } });
+  const exit = fill({ ID: 'broker-exit', ClientOrderID: 'exit-client', Side: 'sell', FilledAvgPrice: 12, FilledAt: '2026-01-01T11:00:00Z' });
+  const realized = buildTradeLedger([entry, exit], { accountId: 'a1' });
+  const { ctx, elements } = setup([entry, exit], { trades: realized });
+  ctx.renderVerifiedTradeFeed();
+  const exitCard = elements.get('trades-feed').children.find(card => card.children[0]?.children[1]?.textContent === 'sell');
+  assert.match(exitCard.children.find(child => child.className === 'trade-details').textContent, /\$4\.00/);
+  assert.match(exitCard.children.find(child => child.className === 'trade-assessment-context').textContent, /assessment-1/);
+  const entryCard = elements.get('trades-feed').children.find(card => card.children[0]?.children[1]?.textContent === 'buy');
+  assert.match(entryCard.children.find(child => child.className === 'trade-assessment-context').textContent, /alphadesk_direct_market_data/);
+});
+
+test('synthetic AlphaDesk producer receipt projects through persisted metadata, ledger, and UI', () => {
+  const receipt = JSON.parse(fs.readFileSync(new URL('./fixtures/alphadesk-standalone-pass-receipt.json', import.meta.url), 'utf8'));
+  const brokerEntry = normalizeBrokerOrder({ id: 'fixture-entry', client_order_id: 'fixture-entry-client', symbol: 'AAPL', side: 'buy', status: 'filled', filled_qty: '1', filled_avg_price: '10', filled_at: receipt.observed_at });
+  const persisted = { assessment_id: receipt.assessment_id, decision: receipt.decision, signal_score: receipt.signal_score, score_source: receipt.score_source, observed_at: receipt.observed_at, evidence: receipt };
+  const localEntry = { ID: brokerEntry.ID, ClientOrderID: brokerEntry.ClientOrderID, Purpose: 'entry', BrokerAccountID: 'acct', PaperLive: 'paper', TenantID: 'tenant', SandboxID: 'sandbox', Metadata: JSON.stringify(persisted) };
+  const verifiedAssessment = entryAssessmentsByBroker([localEntry], [brokerEntry], { brokerAccountId: 'acct', tenantId: 'tenant', sandboxId: 'sandbox' }).get(brokerEntry);
+  assert.equal(verifiedAssessment.catalystConfidence, receipt.catalyst_confidence);
+  const entry = { ...brokerEntry, ...fill({ ID: brokerEntry.ID, ClientOrderID: brokerEntry.ClientOrderID, Symbol: brokerEntry.Symbol, FilledQty: 1, FilledAvgPrice: 10, FilledAt: brokerEntry.FilledAt }), Purpose: 'entry', broker_identity_verified: true, entry_assessment: verifiedAssessment };
+  const exit = fill({ ID: 'fixture-exit', ClientOrderID: 'fixture-exit-client', Side: 'sell', FilledQty: 1, FilledAvgPrice: 11, FilledAt: '2026-10-06T15:01:00Z' });
+  const trades = buildTradeLedger([entry, exit], { accountId: 'a1' });
+  const { ctx, elements } = setup([entry, exit], { trades });
+  ctx.renderVerifiedTradeFeed();
+  const opening = elements.get('trades-feed').children.find(card => card.children[0]?.children[1]?.textContent === 'buy');
+  assert.match(opening.children.find(child => child.className === 'trade-assessment-context').textContent, /alphadesk_direct_market_data/);
+  assert.match(opening.children.find(child => child.className === 'trade-assessment-context').textContent, /raw catalyst confidence 0\.9/);
+});
+
+test('actual raw confidence values including zero render without weighted-score substitution', () => {
+  const orders = [
+    fill({ ID: 'raw-071', broker_identity_verified: true, Purpose: 'entry', entry_assessment: { assessmentId: 'a071', decision: 'PASS', signalScore: 80, catalystConfidence: 0.71, scoreType: 'alphadesk_direct_market_data' } }),
+    fill({ ID: 'raw-09', broker_identity_verified: true, Purpose: 'entry', entry_assessment: { assessmentId: 'a09', decision: 'PASS', signalScore: 80, catalystConfidence: 0.9, scoreType: 'alphadesk_direct_market_data' } }),
+    fill({ ID: 'raw-zero', broker_identity_verified: true, Purpose: 'entry', entry_assessment: { assessmentId: 'azero', decision: 'FAIL', signalScore: 0, catalystConfidence: 0, scoreType: 'alphadesk_direct_market_data' } }),
+  ];
+  const { ctx, elements } = setup(orders);
+  ctx.renderVerifiedTradeFeed();
+  const text = elements.get('trades-feed').children.map(card => card.children.find(child => child.className === 'trade-assessment-context').textContent);
+  assert.match(text[0], /raw catalyst confidence 0\.71/);
+  assert.match(text[1], /raw catalyst confidence 0\.9/);
+  assert.match(text[2], /raw catalyst confidence 0 \(/);
+  assert.doesNotMatch(text.join(' '), /0\.213|0\.27/);
+});
+
+test('renderer sums exit lots per account, preserves zero, and keeps profit on closing fills', () => {
+  const orders = [
+    fill({ ID: 'entry-a', accountId: 'a1', accountName: 'Alpha', Side: 'buy', FilledQty: 1, FilledAvgPrice: 10, FilledAt: '2026-01-01T09:00:00Z' }),
+    fill({ ID: 'entry-b', accountId: 'a1', accountName: 'Alpha', Side: 'buy', FilledQty: 1, FilledAvgPrice: 11, FilledAt: '2026-01-01T09:30:00Z' }),
+    fill({ ID: 'shared-exit', accountId: 'a1', accountName: 'Alpha', Side: 'sell', FilledQty: 2, FilledAvgPrice: 12, FilledAt: '2026-01-01T10:00:00Z' }),
+    fill({ ID: 'entry-c', accountId: 'a2', accountName: 'Beta', Side: 'buy', FilledQty: 1, FilledAvgPrice: 20, FilledAt: '2026-01-01T09:00:00Z' }),
+    fill({ ID: 'shared-exit', accountId: 'a2', accountName: 'Beta', Side: 'sell', FilledQty: 1, FilledAvgPrice: 20, FilledAt: '2026-01-01T10:00:00Z' }),
+  ];
+  const trades = [
+    ...buildTradeLedger(orders.slice(0, 3), { accountId: 'a1' }),
+    ...buildTradeLedger(orders.slice(3), { accountId: 'a2' }),
+  ];
+  const { ctx, elements } = setup(orders, { trades });
+  ctx.renderVerifiedTradeFeed();
+  const cards = elements.get('trades-feed').children;
+  const alphaExit = cards.find(card => card.children[1]?.textContent.startsWith('Alpha') && card.children[0]?.children[1]?.textContent === 'sell');
+  const betaExit = cards.find(card => card.children[1]?.textContent.startsWith('Beta') && card.children[0]?.children[1]?.textContent === 'sell');
+  assert.match(alphaExit.children[1].textContent, /\$3\.00/);
+  assert.match(betaExit.children[1].textContent, /\$0\.00/);
+  const alphaEntry = cards.find(card => card.children[1]?.textContent.startsWith('Alpha') && card.children[0]?.children[1]?.textContent === 'buy');
+  assert.match(alphaEntry.children[1].textContent, /Closed entry — result on closing fill/);
+  assert.doesNotMatch(alphaEntry.children[1].textContent, /P\/L pending/);
+  assert.match(alphaEntry.children.find(child => child.className === 'trade-assessment-context').textContent, /Closed entry — result on closing fill/);
+});
+
+test('buy-to-close realized match is not labeled as an open entry', () => {
+  const orders = [
+    fill({ ID: 'short-entry', Side: 'sell', FilledQty: 1, FilledAvgPrice: 10, FilledAt: '2026-01-01T09:00:00Z' }),
+    fill({ ID: 'buy-close', Side: 'buy', FilledQty: 1, FilledAvgPrice: 8, FilledAt: '2026-01-01T10:00:00Z' }),
+  ];
+  const trades = buildTradeLedger(orders, { accountId: 'a1' });
+  const { ctx, elements } = setup(orders, { trades });
+  ctx.renderVerifiedTradeFeed();
+  const closeCard = elements.get('trades-feed').children.find(card => card.children[0]?.children[1]?.textContent === 'buy');
+  const context = closeCard.children.find(child => child.className === 'trade-assessment-context').textContent;
+  assert.match(context, /entry assessment Not recorded/);
+  assert.doesNotMatch(context, /Open —/);
+});
+
+test('ledger DTO assessment detail is text-only, shows zero and missing values plainly', () => {
   const entry = fill({ ID: 'entry', ClientOrderID: 'entry', broker_identity_verified: true });
   const exit = fill({ ID: 'exit', ClientOrderID: 'exit', Side: 'sell' });
   const trade = { ID: 'exit', accountId: 'a1', entryOrderId: 'entry', entryAssessment: { assessmentId: '<img>', decision: 'PASS', signalScore: 0, scoreProfile: 'catalyst_momentum_v1', scoreSource: 'alphadesk_direct_market_data', observedAt: '2026-01-01T11:59:00Z' } };
@@ -97,7 +183,7 @@ test('entry assessment detail is text-only, shows zero and historical N/A', () =
   assert.equal(context.innerHTML, '');
   ctx.verifiedTrades = [];
   ctx.renderVerifiedTradeFeed();
-  assert.match(elements.get('trades-feed').children[0].children.find(child => child.className === 'trade-assessment-context').textContent, /N\/A/);
+  assert.match(elements.get('trades-feed').children[0].children.find(child => child.className === 'trade-assessment-context').textContent, /Not recorded/);
 });
 
 test('exit matching multiple FIFO entry assessments never shows one entry as representative', () => {
@@ -111,9 +197,61 @@ test('exit matching multiple FIFO entry assessments never shows one entry as rep
   ctx.renderVerifiedTradeFeed();
   const exitCard = elements.get('trades-feed').children[2];
   const context = exitCard.children.find(child => child.className === 'trade-assessment-context');
-  assert.match(context.textContent, /N\/A/);
+  assert.match(context.textContent, /Multiple matched entry lots/);
   assert.doesNotMatch(context.textContent, /assessment-a|assessment-b|score 80/);
 });
+test('actual direct assessment DTO requires verified entry purpose and uses scoreType', () => {
+  const assessment = { assessmentId: 'actual-dto', decision: 'PASS', signalScore: 63.59, scoreType: 'alphadesk_direct_market_data', observedAt: '2026-01-01T09:59:00Z' };
+  const valid = fill({ ID: 'entry-direct', broker_identity_verified: true, Purpose: 'entry', entry_assessment: assessment });
+  const aliasOnly = fill({ ID: 'entry-alias', entryAssessment: assessment });
+  const wrongPurpose = fill({ ID: 'entry-wrong-purpose', broker_identity_verified: true, Purpose: 'exit', entry_assessment: assessment });
+  const { ctx, elements } = setup([valid, aliasOnly, wrongPurpose]);
+  ctx.renderVerifiedTradeFeed();
+  const cards = elements.get('trades-feed').children;
+  assert.match(cards[0].children[2].textContent, /alphadesk_direct_market_data/);
+  assert.match(cards[1].children[2].textContent, /assessment Not recorded/);
+  assert.match(cards[2].children[2].textContent, /assessment Not recorded/);
+});
+
+test('entry with no matching ledger history does not claim current open position', () => {
+  const entry = fill({ ID: 'unmatched-entry', broker_identity_verified: true, Purpose: 'entry' });
+  const { ctx, elements } = setup([entry]);
+  ctx.renderVerifiedTradeFeed();
+  const card = elements.get('trades-feed').children[0];
+  assert.match(card.children[1].textContent, /No matched exit — realized P\/L after exit/);
+  assert.doesNotMatch(card.children[1].textContent, /Open|P\/L pending/);
+});
+
+test('partial close reports matched closed quantity and preserves unmatched remainder', () => {
+  const orders = [fill({ ID: 'partial-entry', FilledQty: 3 }), fill({ ID: 'partial-exit', Side: 'sell', FilledQty: 1 })];
+  const trades = buildTradeLedger(orders, { accountId: 'a1' });
+  const { ctx, elements } = setup(orders, { trades });
+  ctx.renderVerifiedTradeFeed();
+  const entryCard = elements.get('trades-feed').children[0];
+  assert.match(entryCard.children[1].textContent, /Partial close — 1 matched closed; 2 remainder/);
+});
+
+test('padded or blank account and order identifiers never match ledger rows', () => {
+  const entry = fill({ ID: 'e', accountId: 'a1' });
+  const exit = fill({ ID: 'x', accountId: 'a1', Side: 'sell' });
+  const badAccountTrade = { ID: 'x', accountId: ' a1', pnl: 10, entryOrderId: 'e', quantity: 2 };
+  const badOrderTrade = { ID: ' x', accountId: 'a1', pnl: 10, entryOrderId: 'e', quantity: 2 };
+  const { ctx, elements } = setup([entry, exit], { trades: [badAccountTrade, badOrderTrade] });
+  ctx.renderVerifiedTradeFeed();
+  const cards = elements.get('trades-feed').children;
+  assert.match(cards[0].children[1].textContent, /No matched exit/);
+  assert.match(cards[1].children[1].textContent, /Realized P\/L shown on closing fills/);
+});
+
+test('unavailable realized result is explicit and numeric zero remains available', () => {
+  const orders = [fill({ ID: 'x', Side: 'sell' }), fill({ ID: 'z', Side: 'sell' })];
+  const trades = [{ ID: 'x', accountId: 'a1', pnl: null }, { ID: 'z', accountId: 'a1', pnl: 0 }];
+  const { ctx, elements } = setup(orders, { trades });
+  ctx.renderVerifiedTradeFeed();
+  assert.match(elements.get('trades-feed').children[0].children[1].textContent, /Realized P\/L unavailable/);
+  assert.match(elements.get('trades-feed').children[1].children[1].textContent, /\$0\.00/);
+});
+
 const idsOf = result => Array.from(result, order => order.ID);
 const group = (elements, id) => elements.get(id).inputs;
 const change = (root, input, checked) => { input.checked = checked; root.dispatch('change', input); };
@@ -180,11 +318,11 @@ test('filter, Reset, then filter again uses the current state object', () => {
 test('reset then Load more updates the reset page size and matching/displayed count', () => {
   const { ctx, elements } = setup(Array.from({ length: 130 }, (_, i) => fill({ ID:`o${i}` })));
   ctx.renderVerifiedTradeFeed();
-  assert.equal(elements.get('verified-trade-count').textContent, '130 matching / 50 displayed');
+  assert.equal(elements.get('verified-trade-count').textContent, '130 matching fills / 50 displayed');
   elements.get('verified-trade-filters').dispatch('click', elements.get('verified-filter-reset'));
   elements.get('verified-trade-filters').dispatch('click', elements.get('verified-trade-more'));
   assert.equal(ctx.verifiedTradeFilterState.pageSize, 100);
-  assert.equal(elements.get('verified-trade-count').textContent, '130 matching / 100 displayed');
+  assert.equal(elements.get('verified-trade-count').textContent, '130 matching fills / 100 displayed');
   assert.equal(elements.get('trades-feed').children.length, 100);
 });
 
@@ -269,6 +407,6 @@ test('failed ledger refresh clears old matching counts and hides Load more', asy
   assert.equal(elements.get('verified-trade-more').hidden,false);
   ctx.fetch=async()=>({ok:false,status:503});
   await ctx.loadVerifiedTrades();
-  assert.equal(elements.get('verified-trade-count').textContent,'0 matching / 0 displayed');
+  assert.equal(elements.get('verified-trade-count').textContent,'0 matching fills / 0 displayed');
   assert.equal(elements.get('verified-trade-more').hidden,true);
 });

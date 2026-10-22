@@ -52,8 +52,10 @@ function entryAssessment(order) {
   const score = value.signalScore;
   if (score !== null && (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100)) return null;
   const safe = item => typeof item === 'string' && item.length <= 128 ? item : null;
+  const confidence = value.catalystConfidence;
   return { assessmentId: value.assessmentId.slice(0, 128), decision: value.decision, signalScore: score,
-    scoreSource: safe(value.scoreType), scoreProfile: safe(value.scoreProfile), observedAt: safe(value.observedAt), effectiveExpiresAt: safe(value.effectiveExpiresAt) };
+    scoreSource: safe(value.scoreType), scoreProfile: safe(value.scoreProfile), observedAt: safe(value.observedAt), effectiveExpiresAt: safe(value.effectiveExpiresAt),
+    ...(typeof confidence === 'number' && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1 ? { catalystConfidence: confidence } : {}) };
 }
 
 export function buildTradeLedger(orders = [], metadata = {}) {

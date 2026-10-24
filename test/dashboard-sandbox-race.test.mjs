@@ -100,6 +100,37 @@ test('late failed positions response cannot clear a newly selected portfolio', a
   assert.match(element('stat:l2-positions').innerHTML, /No open positions/);
 });
 
+test('stopped portfolio endpoints render unavailable and retain successful account or position data', async () => {
+  const dom = new Map();
+  const element = id => dom.get(id) || (dom.set(id, { textContent: '', innerHTML: '', className: '', style: {} }), dom.get(id));
+  const ctx = {
+    selectedSandboxId: 'l1', config: { sandboxes: { l1: {} } },
+    document: { getElementById: element, querySelector: selector => element('stat:' + (selector.match(/data-stat="([^"]+)"/)?.[1] || '')) },
+    fetch: async url => url.includes('/positions')
+      ? { ok: false, status: 502, json: async () => ({ error: 'Trading bot unavailable' }) }
+      : { ok: true, status: 200, json: async () => ({ PortfolioValue: 123, Cash: 100, BuyingPower: 200, DailyPnLValid: true, Equity: 123, LastEquity: 120 }) },
+    _setData(key, value) { element('stat:' + key).textContent = value; },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', 'let verifiedTrades = [];'), ctx);
+  await ctx.refreshPortfolio();
+  assert.equal(element('stat:l1-portfolio').textContent, '$123.00');
+  assert.equal(element('stat:l1-cash').textContent, '$100.00');
+  assert.equal(element('stat:l1-bp').textContent, '$200.00');
+  assert.equal(element('stat:l1-pnl').textContent, '+$3.00');
+  assert.match(element('stat:l1-positions').innerHTML, /unavailable/i);
+  assert.doesNotMatch(element('stat:l1-positions').innerHTML, /No positions/);
+
+  ctx.fetch = async () => ({ ok: false, status: 502, json: async () => ({ error: 'Trading bot unavailable' }) });
+  await ctx.refreshPortfolio();
+  assert.equal(element('stat:l1-portfolio').textContent, 'Unavailable');
+  assert.equal(element('stat:l1-cash').textContent, 'Unavailable');
+  assert.equal(element('stat:l1-bp').textContent, 'Unavailable');
+  assert.equal(element('stat:l1-pnl').textContent, 'Unavailable');
+  assert.match(element('stat:l1-positions').innerHTML, /unavailable/i);
+  assert.doesNotMatch(element('stat:l1-positions').innerHTML, /No positions/);
+});
+
 test('state and health null schedules clear the selected countdown', async () => {
   const dom = new Map();
   const element = id => dom.get(id) || (dom.set(id, { textContent: '', style: {}, classList: { add() {}, toggle() {} } }), dom.get(id));

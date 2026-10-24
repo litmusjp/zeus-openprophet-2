@@ -1892,7 +1892,7 @@ async function refreshPortfolio() {
         const pnlEl = document.querySelector('[data-stat="' + sid + '-pnl"]');
         if (pnlEl) { pnlEl.textContent = pnlStr; pnlEl.className = 'stat-value ' + cls; }
       }
-    }
+    } else if (sid === getEffectiveSandboxId()) clearPortfolioAccountView(sid);
     if(p.ok) {
       const positions = await p.json();
       if (sid !== getEffectiveSandboxId()) return;
@@ -1909,7 +1909,7 @@ async function refreshPortfolio() {
         if (posEl) posEl.innerHTML = html;
       }
     } else {
-      if (sid === getEffectiveSandboxId()) clearPortfolioView(sid);
+      if (sid === getEffectiveSandboxId()) clearPortfolioPositions(sid);
     }
   } catch {
     if (sid === getEffectiveSandboxId()) clearPortfolioView(sid);
@@ -1917,13 +1917,23 @@ async function refreshPortfolio() {
 }
 
 function clearPortfolioView(sid) {
+  clearPortfolioAccountView(sid);
+  clearPortfolioPositions(sid);
+}
+
+function clearPortfolioAccountView(sid) {
   if (sid) {
-    _setData(sid + '-portfolio', '--');
-    _setData(sid + '-cash', '--');
-    _setData(sid + '-bp', '--');
-    _setData(sid + '-pnl', '--');
+    _setData(sid + '-portfolio', 'Unavailable');
+    _setData(sid + '-cash', 'Unavailable');
+    _setData(sid + '-bp', 'Unavailable');
+    _setData(sid + '-pnl', 'Unavailable');
+  }
+}
+
+function clearPortfolioPositions(sid) {
+  if (sid) {
     const posEl = document.querySelector('[data-stat="' + sid + '-positions"]');
-    if (posEl) posEl.innerHTML = '<div class="no-data">No positions</div>';
+    if (posEl) posEl.innerHTML = '<div class="no-data">Positions unavailable</div>';
   }
 }
 

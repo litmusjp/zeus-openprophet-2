@@ -104,6 +104,15 @@ test('shared operational instructions keep waits inside the heartbeat budget', a
   assert.match(prompt, /a wait does not schedule a new heartbeat/i);
 });
 
+test('selected rulesFile takes precedence over customRules, with customRules as fallback', async () => {
+  const baseAgent = { id: 'source-check', sandboxId: 'sbx_other', name: 'Source check', systemPromptTemplate: 'default', strategyId: 'source-check-rules' };
+  const fileWins = await buildSystemPrompt(baseAgent, { getStrategyById: () => ({ rulesFile: 'TRADING_RULES.md', customRules: 'STALE CUSTOM RULES' }) });
+  assert.match(fileWins, /# Trading Rules/);
+  assert.doesNotMatch(fileWins, /STALE CUSTOM RULES/);
+  const customFallback = await buildSystemPrompt(baseAgent, { getStrategyById: () => ({ rulesFile: null, customRules: 'CUSTOM RULES FALLBACK' }) });
+  assert.match(customFallback, /CUSTOM RULES FALLBACK/);
+});
+
 test('owned complete instruction markers scope the temporary entry exception and permanent workflow', async () => {
   const temp = `### TEMPORARY_ALPHA_MVP_OVERRIDE\nPaper validation objective: obtain at least one broker-confirmed options entry in your own account per regular market session.\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nBefore the open: prepare a small ranked shortlist using confirmed news and completed historical data. Record underlying, direction, candidate expiry, budget and exit plan. Label it research only—not submitted. Do not place new options orders before the broker clock confirms the market is open.\nAt the open: reconcile positions, active orders, planned intents and uncertain submissions. Refresh current price action and exact option-contract bid, ask, sizes and timestamps. Reuse useful research; do not restart everything from scratch.\nAssess: call prophet_assess_options_trade with legs: one exact OCC symbol, with side='buy'; quantity: 1; limit_price: the proposed positive quoted premium—not total dollar debit.\nAlphaDesk obtains its own evidence and score. Indicative/testing-only data is admissible for this paper-advisory workflow. Missing chain open interest is unknown, not zero; latest-trade size is not daily volume.\nRead decision, signal_score, checks and blocking_reasons. Score alone is not approval. On FAIL, address the genuine failed criteria or research another candidate. On UNAVAILABLE, report or recheck the specific problem; never turn a missing score into zero.\nExecute after PASS: call prophet_place_options_order with a new client_order_id, the same contract, quantity and price, its underlying, side='buy', position_intent='buy_to_open' and order_type='limit'. If the proposal changes, reassess. OP2 performs its own final checks.\nVerify and manage: confirm the broker fill. Never blindly retry an uncertain submission. Close the same contract with sell_to_close for the confirmed remaining quantity, following the documented exit plan, and verify the outcome.\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
   const complete = (body) => `Identity and original strategy: ${body}\n\n${temp}`;
@@ -112,7 +121,10 @@ test('owned complete instruction markers scope the temporary entry exception and
     customSystemPrompt: prompt, strategyId: `${agentId}-rules`,
   }, { getStrategyById: () => ({ customRules: 'ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory.' }) });
 
-  for (const [sandboxId, agentId] of [['sbx_723be98b', 'catalyst'], ['sbx_956ff9e4', 'mean-reversion']]) {
+  for (const [sandboxId, agentId] of [
+    ['sbx_723be98b', 'catalyst'], ['sbx_723be98b', 'mean-reversion'],
+    ['sbx_956ff9e4', 'mean-reversion'], ['sbx_956ff9e4', 'momentum'],
+  ]) {
     const prompt = await build(sandboxId, agentId, complete(`${agentId} identity`));
     assert.match(prompt, /ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory\./);
     assert.equal((prompt.match(/### TEMPORARY_ALPHA_MVP_OVERRIDE/g) || []).length, 1);
@@ -159,6 +171,15 @@ test('owned complete instruction markers scope the temporary entry exception and
   const wrongSandbox = await build('sbx_other', 'catalyst', complete('Herald'));
   assert.match(wrongSandbox, /Do not trade to test tools\./);
   assert.doesNotMatch(wrongSandbox, /supersedes the ordinary strategy entry filters/i);
+
+  for (const [sandboxId, agentId] of [
+    ['sbx_723be98b', 'momentum'], ['sbx_956ff9e4', 'catalyst'], ['sbx_other', 'mean-reversion'],
+  ]) {
+    const wrongPair = await build(sandboxId, agentId, complete(`${agentId} identity`));
+    assert.match(wrongPair, /Do not trade to test tools\./);
+    assert.doesNotMatch(wrongPair, /supersedes the ordinary strategy entry filters/i);
+    assert.match(wrongPair, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
+  }
 
   // Stored custom text is inert when the selected template does not use it.
   const defaultTemplatePrompt = await buildSystemPrompt({

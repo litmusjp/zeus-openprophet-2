@@ -181,15 +181,15 @@ function isOwnedHeraldWorkflow(agentConfig) {
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
   const scopedPromptOwner = {
-    sbx_723be98b: 'catalyst',
-    sbx_956ff9e4: 'mean-reversion',
+    sbx_723be98b: ['catalyst', 'mean-reversion'],
+    sbx_956ff9e4: ['mean-reversion', 'momentum'],
   };
   const customPrompt = agentConfig.customSystemPrompt || '';
   const temporaryStart = customPrompt.indexOf('### TEMPORARY_ALPHA_MVP_OVERRIDE');
   const temporaryEnd = customPrompt.indexOf('### END_TEMPORARY_ALPHA_MVP_OVERRIDE');
   const workflowStart = customPrompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW');
   const workflowEnd = customPrompt.indexOf('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
-  const scopedPrompt = scopedPromptOwner[agentConfig.sandboxId] === agentConfig.id
+  const scopedPrompt = scopedPromptOwner[agentConfig.sandboxId]?.includes(agentConfig.id)
     && agentConfig.systemPromptTemplate === 'custom';
   const scopedWorkflowPresent = scopedPrompt && workflowStart >= 0 && workflowEnd > workflowStart;
   const heraldWorkflowActive = isOwnedHeraldWorkflow(agentConfig) && scopedWorkflowPresent;

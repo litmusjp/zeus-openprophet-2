@@ -14,6 +14,14 @@ const policy = {
   human_approval_required: true,
 };
 const successMessage = /authenticated assessment policy is available.*market evidence\/readiness, trade decisions and broker execution were NOT tested/i;
+const managedPolicy = {
+  ...Object.fromEntries(Object.entries(policy).filter(([key]) => !['execution_allowed', 'human_approval_required'].includes(key))),
+  policy_version: 'managed-paper-v1:managed:3:false:quality:2',
+  contract_version: 'managed-assessment-v1',
+  assessment_authority: 'assessment_only',
+  approval_gate: { required: false, revision: 3, scope: { workspace_id: 'workspace-1', assessment_key_id: 'key-1' } },
+  managed_quality_settings: { defaults: {}, effective: {}, revision: 2 },
+};
 
 function response(status, body = policy, jsonError = null) {
   return { status, async json() { if (jsonError) throw jsonError; return body; } };
@@ -40,6 +48,42 @@ test('valid standalone policy succeeds using only the authenticated read-only po
   assert.deepEqual([result.ok, result.status], [true, 'connected']);
   assert.match(result.message, successMessage);
   assert.doesNotMatch(JSON.stringify(result), /secret|abc123|72\.5/);
+});
+
+test('managed assessment policy with enabled or disabled approval gate is a connected read-only capability', async () => {
+  for (const required of [true, false]) {
+    const body = { ...managedPolicy, policy_version: `managed-paper-v1:managed:3:${required}:quality:2`,
+      approval_gate: { ...managedPolicy.approval_gate, required } };
+    const result = await testAlphaDeskAssessmentCapability('https://desk.example', 'secret', async (url, options) => {
+      assertRequest(url, options); return response(200, body);
+    });
+    assert.deepEqual([result.ok, result.status], [true, 'connected']);
+    assert.match(result.message, successMessage);
+  }
+});
+
+test('managed policy rejects malformed authority, gate metadata, ambiguous flags, and unknown contracts', async () => {
+  const invalid = [
+    { ...managedPolicy, assessment_authority: 'execution' },
+    { ...managedPolicy, approval_gate: null },
+    ...[0, -1, 1.5, '3'].map(revision => ({ ...managedPolicy, approval_gate: { ...managedPolicy.approval_gate, revision } })),
+    ...[undefined, 1, 'true'].map(required => ({ ...managedPolicy, approval_gate: { ...managedPolicy.approval_gate, required } })),
+    { ...managedPolicy, approval_gate: { ...managedPolicy.approval_gate, scope: { workspace_id: '', assessment_key_id: 'key-1' } } },
+    { ...managedPolicy, approval_gate: { ...managedPolicy.approval_gate, scope: { workspace_id: 'workspace-1', assessment_key_id: ' ' } } },
+    { ...managedPolicy, approval_gate: { ...managedPolicy.approval_gate, scope: null } },
+    { ...managedPolicy, approval_gate: { ...managedPolicy.approval_gate, scope: { workspace_id: 'workspace-1', assessment_key_id: 2 } } },
+    { ...managedPolicy, execution_allowed: true },
+    { ...managedPolicy, execution_allowed: false },
+    { ...managedPolicy, human_approval_required: true },
+    { ...managedPolicy, human_approval_required: false },
+    { ...managedPolicy, contract_version: 'unknown-contract-v2' },
+  ];
+  for (const body of invalid) {
+    const result = await testAlphaDeskAssessmentCapability('https://desk.example', 'secret', async (url, options) => {
+      assertRequest(url, options); return response(200, body);
+    });
+    assert.deepEqual([result.ok, result.status], [false, 'schema']);
+  }
 });
 
 test('classifies authentication, endpoint, redirect, and server responses without leaking payloads', async () => {

@@ -189,14 +189,50 @@ test('portfolio uses the Go fractional UnrealizedPLPC as a percentage', async ()
   const queryStat = selector => element('stat:' + (selector.match(/data-stat="([^"]+)"/)?.[1] || ''));
   const ctx = {
     selectedSandboxId: 'l1', config: { sandboxes: { l1: {} } },
-    document: { getElementById: element, querySelector: queryStat },
+    document: { getElementById: element, querySelector: queryStat, createElement: () => { let text = ''; return { set textContent(value) { text = String(value); }, get innerHTML() { return text; } }; } },
     fetch: async url => ({ ok: true, json: async () => url.includes('/positions') ? [{ Symbol: 'IWM', UnrealizedPL: 5, UnrealizedPLPC: 0.125, Qty: 1, AvgEntryPrice: 40 }] : { PortfolioValue: 100, Cash: 100, BuyingPower: 100 } }),
     _setData(key, value) { element('stat:' + key).textContent = value; }, clearPortfolioView() {},
   };
   vm.createContext(ctx);
-  vm.runInContext(sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', 'function clearPortfolioView('), ctx);
+  const escStart = page.indexOf('function esc(s)');
+  const escEnd = page.indexOf('\n}', escStart) + 2;
+  vm.runInContext(page.slice(escStart, escEnd) + sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', 'function clearPortfolioView('), ctx);
   await ctx.refreshPortfolio();
   assert.match(element('stat:l1-positions').innerHTML, /12\.5%/);
+});
+
+test('portfolio escapes broker supplied symbols before rendering terminal HTML', async () => {
+  const dom = new Map();
+  const element = id => dom.get(id) || (dom.set(id, { textContent: '', innerHTML: '', className: '', style: {} }), dom.get(id));
+  const encodeHTML = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+  const escSourceStart = page.indexOf('function esc(s)');
+  const escSourceEnd = page.indexOf('\n}', escSourceStart) + 2;
+  const ctx = {
+    selectedSandboxId: 'l1', config: { sandboxes: { l1: {} } },
+    document: {
+      getElementById: element,
+      querySelector: selector => element('stat:' + (selector.match(/data-stat="([^"]+)"/)?.[1] || '')),
+      createElement: () => { let text = ''; return { set textContent(value) { text = encodeHTML(value); }, get innerHTML() { return text; } }; },
+    },
+    fetch: async url => ({ ok: true, json: async () => url.includes('/positions')
+      ? [
+        { Symbol: '<img src=x onerror=alert(1)>', UnrealizedPL: 0, Qty: '<svg onload=alert(2)>', AvgEntryPrice: 2 },
+        { Symbol: 'IWM', UnrealizedPL: 0, Qty: 1, AvgEntryPrice: 2 },
+        { Symbol: 'ZERO', UnrealizedPL: 0, Qty: 0, qty: 9, AvgEntryPrice: 2 },
+      ]
+      : { PortfolioValue: 100, Cash: 100, BuyingPower: 100 } }),
+    _setData(key, value) { element('stat:' + key).textContent = value; },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(page.slice(escSourceStart, escSourceEnd) + sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', 'function clearPortfolioView('), ctx);
+  await ctx.refreshPortfolio();
+  const positionsHTML = element('stat:l1-positions').innerHTML;
+  assert.match(positionsHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(positionsHTML, /Qty: &lt;svg onload=alert\(2\)&gt;/);
+  assert.match(positionsHTML, /Qty: 1 \| Avg: \$2\.00/);
+  assert.match(positionsHTML, /Qty: 0 \| Avg: \$2\.00/);
+  assert.doesNotMatch(positionsHTML, /<img\b/i);
+  assert.doesNotMatch(positionsHTML, /<svg\b/i);
 });
 
 test('SSE schedules stay sandbox scoped and reconnect refreshes stale state', () => {

@@ -6,13 +6,24 @@ function validPolicy(policy) {
   if ((typeof score !== 'number' && typeof score !== 'string')
       || (typeof score === 'string' && score.trim() === '')) return false;
   const numericScore = Number(score);
-  return policy.scope === 'TRADE_ASSESSMENT'
+  const commonValid = policy.scope === 'TRADE_ASSESSMENT'
     && typeof policy.policy_version === 'string' && policy.policy_version.trim() !== ''
-    && policy.paper_only === true && policy.execution_allowed === false
-    && policy.human_approval_required === true
+    && policy.paper_only === true
     && Array.isArray(policy.supported_strategies) && policy.supported_strategies.length > 0
     && policy.supported_strategies.every(strategy => typeof strategy === 'string' && strategy.trim() !== '')
     && Number.isFinite(numericScore) && numericScore >= 0 && numericScore <= 100;
+  if (!commonValid) return false;
+  if (policy.contract_version === 'managed-assessment-v1') {
+    const gate = policy.approval_gate;
+    return policy.assessment_authority === 'assessment_only'
+      && !Object.hasOwn(policy, 'execution_allowed') && !Object.hasOwn(policy, 'human_approval_required')
+      && typeof gate?.required === 'boolean' && Number.isInteger(gate.revision) && gate.revision > 0
+      && typeof gate.scope?.workspace_id === 'string' && gate.scope.workspace_id.trim() !== ''
+      && typeof gate.scope?.assessment_key_id === 'string' && gate.scope.assessment_key_id.trim() !== '';
+  }
+  return policy.contract_version === undefined && !Object.hasOwn(policy, 'assessment_authority')
+    && !Object.hasOwn(policy, 'approval_gate') && policy.execution_allowed === false
+    && policy.human_approval_required === true;
 }
 
 export async function testAlphaDeskAssessmentCapability(url, apiKey, request = fetch) {

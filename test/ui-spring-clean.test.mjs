@@ -192,15 +192,17 @@ test('Agent Builder rejection of permissions blocks activation and retry reuses 
 test('portfolio refresh writes the selected account values and positions into its own sidebar fields', async () => {
   const elements = new Map();
   const stat = key => { if (!elements.has(key)) elements.set(key, { textContent: '', innerHTML: '', className: '' }); return elements.get(key); };
+  const encodeHTML = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
   const ctx = {
     selectedSandboxId: 'paper-a', config: { sandboxes: { 'paper-a': {}, 'paper-b': {} } },
     getEffectiveSandboxId: () => ctx.selectedSandboxId,
-    document: { getElementById: id => stat('legacy:' + id), querySelector: selector => stat(selector.match(/data-stat="([^"]+)"/)?.[1] || '') },
+    document: { getElementById: id => stat('legacy:' + id), querySelector: selector => stat(selector.match(/data-stat="([^"]+)"/)?.[1] || ''),
+      createElement: () => { let text = ''; return { set textContent(value) { text = encodeHTML(value); }, get innerHTML() { return text; } }; } },
     fetch: async url => ({ ok: true, json: async () => url.includes('/positions') ? [{ Symbol: 'IWM', UnrealizedPL: 5, UnrealizedPLPC: 0.125, Qty: 1, AvgEntryPrice: 40 }] : { PortfolioValue: 123, Cash: 100, BuyingPower: 200, DailyPnLValid: true, Equity: 123, LastEquity: 120 } }),
     _setData: (key, value) => { stat(key).textContent = value; },
   };
   vm.createContext(ctx);
-  vm.runInContext(sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', 'let verifiedTrades = [];'), ctx);
+  vm.runInContext(sourceBetween('function esc(s)', 'function fmtTime()') + sourceBetween('function getEffectiveSandboxId()', 'function getSelectedSandbox()') + sourceBetween('function sandboxQueryString()', 'function withAuthUrl(') + sourceBetween('async function refreshPortfolio()', 'let verifiedTrades = [];'), ctx);
   await ctx.refreshPortfolio();
   assert.equal(stat('paper-a-portfolio').textContent, '$123.00');
   assert.equal(stat('paper-a-pnl').textContent, '+$3.00');

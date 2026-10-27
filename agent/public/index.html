@@ -2279,7 +2279,8 @@ async function openActivity(activityId, accountId, offset = 0) {
     if (requestId !== historyState.detailRequest || historyState.selectedActivity?.activityId !== activityId || historyState.selectedActivity?.accountId !== accountId) return;
     const a = data.activity; historyState.selectedActivity.records = historyState.selectedActivity.records.concat(a.records);
     title.textContent = a.origin+' · '+a.activityId+' · '+a.accountId;
-    host.innerHTML = historyState.selectedActivity.records.map(renderHistoryRecord).join('') + (a.hasMore ? '<button class="btn sm" id="history-record-more">Load more records</button>' : '');
+    const activitySession = { metadata: { agentId: a.agentId, agentName: a.agentName } };
+    host.innerHTML = historyState.selectedActivity.records.map(record => renderHistoryRecord(record, activitySession)).join('') + (a.hasMore ? '<button class="btn sm" id="history-record-more">Load more records</button>' : '');
     document.getElementById('history-record-more')?.addEventListener('click', () => openActivity(activityId, accountId, offset + a.records.length));
   } catch(e) { if (requestId === historyState.detailRequest) host.innerHTML='<div class="no-data">'+esc(e.message)+'</div>'; }
 }

@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const page = fs.readFileSync(new URL('../agent/public/index.html', import.meta.url), 'utf8');
 const start = page.indexOf('function historySelectedLabels()');
 const end = page.indexOf('function filteredVerifiedTrades()', start);
-const source = page.slice(page.indexOf('function renderHistoryRecord(msg)'), start) + page.slice(start, end);
+const source = page.slice(page.indexOf('function historyRecordActor'), start) + page.slice(start, end);
 
 function createUI({ storageThrows = false, fetchImpl } = {}) {
   const elements = new Map();
@@ -128,6 +128,21 @@ test('details append records and render escaped text, tool evidence, and truncat
   assert.match(second, /&lt;img/);
   assert.match(second, /later/);
   assert.equal(pageNo, 2);
+});
+
+test('activity details use saved activity actor, with per-record actor snapshots taking precedence', async () => {
+  const { ctx, element } = createUI({ fetchImpl: async () => ({ ok: true, async json() { return { activity: {
+    origin: 'User', activityId: 'saved-herald', accountId: 'acct-a', agentName: 'Herald', agentId: 'herald',
+    currentAgentName: 'Pendulum', records: [
+      { role: 'assistant', kind: 'message', content: 'saved actor' },
+      { role: 'assistant', kind: 'message', content: 'record override', actorSnapshot: { agentId: 'pendulum', agentName: 'Pendulum' } },
+    ], hasMore: false,
+  } }; } }) });
+  await ctx.openActivity('saved-herald', 'acct-a');
+  const html = element('history-transcript').innerHTML;
+  assert.match(html, /\[Herald · assistant\] saved actor/);
+  assert.match(html, /\[Pendulum · assistant\] record override/);
+  assert.doesNotMatch(html, /Unknown historical agent/);
 });
 
 test('stale activity detail responses cannot replace a newer selection', async () => {

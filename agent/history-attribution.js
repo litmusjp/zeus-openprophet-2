@@ -8,6 +8,12 @@ const ORDER_ID_FIELDS = [
 ];
 const RESULT_ORDER_ID_FIELDS = new Set(ORDER_ID_FIELDS.filter(key => !['ID', 'id'].includes(key)));
 
+export function isSubmittingOrderToolCall(record) {
+  if (record?.kind !== 'tool_call' && record?.eventType !== 'tool_call') return false;
+  const tool = String(record?.tool || record?.name || '').replace(/^prophet_/, '');
+  return SUBMITTING_TOOLS.has(tool);
+}
+
 function actorOf(message, session) {
   const snapshot = message?.actorSnapshot;
   const explicit = snapshot && (Object.hasOwn(snapshot, 'agentId') || Object.hasOwn(snapshot, 'agentName'));
@@ -44,8 +50,7 @@ function findIds(value, output = new Set(), depth = 0, inOrderObject = false) {
 }
 
 function executionEvidence(record) {
-  const tool = String(record?.tool || record?.name || '').replace(/^prophet_/, '');
-  if (!SUBMITTING_TOOLS.has(tool) || record?.resultTruncated || record?.error) return [];
+  if (!isSubmittingOrderToolCall(record) || record?.resultTruncated || record?.error) return [];
   if (record?.status && !['completed', 'success'].includes(String(record.status).toLowerCase())) return [];
   const result = parseObject(record?.result);
   if (!result || result.isError === true || result.error) return [];
@@ -68,7 +73,7 @@ export function buildOrderActorMap(accountId, sessions = []) {
   for (const session of sessions) {
     if (session?.accountId && session.accountId !== accountId) continue;
     for (const message of session?.messages || []) {
-      if (message?.kind !== 'tool_call' && message?.eventType !== 'tool_call') continue;
+      if (!isSubmittingOrderToolCall(message)) continue;
       const actor = actorOf(message, session);
       if (!actor) continue;
       for (const id of executionEvidence(message)) add(id, actor);
@@ -84,7 +89,7 @@ export function resolveOrderActor(map, accountId, order) {
   return actors.size === 1 ? [...actors.values()][0] : null;
 }
 
-export async function loadOrderActorMap(chatStore, accountId, { sessionLimit = 100, messagesPerSession = 500 } = {}) {
+export async function loadOrderActorMap(chatStore, accountId, { sessionLimit = 100, messagesPerSession = Infinity } = {}) {
   const sessions = await chatStore.listOrderActorEvidence(accountId, { sessionLimit, recordLimit: messagesPerSession });
   return buildOrderActorMap(accountId, sessions);
 }

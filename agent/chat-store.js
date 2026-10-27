@@ -5,6 +5,7 @@ import fsSync from 'fs';
 import path from 'path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'url';
+import { isSubmittingOrderToolCall } from './history-attribution.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -209,7 +210,7 @@ export class ChatStore {
     }
   }
 
-  async listOrderActorEvidence(accountId, { sessionLimit = 100, recordLimit = 500 } = {}) {
+  async listOrderActorEvidence(accountId, { sessionLimit = 100, recordLimit = Infinity } = {}) {
     const sessions = await this.listSessions(accountId, sessionLimit);
     const result = [];
     for (const session of sessions) {
@@ -217,14 +218,15 @@ export class ChatStore {
       const input = fsSync.createReadStream(filePath, { encoding: 'utf8' });
       const lines = readline.createInterface({ input, crlfDelay: Infinity });
       const messages = [];
-      let records = 0;
       try {
         for await (const line of lines) {
           if (!line) continue;
-          if (++records > recordLimit) break;
           try {
             const row = JSON.parse(line);
-            if (row?.kind === 'tool_call' || row?.eventType === 'tool_call') messages.push(row);
+            if (isSubmittingOrderToolCall(row)) {
+              if (messages.length >= recordLimit) break;
+              messages.push(row);
+            }
           } catch { /* Ignore malformed/truncated JSONL records. */ }
         }
       } catch (error) {

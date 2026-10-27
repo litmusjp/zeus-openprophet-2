@@ -77,6 +77,33 @@ test('missing indexed JSONL is safe in a subprocess and yields no actor evidence
   assert.equal(child.status, 0, child.stderr);
 });
 
+test('default ChatStore evidence scan finds late orders and collects only submitting tools', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'op2-long-actor-evidence-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = new ChatStore(dir);
+  await store.startSession('acct', 'long', actor('herald', 'Herald'));
+  const lines = Array.from({ length: 510 }, (_, index) => JSON.stringify({
+    kind: index % 2 ? 'message' : 'tool_call',
+    tool: index % 2 ? undefined : 'get_quote',
+    result: index % 2 ? undefined : '{"quote":"read-only"}',
+  }));
+  lines.push(JSON.stringify({ kind: 'tool_call', tool: 'place_buy_order', status: 'completed',
+    args: { client_order_id: 'client-late' }, result: '{"order_id":"broker-late"}', actorSnapshot: actor('pendulum', 'Pendulum') }));
+  lines.push(JSON.stringify({ kind: 'tool_call', tool: 'place_sell_order', status: 'completed',
+    args: { client_order_id: 'client-sampled' }, result: '{"order_id":"broker-sampled"}', actorSnapshot: actor('surge', 'Surge') }));
+  const file = path.join(dir, 'sandboxes', 'acct', 'chat-history', 'session-long.jsonl');
+  await fs.writeFile(file, `${lines.join('\n')}\n`);
+
+  const evidence = await store.listOrderActorEvidence('acct');
+  assert.equal(evidence[0].messages.length, 2);
+  const actorMap = await loadOrderActorMap(store, 'acct');
+  assert.deepEqual(resolveOrderActor(actorMap, 'acct', { ID: 'broker-late', ClientOrderID: 'client-late' }), actor('pendulum', 'Pendulum'));
+
+  const sampled = await store.listOrderActorEvidence('acct', { recordLimit: 1 });
+  assert.equal(sampled[0].messages.length, 1);
+  assert.equal(sampled[0].messages[0].tool, 'place_buy_order');
+});
+
 test('assignment reset starts the newly assigned actor in a new session and preserves old history', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'op2-assignment-reset-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));

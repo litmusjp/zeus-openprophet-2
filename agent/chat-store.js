@@ -3,6 +3,7 @@
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
+import readline from 'node:readline';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -113,7 +114,12 @@ export class ChatStore {
       if (existing) {
         // Resume — update lastActiveAt
         existing.lastActiveAt = new Date().toISOString();
-        existing.metadata = { ...existing.metadata, ...metadata };
+        const storedMetadata = existing.metadata || {};
+        existing.metadata = { ...storedMetadata, ...metadata };
+        for (const key of ['agentId', 'agentName']) {
+          if (Object.hasOwn(storedMetadata, key)) existing.metadata[key] = storedMetadata[key];
+          else delete existing.metadata[key];
+        }
       } else {
         // New session
         index.sessions.unshift({
@@ -201,6 +207,35 @@ export class ChatStore {
       if (err.code === 'ENOENT') return [];
       throw err;
     }
+  }
+
+  async listOrderActorEvidence(accountId, { sessionLimit = 100, recordLimit = 500 } = {}) {
+    const sessions = await this.listSessions(accountId, sessionLimit);
+    const result = [];
+    for (const session of sessions) {
+      const filePath = this._sessionFile(accountId, session.id);
+      const input = fsSync.createReadStream(filePath, { encoding: 'utf8' });
+      const lines = readline.createInterface({ input, crlfDelay: Infinity });
+      const messages = [];
+      let records = 0;
+      try {
+        for await (const line of lines) {
+          if (!line) continue;
+          if (++records > recordLimit) break;
+          try {
+            const row = JSON.parse(line);
+            if (row?.kind === 'tool_call' || row?.eventType === 'tool_call') messages.push(row);
+          } catch { /* Ignore malformed/truncated JSONL records. */ }
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      } finally {
+        lines.close();
+        input.destroy();
+      }
+      result.push({ ...session, accountId, messages });
+    }
+    return result;
   }
 
   /** List completed activity groups derived from append-only session records. */

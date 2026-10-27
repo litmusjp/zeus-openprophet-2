@@ -15,6 +15,7 @@ import { testAlphaDeskAssessmentCapability } from './alphadesk-connection.js';
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { buildTradeLedger } from './trade-ledger.js';
+import { loadOrderActorMap, resolveOrderActor } from './history-attribution.js';
 import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
@@ -2024,6 +2025,7 @@ app.get('/api/trades', async (req, res) => {
     const orders = [];
     const trades = [];
     const accountStates = new Map();
+    const actorMaps = new Map();
     let complete = true;
     const brokerStates = new Set();
     for (const sandbox of sandboxes) {
@@ -2040,24 +2042,35 @@ app.get('/api/trades', async (req, res) => {
         brokerAccountId: account.brokerAccountId,
         paperLive: account.paper ? 'paper' : 'live',
         identityVerified: true,
-        agentId: getResolvedAgentForSandbox(sandbox.id)?.id || sandbox.agentId || null,
-        agentName: getResolvedAgentForSandbox(sandbox.id)?.name || 'Unassigned',
         sandboxId: sandbox.id,
       };
       const reconciliation = await reconcileSandboxOrders(sandbox, account);
       complete = complete && reconciliation.complete;
       brokerStates.add(reconciliation.broker_state);
       const previousState = accountStates.get(account.id);
+      const currentAgent = getResolvedAgentForSandbox(sandbox.id);
       accountStates.set(account.id, {
         accountId: account.id, accountName: account.name, brokerAccountId: account.brokerAccountId,
-        paper: account.paper, agentId: metadata.agentId, agentName: metadata.agentName, sandboxId: sandbox.id,
+        paper: account.paper, currentAgentId: currentAgent?.id || sandbox.agentId || null,
+        currentAgentName: currentAgent?.name || 'Unassigned', sandboxId: sandbox.id,
         complete: (previousState?.complete ?? true) && reconciliation.complete,
         state: reconciliation.complete ? reconciliation.broker_state : (reconciliation.broker_state || 'incomplete'),
         error: reconciliation.error || previousState?.error || null,
       });
       const sandboxOrders = reconciliation.orders;
-      orders.push(...sandboxOrders.map(order => ({ ...order, ...metadata })));
-      trades.push(...buildTradeLedger(sandboxOrders, metadata));
+      let actorMap = null;
+      if (account.id && !actorMaps.has(account.id)) {
+        try { actorMaps.set(account.id, await loadOrderActorMap(chatStore, account.id)); }
+        catch { actorMaps.set(account.id, new Map()); }
+      }
+      actorMap = actorMaps.get(account.id) || new Map();
+      const attributedOrders = sandboxOrders.map(order => {
+        const actorSnapshot = resolveOrderActor(actorMap, account.id, order);
+        return { ...order, ...metadata, actorSnapshot, agentId: actorSnapshot?.agentId || null,
+          agentName: actorSnapshot?.agentName || 'Unknown historical agent' };
+      });
+      orders.push(...attributedOrders);
+      trades.push(...buildTradeLedger(attributedOrders, metadata));
     }
     const configuredAccounts = [...new Map(Object.values(config.sandboxes || {}).map(sandbox => {
       const account = getAccountById(sandbox.accountId);

@@ -258,10 +258,13 @@ const change = (root, input, checked) => { input.checked = checked; root.dispatc
 
 test('real account/agent Clear and All handlers, including missing agent IDs', () => {
   const { ctx, elements } = setup([fill(), fill({ ID:'unassigned', accountId:'a2', agentId:null, agentName:'Stale label' })], {
-    accounts: [{ accountId:'a1', accountName:'Alpha', agentId:'g1', agentName:'Agent One' }, { accountId:'a2', accountName:'Beta' }],
+    accounts: [{ accountId:'a1', accountName:'Alpha', agentId:'current-only', agentName:'Current Agent' }, { accountId:'a2', accountName:'Beta' }],
   });
   ctx.renderVerifiedTradeFeed();
-  assert.ok(group(elements, 'verified-agent-filters').some(input => input.value === '__unassigned__'));
+  assert.ok(group(elements, 'verified-agent-filters').some(input => input.value === '__unknown_historical__'));
+  assert.ok(!group(elements, 'verified-agent-filters').some(input => input.value === 'current-only'));
+  assert.match(elements.get('verified-agent-filters').innerHTML, /Agent \(historical\)/);
+  assert.doesNotMatch(elements.get('verified-agent-filters').innerHTML, /Current Agent/);
   assert.equal(elements.get('verified-agent-filters').innerHTML.includes('Stale label'), false);
   elements.get('verified-trade-filters').dispatch('click', elements.get('verified-account-filters').buttons.find(button => button.dataset.vclear));
   assert.deepEqual(idsOf(ctx.filteredVerifiedOrders()), []);

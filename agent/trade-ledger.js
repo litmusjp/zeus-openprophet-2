@@ -59,6 +59,9 @@ function entryAssessment(order) {
 }
 
 export function buildTradeLedger(orders = [], metadata = {}) {
+  const recordMetadata = { ...metadata };
+  delete recordMetadata.agentId;
+  delete recordMetadata.agentName;
   const unique = new Map();
   for (const order of orders.filter(isFilled)) {
     const identity = orderIdentity(order);
@@ -107,7 +110,13 @@ export function buildTradeLedger(orders = [], metadata = {}) {
         status: 'realized',
         assetType: multiplier === 100 ? 'option' : 'stock',
         entryAssessment: lot.entryAssessment,
-        ...metadata,
+        ...recordMetadata,
+        agentId: lot.agentId,
+        agentName: lot.agentName || 'Unknown historical agent',
+        entryAgentId: lot.agentId,
+        entryAgentName: lot.agentName || null,
+        exitAgentId: order.actorSnapshot?.agentId || null,
+        exitAgentName: order.actorSnapshot?.agentName || null,
       });
       remaining -= quantity;
       lot.quantity -= quantity;
@@ -122,6 +131,8 @@ export function buildTradeLedger(orders = [], metadata = {}) {
         price,
         time,
         entryAssessment: side === 'buy' ? entryAssessment(order) : null,
+        agentId: order.actorSnapshot?.agentId || null,
+        agentName: order.actorSnapshot?.agentName || null,
       });
     }
     lots.set(symbol, queue);

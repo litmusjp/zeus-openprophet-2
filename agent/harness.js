@@ -505,11 +505,19 @@ export class AgentHarness {
     return agentId ? this.getAgent(agentId) : null;
   }
 
+  _captureActorSnapshot() {
+    const agentId = this.state.activeAgentId;
+    const agentName = this._agentConfig?.name;
+    return typeof agentId === 'string' && agentId && typeof agentName === 'string' && agentName
+      ? { agentId, agentName }
+      : null;
+  }
+
   _resolvePermissions() {
     return this.getPermissions(this.sandboxId) || {};
   }
 
-  async _persistSession(sessionId, metadata = {}, accountId = this.state.activeAccountId) {
+  async _persistSession(sessionId, metadata = {}, accountId = this.state.activeAccountId, actorSnapshot = null) {
     if (!this.chatStore || !sessionId || !accountId) return;
     const sandbox = this._resolveSandbox();
     const account = this._resolveAccount();
@@ -518,10 +526,9 @@ export class AgentHarness {
       sandboxName: sandbox?.name || this.sandboxId,
       accountId,
       accountName: account?.name || accountId,
-      agentId: this.state.activeAgentId,
-      agentName: this._agentConfig?.name,
       model: this.state.activeModel,
       ...metadata,
+      ...(actorSnapshot ? { agentId: actorSnapshot.agentId, agentName: actorSnapshot.agentName } : {}),
     });
   }
 
@@ -534,11 +541,11 @@ export class AgentHarness {
     return `\n\n## Prior Session Context (persisted)\nThese are compact excerpts from earlier sessions for this same account. Use them for continuity, but verify current prices, positions, and order status with live tools. Do not repeat old orders merely because they appear here.\n${JSON.stringify(sessions)}\n## End Prior Session Context\n`;
   }
 
-  async _persistMessages(sessionId, messages = [], accountId = this.state.activeAccountId) {
+  async _persistMessages(sessionId, messages = [], accountId = this.state.activeAccountId, actorSnapshot = null) {
     if (!this.chatStore || !sessionId || !accountId) return;
     for (const message of messages) {
     if (!message || (!message?.content?.trim() && !message?.eventType && !message?.kind)) continue;
-      await this.chatStore.addMessage(accountId, sessionId, message);
+      await this.chatStore.addMessage(accountId, sessionId, { ...message, ...(actorSnapshot ? { actorSnapshot } : {}) });
     }
   }
 
@@ -775,6 +782,7 @@ export class AgentHarness {
     const model = this.state.activeModel;
     const beatEpoch = this._sessionEpoch;
     const beatAccountId = this.state.activeAccountId;
+    const actorSnapshot = this._captureActorSnapshot();
 
     // Drain any queued messages
     const queued = this._pendingMessages || [];
@@ -803,19 +811,19 @@ ${userBlock}`;
 
     let failedResult = null;
     try {
-      const result = await this._runClaude(prompt, model);
+      const result = await this._runClaude(prompt, model, actorSnapshot);
       if (result.error) failedResult = result;
       if (result.error) throw new Error(result.error);
       // Text already streamed via _handleOpenCodeEvent agent_text events
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
       const activityId = randomUUID();
       if (effectiveSessionId) this._sessionId = effectiveSessionId;
-      await this._persistSession(effectiveSessionId, { mode: 'message' });
+      await this._persistSession(effectiveSessionId, { mode: 'message' }, beatAccountId, actorSnapshot);
       await this._persistMessages(effectiveSessionId, [
         ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content, activityId, origin: 'User' })),
         { role: 'assistant', kind: 'message', beat: beatNum, toolCalls: result.toolCalls || 0, content: result.text || '', activityId, origin: 'User' },
         ...(result.toolEvents || []).map(event => ({ ...event, activityId, origin: 'User' })),
-      ]);
+      ], beatAccountId, actorSnapshot);
     } catch (err) {
       this.state.stats.errors++;
       this.state.emit('agent_log', { message: `Message beat error: ${err.message}`, level: 'error' });
@@ -829,13 +837,13 @@ ${userBlock}`;
         };
         if (beatAccountId && this.chatStore) {
           try {
-            await this._persistSession(sessionId, { mode: 'message' }, beatAccountId);
+            await this._persistSession(sessionId, { mode: 'message' }, beatAccountId, actorSnapshot);
             await this._persistMessages(sessionId, [
               ...allMessages.map(content => ({ role: 'user', kind: 'message', beat: beatNum, content, activityId: failure.activityId, origin: 'User' })),
               ...(failedResult?.toolEvents || []).map(event => ({ ...event, activityId: failure.activityId, origin: 'User' })),
               ...(failedResult?.text ? [{ role: 'assistant', kind: 'message_partial', beat: beatNum, content: failedResult.text, activityId: failure.activityId, origin: 'User' }] : []),
               { role: 'assistant', kind: 'message_failure', ...failure, content: failure.message },
-            ], beatAccountId);
+            ], beatAccountId, actorSnapshot);
           } catch (auditErr) {
             this.state.emit('agent_log', { message: `Message failure audit error: ${sanitizeOpenCodeError(auditErr?.message || auditErr)}`, level: 'error' });
           }
@@ -926,6 +934,7 @@ ${userBlock}`;
     const model = this.state.activeModel;
     const beatAccountId = this.state.activeAccountId;
     const beatEpoch = this._sessionEpoch;
+    const actorSnapshot = this._captureActorSnapshot();
 
     this.state.emit('beat_start', { beat: beatNum, phase, time: this.state.lastBeatTime });
     this.state.emit('agent_log', {
@@ -978,7 +987,7 @@ ${userBlock}`;
     try {
       let result;
       try {
-        result = await this._runClaude(prompt, model);
+        result = await this._runClaude(prompt, model, actorSnapshot);
       } catch (err) {
         executionFailed = true;
         throw err;
@@ -993,11 +1002,11 @@ ${userBlock}`;
       const effectiveSessionId = result.sessionEpoch === this._sessionEpoch ? result.sessionId : null;
       const activityId = randomUUID();
       if (effectiveSessionId) this._sessionId = effectiveSessionId;
-      await this._persistSession(effectiveSessionId, { mode: 'heartbeat' });
+      await this._persistSession(effectiveSessionId, { mode: 'heartbeat' }, beatAccountId, actorSnapshot);
       await this._persistMessages(effectiveSessionId, [
         { role: 'assistant', kind: 'heartbeat', beat: beatNum, phase, toolCalls: result.toolCalls || 0, content: result.text || '', activityId, origin: 'Heartbeat' },
         ...(result.toolEvents || []).map(event => ({ ...event, activityId, origin: 'Heartbeat' })),
-      ]);
+      ], beatAccountId, actorSnapshot);
 
       if (beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId && this.state.lastHeartbeatFailure && !this.state.lastHeartbeatFailure.recoveredAt) {
         const failure = this.state.lastHeartbeatFailure;
@@ -1007,7 +1016,7 @@ ${userBlock}`;
             role: 'assistant', kind: 'heartbeat_recovery', beat: beatNum, time: recoveredAt,
             failureSessionId: failure.sessionId, failureBeat: failure.beat, activityId: failure.activityId, origin: 'Heartbeat',
             content: `Heartbeat #${beatNum} recovered from failure on heartbeat #${failure.beat}`,
-          }], beatAccountId);
+          }], beatAccountId, actorSnapshot);
           failure.recoveredAt = recoveredAt;
           failure.recoveredByBeat = beatNum;
         } catch (auditErr) {
@@ -1031,11 +1040,11 @@ ${userBlock}`;
         this.state.lastHeartbeatFailure = failure;
         if (beatAccountId && this.chatStore) {
           try {
-            await this._persistSession(failure.sessionId, { mode: 'heartbeat' }, beatAccountId);
+            await this._persistSession(failure.sessionId, { mode: 'heartbeat' }, beatAccountId, actorSnapshot);
             await this._persistMessages(failure.sessionId, [
               ...(failedResult?.toolEvents || []).map(event => ({ ...event, activityId: failure.activityId, origin: 'Heartbeat' })),
               { role: 'assistant', kind: 'heartbeat_failure', ...failure, content: failure.message },
-            ], beatAccountId);
+            ], beatAccountId, actorSnapshot);
           } catch (auditErr) {
             this.state.emit('agent_log', { message: `Heartbeat failure audit error: ${sanitizeOpenCodeError(auditErr?.message || auditErr)}`, level: 'error' });
           }
@@ -1064,7 +1073,7 @@ ${userBlock}`;
   /**
    * Run opencode as subprocess with MCP tools and stream JSON events
    */
-  async _runClaude(prompt, model) {
+  async _runClaude(prompt, model, actorSnapshot = null) {
     const isNewSession = !this._sessionId;
     let priorContext = '';
     if (isNewSession) priorContext = await this._priorContext();
@@ -1232,6 +1241,7 @@ ${userBlock}`;
           try {
             const event = JSON.parse(line);
             this._handleOpenCodeEvent(event, {
+              actorSnapshot,
               addToolCall: () => toolCalls++,
               recordToolEvent: (event) => toolEvents.push(event),
               addText: (t) => { fullText += t; },
@@ -1296,6 +1306,7 @@ ${userBlock}`;
           try {
             const event = JSON.parse(buffer);
             this._handleOpenCodeEvent(event, {
+              actorSnapshot,
               addToolCall: () => toolCalls++,
               recordToolEvent: (event) => toolEvents.push(event),
               addText: (t) => { fullText += t; },
@@ -1463,6 +1474,7 @@ ${userBlock}`;
         ctx.recordToolEvent?.({
           eventType: 'tool_call', kind: 'tool_call', role: 'assistant', tool: toolName,
           args: safeAuditValue(toolInput), result: safeResult?.substring(0, captureLimit), beat: beatNum,
+          ...(ctx.actorSnapshot ? { actorSnapshot: ctx.actorSnapshot } : {}),
           callId: event.callID || event.callId || part.callID || part.id || undefined,
           completedAt: new Date().toISOString(), status: state.status || (safeError ? 'error' : 'completed'),
           ...(safeError ? { error: safeError } : {}),

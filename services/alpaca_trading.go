@@ -1274,21 +1274,7 @@ func (s *AlpacaTradingService) GetOptionsPosition(ctx context.Context, symbol st
 
 	for _, pos := range positions {
 		if pos.Symbol == symbol && pos.AssetClass == "us_option" {
-			return &interfaces.OptionsPosition{
-				BrokerAccountID: s.expectedAccountID,
-				PaperLive:       map[bool]string{true: "paper", false: "live"}[s.expectedPaper],
-				TenantID:        s.expectedTenantID,
-				SandboxID:       s.expectedSandboxID,
-				Symbol:          pos.Symbol,
-				Qty:             pos.Qty.InexactFloat64(),
-				AvgEntryPrice:   pos.AvgEntryPrice.InexactFloat64(),
-				MarketValue:     pos.MarketValue.InexactFloat64(),
-				CostBasis:       pos.CostBasis.InexactFloat64(),
-				UnrealizedPL:    pos.UnrealizedPL.InexactFloat64(),
-				UnrealizedPLPC:  pos.UnrealizedPLPC.InexactFloat64(),
-				CurrentPrice:    pos.CurrentPrice.InexactFloat64(),
-				Side:            string(pos.Side),
-			}, nil
+			return s.mapAlpacaOptionsPosition(pos), nil
 		}
 	}
 
@@ -1308,23 +1294,60 @@ func (s *AlpacaTradingService) ListOptionsPositions(ctx context.Context) ([]*int
 	optionsPositions := []*interfaces.OptionsPosition{}
 	for _, pos := range positions {
 		if pos.AssetClass == "us_option" {
-			optionsPositions = append(optionsPositions, &interfaces.OptionsPosition{
-				BrokerAccountID: s.expectedAccountID,
-				PaperLive:       map[bool]string{true: "paper", false: "live"}[s.expectedPaper],
-				TenantID:        s.expectedTenantID,
-				SandboxID:       s.expectedSandboxID,
-				Symbol:          pos.Symbol,
-				Qty:             pos.Qty.InexactFloat64(),
-				AvgEntryPrice:   pos.AvgEntryPrice.InexactFloat64(),
-				MarketValue:     pos.MarketValue.InexactFloat64(),
-				CostBasis:       pos.CostBasis.InexactFloat64(),
-				UnrealizedPL:    pos.UnrealizedPL.InexactFloat64(),
-				UnrealizedPLPC:  pos.UnrealizedPLPC.InexactFloat64(),
-				CurrentPrice:    pos.CurrentPrice.InexactFloat64(),
-				Side:            string(pos.Side),
-			})
+			optionsPositions = append(optionsPositions, s.mapAlpacaOptionsPosition(pos))
 		}
 	}
 
 	return optionsPositions, nil
+}
+
+func (s *AlpacaTradingService) mapAlpacaOptionsPosition(pos alpaca.Position) *interfaces.OptionsPosition {
+	result := &interfaces.OptionsPosition{
+		BrokerAccountID:        s.expectedAccountID,
+		PaperLive:              map[bool]string{true: "paper", false: "live"}[s.expectedPaper],
+		TenantID:               s.expectedTenantID,
+		SandboxID:              s.expectedSandboxID,
+		Symbol:                 pos.Symbol,
+		Qty:                    pos.Qty.InexactFloat64(),
+		AvgEntryPrice:          pos.AvgEntryPrice.InexactFloat64(),
+		MarketValue:            pos.MarketValue.InexactFloat64(),
+		CostBasis:              pos.CostBasis.InexactFloat64(),
+		UnrealizedPL:           pos.UnrealizedPL.InexactFloat64(),
+		UnrealizedPLPC:         pos.UnrealizedPLPC.InexactFloat64(),
+		CurrentPrice:           pos.CurrentPrice.InexactFloat64(),
+		Side:                   string(pos.Side),
+		ContractMetadataStatus: "unknown",
+	}
+
+	_, expiration, optionType, strike, ok := parseOCCOptionSymbol(pos.Symbol)
+	if !ok {
+		return result
+	}
+
+	// OCC fields are useful fallback context, but the root may be an adjusted
+	// deliverable identifier and must never be presented as a verified underlying.
+	result.Expiration = expiration
+	result.Strike = strike
+	if strings.EqualFold(optionType, "C") {
+		result.OptionType = "call"
+	} else {
+		result.OptionType = "put"
+	}
+
+	contract, err := s.client.GetOptionContract(pos.Symbol)
+	if err == nil && contract != nil && strings.EqualFold(contract.Symbol, pos.Symbol) &&
+		strings.TrimSpace(contract.UnderlyingSymbol) != "" && !contract.ExpirationDate.IsZero() &&
+		contract.StrikePrice.Sign() > 0 &&
+		(contract.Type == alpaca.OptionTypeCall || contract.Type == alpaca.OptionTypePut) {
+		verifiedExpiration, parseErr := time.ParseInLocation("2006-01-02", contract.ExpirationDate.String(), time.UTC)
+		if parseErr != nil {
+			return result
+		}
+		result.Underlying = strings.TrimSpace(contract.UnderlyingSymbol)
+		result.Expiration = verifiedExpiration
+		result.Strike = contract.StrikePrice.InexactFloat64()
+		result.OptionType = string(contract.Type)
+		result.ContractMetadataStatus = "verified"
+	}
+	return result
 }

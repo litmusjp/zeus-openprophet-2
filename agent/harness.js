@@ -204,6 +204,9 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   const multiSessionMvpActive = temporaryOverrideActive
     && multiSessionMarkerCount === 1
     && /^### ALPHA_MVP_MODE: MULTI_SESSION\s*$/m.test(temporaryBody);
+  const l2SurgeMultiSessionMvpActive = multiSessionMvpActive
+    && agentConfig.sandboxId === 'sbx_956ff9e4'
+    && agentConfig.id === 'momentum';
   let strategyRules = '';
   if (agentConfig.customStrategyRules) {
     strategyRules = agentConfig.customStrategyRules;
@@ -244,6 +247,10 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
       ? 'Preserve the original strategy text. During the temporary validation objective, only its entry filters and discretionary no-trade conditions are superseded; risk limits and exits remain mandatory.'
       : 'These are the hard rules you MUST follow. They define what you can trade, position sizes, risk limits, and exit criteria.'}\n\n${tradingRules}`
     : '## No Strategy Rules Assigned\nNo trading rules have been configured. Use conservative defaults: max 10% per position, always use limit orders, maintain 50%+ cash.';
+  const l2SurgePriorityClarification = l2SurgeMultiSessionMvpActive && tradingRules
+    ? `\n\n### L2 Surge multi-session MVP entry priority\nFor this explicitly scoped PAPER, quantity-one validation, ordinary daily-close and volume entry filters are preferences; use completed historical bars as context, and do not treat an unfinished current-day close as a blanket reason to avoid evaluating an otherwise affordable, liquid candidate. If otherwise eligible, inspect fresh exact-contract evidence and use the existing guarded AlphaDesk order path. This creates no entry quota and never requires a trade. Missing genuinely necessary evidence, genuine AlphaDesk FAIL or UNAVAILABLE, current OP2 confirmation or managed review lock ON or unknown, and account, PAPER, market, permission, risk, or reconciliation boundaries still block entry. Mandatory risk limits, strategy exits, expiry exits, and time exits remain unchanged.`
+    : '';
+  const strategyRulesBlock = `${rulesBlock}${l2SurgePriorityClarification}`;
 
   // Layer 3: System Instructions (tools, heartbeat, operational)
   const alphaDeskGuidance = scopedWorkflowPresent
@@ -338,7 +345,7 @@ ${riskDisciplineGuidance}
 - Each heartbeat is independent — re-establish state from tools; don't rely on stale assumptions.
 - Report what you did (or deliberately didn't) and why, concisely.`;
 
-  return `${identity}\n\n${rulesBlock}\n\n${systemInstructions}`;
+  return `${identity}\n\n${strategyRulesBlock}\n\n${systemInstructions}`;
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────

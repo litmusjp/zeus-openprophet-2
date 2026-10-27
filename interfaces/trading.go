@@ -431,21 +431,22 @@ func (q OptionsQuote) MarshalJSON() ([]byte, error) {
 }
 
 type OptionsPosition struct {
-	BrokerAccountID string
-	PaperLive       string
-	TenantID        string
-	SandboxID       string
-	Symbol          string
-	Underlying      string
-	Qty             float64
-	AvgEntryPrice   float64
-	MarketValue     float64
-	CostBasis       float64
-	UnrealizedPL    float64
-	UnrealizedPLPC  float64
-	CurrentPrice    float64
-	Side            string // "long" or "short"
-	Expiration      time.Time
-	Strike          float64
-	OptionType      string // "call" or "put"
+	BrokerAccountID        string
+	PaperLive              string
+	TenantID               string
+	SandboxID              string
+	Symbol                 string
+	Underlying             string
+	Qty                    float64
+	AvgEntryPrice          float64
+	MarketValue            float64
+	CostBasis              float64
+	UnrealizedPL           float64
+	UnrealizedPLPC         float64
+	CurrentPrice           float64
+	Side                   string // "long" or "short"
+	Expiration             time.Time
+	Strike                 float64
+	OptionType             string // "call" or "put"
+	ContractMetadataStatus string // "verified" or "unknown"; OCC-decoded fields alone are not provider verified.
 }

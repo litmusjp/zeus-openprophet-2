@@ -126,6 +126,9 @@ test('owned complete instruction markers scope the temporary entry exception and
     ['sbx_956ff9e4', 'mean-reversion'], ['sbx_956ff9e4', 'momentum'],
   ]) {
     const prompt = await build(sandboxId, agentId, complete(`${agentId} identity`));
+    const l2SurgePriority = '### L2 Surge multi-session MVP entry priority';
+    assert.doesNotMatch(prompt, /### ALPHA_MVP_MODE: MULTI_SESSION/);
+    assert.doesNotMatch(prompt, new RegExp(l2SurgePriority));
     assert.match(prompt, /ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory\./);
     assert.equal((prompt.match(/### TEMPORARY_ALPHA_MVP_OVERRIDE/g) || []).length, 1);
     assert.equal((prompt.match(/### MARKET-OPEN ALPHADESK WORKFLOW/g) || []).length, 1);
@@ -147,6 +150,7 @@ test('owned complete instruction markers scope the temporary entry exception and
 
     const withoutTemp = `${agentId} identity\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nPermanent workflow\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
     const ordinary = await build(sandboxId, agentId, withoutTemp);
+    assert.doesNotMatch(ordinary, /### L2 Surge multi-session MVP entry priority/);
     assert.match(ordinary, /Do not trade to test tools\./);
     assert.match(ordinary, /ORIGINAL STRATEGY: require entry filters/);
     assert.match(ordinary, /### MARKET-OPEN ALPHADESK WORKFLOW/);
@@ -166,7 +170,25 @@ test('owned complete instruction markers scope the temporary entry exception and
     const incompleteWorkflow = await build(sandboxId, agentId, `${agentId} identity\n\n### TEMPORARY_ALPHA_MVP_OVERRIDE\npartial\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n\n### MARKET-OPEN ALPHADESK WORKFLOW\npartial`);
     assert.match(incompleteWorkflow, /Do not trade to test tools\./);
     assert.match(incompleteWorkflow, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/);
+    assert.doesNotMatch(incompleteWorkflow, /### L2 Surge multi-session MVP entry priority/);
   }
+
+  const multiSessionMarker = '### ALPHA_MVP_MODE: MULTI_SESSION\n';
+  const multiSessionPrompt = complete('momentum identity').replace('### TEMPORARY_ALPHA_MVP_OVERRIDE\n', `### TEMPORARY_ALPHA_MVP_OVERRIDE\n${multiSessionMarker}`);
+  const l2Surge = await build('sbx_956ff9e4', 'momentum', multiSessionPrompt);
+  const l2SurgePriority = '### L2 Surge multi-session MVP entry priority';
+  assert.ok(l2Surge.indexOf(l2SurgePriority) > l2Surge.indexOf('ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory.'));
+  assert.match(l2Surge, /ordinary daily-close and volume entry filters are preferences/i);
+  assert.match(l2Surge, /completed historical bars as context/i);
+  assert.match(l2Surge, /otherwise affordable, liquid candidate/i);
+  assert.match(l2Surge, /fresh exact-contract evidence and use the existing guarded AlphaDesk order path/i);
+  assert.match(l2Surge, /creates no entry quota and never requires a trade/i);
+  assert.match(l2Surge, /genuine AlphaDesk FAIL or UNAVAILABLE.*still block entry/i);
+  assert.match(l2Surge, /Mandatory risk limits, strategy exits, expiry exits, and time exits remain unchanged/i);
+  const wrongOwnerMvp = await build('sbx_956ff9e4', 'mean-reversion', multiSessionPrompt);
+  assert.doesNotMatch(wrongOwnerMvp, /### L2 Surge multi-session MVP entry priority/);
+  const wrongSandboxMvp = await build('sbx_723be98b', 'momentum', multiSessionPrompt);
+  assert.doesNotMatch(wrongSandboxMvp, /### L2 Surge multi-session MVP entry priority/);
 
   const wrongSandbox = await build('sbx_other', 'catalyst', complete('Herald'));
   assert.match(wrongSandbox, /Do not trade to test tools\./);
@@ -179,6 +201,7 @@ test('owned complete instruction markers scope the temporary entry exception and
     assert.match(wrongPair, /Do not trade to test tools\./);
     assert.doesNotMatch(wrongPair, /supersedes the ordinary strategy entry filters/i);
     assert.match(wrongPair, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
+    assert.doesNotMatch(wrongPair, /### L2 Surge multi-session MVP entry priority/);
   }
 
   // Stored custom text is inert when the selected template does not use it.

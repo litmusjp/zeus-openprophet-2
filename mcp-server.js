@@ -15,6 +15,7 @@ import { assertManagerToolAllowed, filterManagerTools } from './manager-safety-p
 import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
 import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
+import { futureHistoricalBarsError } from './historical-bars-time.js';
 
 // Configuration
 const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
@@ -582,7 +583,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_historical_bars',
-        description: 'Get historical price bars. Date-only start/end use America/New_York trading dates; end includes that date. You may also pass RFC3339 timestamps for exact bounds. Today is capped at now; malformed or inverted ranges are rejected.',
+        description: 'Get historical price bars. Date-only start/end use America/New_York trading dates; end includes that date. You may also pass RFC3339 timestamps for exact bounds. Timestamp offsets are honored exactly: use UTC Z for UTC clock values (for example 2026-10-28T13:30:00Z), not 2026-10-28T13:30:00-04:00. Today is capped at now; malformed or inverted ranges are rejected.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -592,7 +593,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             start_date: {
               type: 'string',
-              description: 'YYYY-MM-DD New York trading date or RFC3339 timestamp (default: 30 days ago)',
+              description: 'YYYY-MM-DD New York trading date or RFC3339 timestamp with exact offset; UTC times should end in Z (default: 30 days ago)',
             },
             end_date: {
               type: 'string',
@@ -1092,7 +1093,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_datetime',
-        description: 'Get the current date and time in a specified timezone. Defaults to America/New_York (US Eastern). Returns time, date, day of week, market status, and whether markets are likely open.',
+        description: 'Get the current date and time in a specified timezone. Defaults to America/New_York (US Eastern). Returns time, date, day of week, market status, and whether markets are likely open. Use iso_utc as the canonical UTC clock when supplying timestamp bounds.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1614,6 +1615,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_historical_bars': {
+        const diagnostic = futureHistoricalBarsError(args.start_date, new Date().toISOString());
+        if (diagnostic) return diagnostic;
         let endpoint = `/market/bars/${args.symbol}`;
         const params = new URLSearchParams();
         if (args.start_date) params.append('start', args.start_date);
@@ -2215,6 +2218,7 @@ ${allNews.map((article, i) =>
                   day_of_week: dayOfWeek,
                   timezone: timezone,
                   iso: now.toISOString(),
+                  iso_utc: now.toISOString(),
                   unix: Math.floor(now.getTime() / 1000),
                   is_weekday: marketDay,
                   local_is_market_holiday_estimate: isHoliday,

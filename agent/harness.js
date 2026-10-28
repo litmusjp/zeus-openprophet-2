@@ -8,6 +8,7 @@ import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelV
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
+import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -103,6 +104,12 @@ export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult =
     lifecycle,
     executionConfirmed,
     fullFill,
+    clientOrderId: result.client_order_id || result.ClientOrderID || toolInput.client_order_id || undefined,
+    requestedQuantity: requestedQty || undefined,
+    brokerAccountId: result.broker_account_id || result.BrokerAccountID || undefined,
+    tenantId: result.tenant_id || result.TenantID || undefined,
+    sandboxId: result.sandbox_id || result.SandboxID || undefined,
+    paperLive: result.paper_live || result.PaperLive || undefined,
     positionIntent: toolInput.position_intent || undefined,
   };
 }
@@ -493,6 +500,7 @@ export class AgentState extends EventEmitter {
     this.activeModel = null;
     this.positionPlanContext = { status: 'unavailable', accountId: null, sandboxId: null, matches: [] };
     this.recentTrades = [];
+    this.countedTradeExecutions = new Set();
     this.stats = {
       totalBeats: 0,
       toolCalls: 0,
@@ -503,9 +511,18 @@ export class AgentState extends EventEmitter {
   }
 
   addTrade(trade) {
-    this.recentTrades.unshift({ ...trade, timestamp: new Date().toISOString() });
-    if (this.recentTrades.length > 50) this.recentTrades.pop();
-    this.emit('trade', trade);
+    const update = { ...trade, timestamp: trade.timestamp || new Date().toISOString() };
+    const merged = mergeTradeUpdate(this.recentTrades, update, this.countedTradeExecutions);
+    this.recentTrades = merged.trades;
+    this.stats.trades += merged.newlyConfirmed;
+    this.emit('trade', merged.trade);
+    return merged.newlyConfirmed;
+  }
+
+  resetTradeTelemetry() {
+    this.stats.trades = 0;
+    this.recentTrades = [];
+    this.countedTradeExecutions = new Set();
   }
 
   toJSON() {
@@ -658,11 +675,34 @@ export class AgentHarness {
       return '\n\nORIGINAL EXIT PLAN CONTEXT: unavailable; no persisted account-scoped evidence source. Do not infer a prior plan.\n';
     }
     try {
+      const sessionEpoch = this._sessionEpoch;
+      const sandboxId = this.sandboxId;
+      const agentId = this.state.activeAgentId;
       const snapshot = await this.getHeldPositionSnapshot(this.sandboxId);
       const evidence = await this.chatStore.listOrderActorEvidence(accountId);
-      if (accountId !== this.state.activeAccountId || this.sandboxId !== this.state.activeSandboxId) {
+      if (sessionEpoch !== this._sessionEpoch || accountId !== this.state.activeAccountId
+        || sandboxId !== this.sandboxId || sandboxId !== this.state.activeSandboxId
+        || agentId !== this.state.activeAgentId) {
         this.state.positionPlanContext = { status: 'unavailable', accountId: this.state.activeAccountId || null, sandboxId: this.state.activeSandboxId || null, matches: [] };
         return '\n\nORIGINAL EXIT PLAN CONTEXT: unavailable because the active account or sandbox changed during reconciliation. Do not infer or reuse a prior plan.\n';
+      }
+      if (snapshot?.ordersComplete === true) {
+        const updates = reconcilePendingTrades({
+          trades: this.state.recentTrades,
+          orders: listPayload(snapshot.orders),
+          ordersComplete: snapshot.ordersComplete,
+          accountId,
+          sandboxId,
+          agentId,
+        });
+        for (const update of updates) {
+          const trade = this.state.recentTrades.find(item => item.orderId === update.orderId
+            && item.accountId === accountId && item.sandboxId === sandboxId && item.agentId === agentId);
+          if (trade && sessionEpoch === this._sessionEpoch && accountId === this.state.activeAccountId
+            && sandboxId === this.state.activeSandboxId && agentId === this.state.activeAgentId) {
+            this.state.addTrade({ ...trade, ...update });
+          }
+        }
       }
       const plans = recoverHeldPositionPlans({
         accountId,
@@ -708,9 +748,10 @@ export class AgentHarness {
 
     this.state.running = true;
     this.state.paused = false;
+    // Trade telemetry is scoped to this agent run and intentionally resets on each start.
     this.state.stats = { totalBeats: 0, toolCalls: 0, trades: 0, errors: 0, startedAt: new Date().toISOString() };
     this.state.beatCount = 0;
-    this.state.recentTrades = [];
+    this.state.resetTradeTelemetry();
     this.state.lastHeartbeatFailure = null;
     this._sessionId = null;
 
@@ -1223,10 +1264,13 @@ ${userBlock}`;
    */
   async _runClaude(prompt, model, actorSnapshot = null) {
     const isNewSession = !this._sessionId;
+    const runEpoch = this._sessionEpoch;
+    const accountId = this.state.activeAccountId;
+    const sandboxId = this.sandboxId;
     let priorContext = '';
     if (isNewSession) priorContext = await this._priorContext();
     return new Promise((resolve, reject) => {
-      const sessionEpoch = this._sessionEpoch;
+      const sessionEpoch = runEpoch;
       // OpenCode model format: anthropic/claude-sonnet-4-6
       const ocModel = model?.includes('/') ? model : `anthropic/${model || 'claude-sonnet-4-6'}`;
 
@@ -1390,6 +1434,9 @@ ${userBlock}`;
             const event = JSON.parse(line);
             this._handleOpenCodeEvent(event, {
               actorSnapshot,
+              sessionEpoch,
+              accountId,
+              sandboxId,
               addToolCall: () => toolCalls++,
               recordToolEvent: (event) => toolEvents.push(event),
               addText: (t) => { fullText += t; },
@@ -1455,6 +1502,9 @@ ${userBlock}`;
             const event = JSON.parse(buffer);
             this._handleOpenCodeEvent(event, {
               actorSnapshot,
+              sessionEpoch,
+              accountId,
+              sandboxId,
               addToolCall: () => toolCalls++,
               recordToolEvent: (event) => toolEvents.push(event),
               addText: (t) => { fullText += t; },
@@ -1633,9 +1683,18 @@ ${userBlock}`;
         // Track only tools that execute trades. Read-only tools such as
         // get_orders and get_managed_positions must not inflate trade telemetry.
         const trade = tradeEventFromToolUse(fullToolName, toolInput, resultStr, state.error);
-        if (trade) {
-          if (trade.executionConfirmed) this.state.stats.trades++;
-          this.state.addTrade(trade);
+        const currentToolContext = (ctx.sessionEpoch === undefined || ctx.sessionEpoch === this._sessionEpoch)
+          && (ctx.accountId === undefined || ctx.accountId === this.state.activeAccountId)
+          && (ctx.sandboxId === undefined || ctx.sandboxId === this.sandboxId)
+          && (!ctx.actorSnapshot?.agentId || ctx.actorSnapshot.agentId === this.state.activeAgentId);
+        if (trade && currentToolContext) {
+          this.state.addTrade({
+            ...trade,
+            accountId: this.state.activeAccountId,
+            sandboxId: this.state.activeSandboxId,
+            agentId: ctx.actorSnapshot?.agentId || null,
+            tenantId: trade.tenantId || this.state.activeAccountId,
+          });
         }
         break;
       }

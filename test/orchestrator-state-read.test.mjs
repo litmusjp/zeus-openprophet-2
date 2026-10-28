@@ -31,8 +31,10 @@ test('reading a known dormant sandbox returns default state without creating run
     assert.deepEqual(Object.keys(state), [
       'running', 'paused', 'phase', 'phaseLabel', 'heartbeatSeconds', 'heartbeatOverride',
       'beatCount', 'lastBeatTime', 'lastHeartbeatFailure', 'nextBeatTime', 'activeAgentId',
-      'activeAccountId', 'activeModel', 'recentTrades', 'stats',
+      'activeAccountId', 'activeModel', 'positionPlanContext', 'recentTrades', 'stats',
     ]);
+    assert.equal(state.positionPlanContext.status, 'unavailable');
+    assert.deepEqual(state.positionPlanContext.matches, []);
     assert.equal(orchestrator.runtimes.size, 0);
     assert.equal(orchestrator.portOwners.size, 0);
 

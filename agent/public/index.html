@@ -1386,8 +1386,11 @@ function connectSSE() {
   es.addEventListener('tool_result', e => {
     const d = JSON.parse(e.data);
     const sid = d.sandboxId || getEffectiveSandboxId();
-    logToSandbox(sid, `<div class="log-entry info"><span class="time">${fmtTime()}</span><span style="color:var(--ink-faint)"> -> ${esc(d.name)}: ${esc(d.result.substring(0,200))}</span></div>`);
-    logHtml('<span style="color:var(--ink-faint)">  -> ' + esc(formatSandboxPrefix(d) + d.name) + ': ' + esc(d.result.substring(0,200)) + '</span>', 'info');
+    const detail = typeof d.error === 'string' && d.error
+      ? `ERROR: ${d.error.substring(0,200)}`
+      : (typeof d.result === 'string' ? d.result.substring(0,200) : '(no result)');
+    logToSandbox(sid, `<div class="log-entry info"><span class="time">${fmtTime()}</span><span style="color:var(--ink-faint)"> -> ${esc(d.name)}: ${esc(detail)}</span></div>`);
+    logHtml('<span style="color:var(--ink-faint)">  -> ' + esc(formatSandboxPrefix(d) + d.name) + ': ' + esc(detail) + '</span>', 'info');
     noteBrokerAction(d);
   });
   es.addEventListener('heartbeat_change', e => {

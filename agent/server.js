@@ -447,6 +447,15 @@ function createHarnessForActiveSandbox() {
       isAvailable: sandboxId => EXECUTION_START_ENABLED && getSandbox(sandboxId)?.plugins?.alphadesk?.requireManagedApprovalGate === true
         && (isActiveSandbox(sandboxId) ? goReady : orchestrator.getSandboxRuntime(sandboxId)?.goReady === true),
     }),
+    getHeldPositionSnapshot: async sandboxId => {
+      const client = getGoClientForSandbox(sandboxId);
+      if (!client) throw new Error('sandbox trading backend unavailable');
+      const [positions, orders] = await Promise.all([
+        client.get('/api/v1/options/positions'),
+        client.get('/api/v1/orders?status=all'),
+      ]);
+      return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true };
+    },
     chatStore,
     opencodeEnv: {
       OPENPROPHET_DATA_DIR: path.join(PROJECT_ROOT, 'data'),

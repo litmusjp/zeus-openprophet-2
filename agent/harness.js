@@ -58,7 +58,7 @@ function parseOrderToolResult(toolResult) {
   try { return JSON.parse(json); } catch { return {}; }
 }
 
-export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult = '') {
+export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult = '', toolError = null) {
   const tool = String(fullToolName || '').replace('prophet_', '');
   const defaultSides = {
     place_buy_order: 'buy',
@@ -75,8 +75,11 @@ export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult =
   const requestedQty = Number(toolInput.quantity ?? toolInput.qty ?? 0);
   const hasRequestedQty = Number.isFinite(requestedQty) && requestedQty > 0;
   const hasFill = Number.isFinite(filledQty) && filledQty > 0;
+  if (toolError && !hasFill) return null;
+  if (!status && !hasFill) return null;
   if (['planned_for_next_session', 'risk_blocked', 'rejected_before_submission', 'planned_intent_not_broker_visible'].includes(status)
     || (['submit_failed', 'submission_uncertain'].includes(status) && !hasFill)) return null;
+  if (['rejected', 'submit_failed'].includes(status) && !hasFill) return null;
   const fullFill = hasFill && hasRequestedQty && filledQty >= requestedQty - 1e-9;
   const fillStatuses = ['filled', 'partially_filled', 'canceled', 'rejected', 'expired', 'done_for_day', 'replaced'];
   const executionConfirmed = result.execution_confirmed === true && hasFill && fillStatuses.includes(status);
@@ -102,6 +105,94 @@ export function tradeEventFromToolUse(fullToolName, toolInput = {}, toolResult =
     fullFill,
     positionIntent: toolInput.position_intent || undefined,
   };
+}
+
+const field = (value, ...names) => names.map(name => value?.[name]).find(item => item !== undefined && item !== null);
+const brokerOrderId = value => field(value, 'order_id', 'orderId', 'OrderID', 'ID', 'id');
+const clientOrderId = value => field(value, 'client_order_id', 'clientOrderID', 'ClientOrderID');
+function listPayload(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.positions)) return value.positions;
+  if (Array.isArray(value?.orders)) return value.orders;
+  return [];
+}
+function persistedOrderReceipt(value) {
+  let current = parseOrderToolResult(value);
+  for (let depth = 0; depth < 5; depth++) {
+    if (!current || typeof current !== 'object') return {};
+    const status = String(current.status || current.Status || '').toLowerCase();
+    if (field(current, 'order_id', 'orderId', 'OrderID', 'ID', 'id')
+      || ['accepted', 'new', 'pending', 'pending_new', 'open', 'partially_filled', 'filled', 'canceled', 'cancelled', 'expired', 'done_for_day'].includes(status)) return current;
+    const textBlock = Array.isArray(current.content) ? current.content.find(item => item?.type === 'text' && typeof item.text === 'string') : null;
+    if (textBlock) { current = parseOrderToolResult(textBlock.text); continue; }
+    current = parseOrderToolResult(current.result ?? current.data);
+  }
+  return {};
+}
+
+// Join a persisted entry thesis to a currently held, broker-confirmed lot.
+// Ambiguous or incompletely scoped evidence intentionally produces no plan.
+export function recoverHeldPositionPlans({ accountId, sandboxId, positions, orders, ordersComplete = false, evidence }) {
+  if (ordersComplete !== true) return [];
+  const held = listPayload(positions).filter(position =>
+    String(field(position, 'SandboxID', 'sandbox_id') || '') === sandboxId
+    && String(field(position, 'BrokerAccountID', 'broker_account_id') || '')
+    && String(field(position, 'PaperLive', 'paper_live') || '').toLowerCase() === 'paper'
+    && Number(field(position, 'Qty', 'qty', 'quantity')) > 0
+    && String(field(position, 'Side', 'side') || '').toLowerCase() === 'long');
+  const liveOrders = listPayload(orders);
+  const records = evidence.flatMap(session => (session.accountId && session.accountId !== accountId ? [] : session.messages || []));
+  const out = [];
+  for (const position of held) {
+    const symbol = String(field(position, 'Symbol', 'symbol') || '').toUpperCase();
+    const qty = Number(field(position, 'Qty', 'qty', 'quantity'));
+    const avgPrice = Number(field(position, 'AvgEntryPrice', 'avg_entry_price'));
+    const tenantId = String(field(position, 'TenantID', 'tenant_id') || '');
+    const brokerAccountId = String(field(position, 'BrokerAccountID', 'broker_account_id') || '');
+    if (!symbol || !tenantId || tenantId !== accountId || !brokerAccountId || !Number.isFinite(avgPrice)) continue;
+    const filledEntries = liveOrders.filter(order => {
+      const sameScope = String(field(order, 'SandboxID', 'sandbox_id') || '') === sandboxId
+        && String(field(order, 'TenantID', 'tenant_id') || '') === tenantId
+        && String(field(order, 'BrokerAccountID', 'broker_account_id') || '') === brokerAccountId
+        && String(field(order, 'PaperLive', 'paper_live') || '').toLowerCase() === 'paper';
+      const entry = ['buy_to_open', 'buy'].includes(String(field(order, 'PositionIntent', 'position_intent', 'Side', 'side') || '').toLowerCase());
+      const filled = Number(field(order, 'FilledQty', 'filled_qty'));
+      const fillPrice = Number(field(order, 'FilledAvgPrice', 'filled_avg_price'));
+      return sameScope && entry && String(field(order, 'Symbol', 'symbol') || '').toUpperCase() === symbol
+        && ['filled', 'partially_filled', 'canceled', 'rejected', 'expired', 'done_for_day'].includes(String(field(order, 'Status', 'status') || '').toLowerCase())
+        && filled >= qty && Number.isFinite(fillPrice) && Math.abs(fillPrice - avgPrice) < 0.011;
+    });
+    if (filledEntries.length !== 1) continue;
+    const liveEntry = filledEntries[0];
+    const liveBrokerId = brokerOrderId(liveEntry);
+    const liveClientId = clientOrderId(liveEntry);
+    if (!liveBrokerId || !liveClientId) continue;
+    const matches = records.filter(record => {
+      if (record.accountId && record.accountId !== accountId || record.resultTruncated || record.error) return false;
+      if (!['completed', 'success'].includes(String(record.status || '').toLowerCase())) return false;
+      if (String(record.tool || '').replace(/^prophet_/, '') !== 'place_options_order') return false;
+      const args = record.args || {};
+      if (String(args.position_intent || '').toLowerCase() !== 'buy_to_open' || String(args.symbol || '').toUpperCase() !== symbol) return false;
+      const receipt = persistedOrderReceipt(record.result);
+      const receiptStatus = String(receipt.status || receipt.Status || '').toLowerCase();
+      if (receipt.error || receipt.isError || !['accepted', 'new', 'pending', 'pending_new', 'open', 'partially_filled', 'filled', 'canceled', 'cancelled', 'expired', 'done_for_day'].includes(receiptStatus)) return false;
+      if (String(field(receipt, 'sandbox_id', 'SandboxID') || '') !== sandboxId
+        || String(field(receipt, 'tenant_id', 'TenantID') || '') !== tenantId
+        || String(field(receipt, 'broker_account_id', 'BrokerAccountID') || '') !== brokerAccountId
+        || String(field(receipt, 'paper_live', 'PaperLive') || '').toLowerCase() !== 'paper') return false;
+      const receiptBrokerId = brokerOrderId(receipt);
+      const receiptClientId = clientOrderId(receipt);
+      const argsClientId = clientOrderId(args);
+      return Boolean(receiptBrokerId && receiptClientId && argsClientId
+        && String(receiptBrokerId) === String(liveBrokerId)
+        && String(receiptClientId) === String(liveClientId)
+        && String(argsClientId) === String(receiptClientId)
+        && typeof args.thesis === 'string' && args.thesis.trim());
+    });
+    if (matches.length === 1) out.push({ symbol, thesis: matches[0].args.thesis.trim(), entryBrokerId: String(liveBrokerId) });
+  }
+  return out;
 }
 
 const OPEN_CODE_ERROR_LIMIT = 1200;
@@ -259,6 +350,9 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
 In PAPER_ADVISORY_OP2, provider \`indicative/testing_only\` quotes are permitted for this paper-advisory assessment and do not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI: assessment obtains its own reference evidence. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; genuine FAIL or UNAVAILABLE blocks opening, and the broker boundary retains fresh server-side assessment.
 For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capital must freshly re-evaluate a bounded small set of relevant candidates on the permitted cadence. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion; keep management first, and stop only for a current hard exclusion or no setup with its specific reason.`;
   const alphaDeskBudgetGuidance = '- Before selecting a new single-leg long candidate in PAPER_ADVISORY_OP2 when its gate is enabled, call `prophet_get_options_assessment_policy` and require a valid POLICY_ONLY response. Skip the candidate if policy is unavailable or malformed. Compute the maximum affordable premium as max_investment_per_candidate divided by (quantity * standard contract multiplier), then compare the proposed premium. Keep quantity within maximum_contracts_per_candidate and do not assess an unaffordable candidate. This policy lookup is neither PASS nor execution authority.';
+  const scopedDiscoveryGuidance = scopedWorkflowPresent
+    ? `\n- On each normal entry-eligible regular-session heartbeat, manage exposure first, then refresh and screen a bounded rotating shortlist inside this agent's existing strategy universe when capacity remains, including while holding a position. If candidates fail or have no setup, assess other eligible names within the existing tool budget on that beat. Revisit rejected names only with material fresh evidence and a valid new proposal; never blindly retry an uncertain order. Reuse fresh broad research, but obtain fresh exact-contract and AlphaDesk evidence before entry. Honor strategy windows, permissions, capacity and all hard gates. End with screened names, concise reasons and the next refresh trigger.`
+    : '';
   const noTestGuidance = multiSessionMvpActive
     ? '- Multi-session MVP validation: keep the existing relaxed ordinary entry filters in force for this objective, and reach two completed broker-confirmed entry-and-exit cycles in this agent’s own PAPER account as a validation checkpoint across sessions. Validate only single-contract long calls or puts (quantity one); do not increase size to meet the checkpoint. Count a carry-in position’s completed reducing exit once against its original broker-confirmed opening fill; accepted, planned, unfilled orders, runtime counters and another account’s activity are not cycles. This checkpoint is not a per-day quota, deadline, or ceiling: after it, continue bounded fresh research and eligible opportunities under existing capacity and permissions; valid no-trade days are allowed. Manage open exposure first. Never close to complete a cycle, meet a daily target or reset at a date boundary. Hold across sessions while the original thesis, strategy-specific conditional time exit, expiry and risk permit; risk exits remain immediate and losers are never extended past invalidation. Record underlying or premium basis, target, numerical invalidation, time/expiry exit and allowed discretionary exit rationale. Standalone `prophet_assess_options_trade` is optional research, not a prerequisite. Prefer one guarded `prophet_place_options_order` call for the eligible unchanged proposal; the backend independently obtains and enforces a fresh genuine AlphaDesk PASS before broker submission. Never use caller-evidence `prophet_assess_options_strategy`. Current tools provide no broker-held continuous options stop/OCO. The operator-owned temporary override supersedes ordinary entry filters and discretionary no-trade conditions only; market eligibility, PAPER identity, permissions, risk/exits, expiry, genuine AlphaDesk PASS, backend/account/freshness/review/execution gates and reconciliation remain hard gates.'
     : temporaryOverrideActive
@@ -309,7 +403,7 @@ ${decideActGuidance}
 - Every options submission is checked against the broker-authoritative regular-session clock immediately before the broker call. A closed-session response is saved as \`planned_for_next_session\`; it is an application intent, NOT a broker order.
 - A written plan, intention, watchlist item, or statement that you "will place" a trade is NOT an order and must never be reported as queued, submitted, or placed unless the tool returns the explicit planned status.
 - Use \`prophet_place_options_order\` for a single OCC option symbol. Its agent schema is single-leg only. Do not construct a spread through sequential single-leg orders; backend atomic multi-leg support is not exposed by this tool. Never send an OCC option symbol through stock or managed-position tools. Always pass the underlying and explicit \`position_intent\` (\`buy_to_open\`, \`buy_to_close\`, \`sell_to_open\`, or \`sell_to_close\`).
-${alphaDeskGuidance}
+${alphaDeskGuidance}${scopedDiscoveryGuidance}
 ${alphaDeskBudgetGuidance}
 - At the first valid-session heartbeat, review \`prophet_get_orders\` for \`planned_for_next_session\`. Only an eligible unexpired planned intent may be retried with its returned \`client_order_id\` and unchanged immutable order fields after complete broker reconciliation and fresh price, liquidity, account, positions, risk and thesis checks. Do not duplicate an existing broker order.
 - If broker state is incomplete or unavailable, do not submit or retry. Verify \`next_eligible_at\`, expiry and the exact original payload before the one eligible planned retry with its original ID. Never retry \`submission_uncertain\` blindly or replace its ID. \`market_closed\` means wait; \`provider_unavailable\` means fail closed. \`risk_blocked\`, \`rejected_before_submission\`, and \`planned_intent_not_broker_visible\` are application outcomes, not broker attempts.
@@ -397,6 +491,7 @@ export class AgentState extends EventEmitter {
     this.activeAgentId = null;
     this.activeAccountId = null;
     this.activeModel = null;
+    this.positionPlanContext = { status: 'unavailable', accountId: null, sandboxId: null, matches: [] };
     this.recentTrades = [];
     this.stats = {
       totalBeats: 0,
@@ -414,6 +509,8 @@ export class AgentState extends EventEmitter {
   }
 
   toJSON() {
+    const planContextIsCurrent = this.positionPlanContext?.accountId === this.activeAccountId
+      && this.positionPlanContext?.sandboxId === this.activeSandboxId;
     return {
       running: this.running,
       paused: this.paused,
@@ -428,6 +525,16 @@ export class AgentState extends EventEmitter {
       activeAgentId: this.activeAgentId,
       activeAccountId: this.activeAccountId,
       activeModel: this.activeModel,
+      positionPlanContext: {
+        status: planContextIsCurrent ? this.positionPlanContext.status : 'unavailable',
+        accountId: planContextIsCurrent ? this.positionPlanContext.accountId : this.activeAccountId || null,
+        sandboxId: planContextIsCurrent ? this.positionPlanContext.sandboxId : this.activeSandboxId || null,
+        matches: (planContextIsCurrent ? this.positionPlanContext.matches || [] : []).map(plan => ({
+          symbol: String(plan.symbol || '').slice(0, 64),
+          thesis: String(plan.thesis || '').slice(0, 2000),
+          entryBrokerId: String(plan.entryBrokerId || '').slice(0, 128),
+        })),
+      },
       recentTrades: this.recentTrades.slice(0, 10),
       stats: this.stats,
     };
@@ -448,6 +555,7 @@ export class AgentHarness {
       getHeartbeatForPhase = () => null,
       getPermissions = () => ({}),
       getManagedReviewPolicy = async () => { throw new Error('managed policy unavailable'); },
+      getHeldPositionSnapshot = async () => { throw new Error('position snapshot unavailable'); },
       chatStore = null,
       opencodeEnv = {},
       spawnFn = spawn,
@@ -457,6 +565,7 @@ export class AgentHarness {
 
     this.state = new AgentState();
     this.sandboxId = sandboxId;
+    this.state.activeSandboxId = sandboxId;
     this.accountId = accountId;
     this.getSandbox = getSandbox;
     this.getAccount = getAccount;
@@ -466,6 +575,7 @@ export class AgentHarness {
     this.getHeartbeatForPhase = getHeartbeatForPhase;
     this.getPermissions = getPermissions;
     this.getManagedReviewPolicy = getManagedReviewPolicy;
+    this.getHeldPositionSnapshot = getHeldPositionSnapshot;
     this.chatStore = chatStore;
     this.opencodeEnv = opencodeEnv;
     this.spawnFn = spawnFn;
@@ -539,6 +649,41 @@ export class AgentHarness {
     });
     if (!sessions.length) return '';
     return `\n\n## Prior Session Context (persisted)\nThese are compact excerpts from earlier sessions for this same account. Use them for continuity, but verify current prices, positions, and order status with live tools. Do not repeat old orders merely because they appear here.\n${JSON.stringify(sessions)}\n## End Prior Session Context\n`;
+  }
+
+  async _heldPositionPlanContext(accountId = this.state.activeAccountId) {
+    this.state.positionPlanContext = { status: 'unavailable', accountId: accountId || null, sandboxId: this.sandboxId || null, matches: [] };
+    if (!accountId || !this.sandboxId || !this.chatStore) {
+      this.state.positionPlanContext.status = 'missing';
+      return '\n\nORIGINAL EXIT PLAN CONTEXT: unavailable; no persisted account-scoped evidence source. Do not infer a prior plan.\n';
+    }
+    try {
+      const snapshot = await this.getHeldPositionSnapshot(this.sandboxId);
+      const evidence = await this.chatStore.listOrderActorEvidence(accountId);
+      if (accountId !== this.state.activeAccountId || this.sandboxId !== this.state.activeSandboxId) {
+        this.state.positionPlanContext = { status: 'unavailable', accountId: this.state.activeAccountId || null, sandboxId: this.state.activeSandboxId || null, matches: [] };
+        return '\n\nORIGINAL EXIT PLAN CONTEXT: unavailable because the active account or sandbox changed during reconciliation. Do not infer or reuse a prior plan.\n';
+      }
+      const plans = recoverHeldPositionPlans({
+        accountId,
+        sandboxId: this.sandboxId,
+        positions: snapshot?.positions,
+        orders: snapshot?.orders,
+        ordersComplete: snapshot?.ordersComplete === true,
+        evidence,
+      });
+      if (!plans.length) {
+        const positions = listPayload(snapshot?.positions).filter(position => Number(field(position, 'Qty', 'qty', 'quantity')) > 0
+          && String(field(position, 'Side', 'side') || '').toLowerCase() === 'long');
+        this.state.positionPlanContext.status = positions.length === 0 && snapshot?.ordersComplete === true ? 'flat' : 'missing';
+        return `\n\nORIGINAL EXIT PLAN CONTEXT: ${this.state.positionPlanContext.status === 'flat' ? 'no held option lot in this account/sandbox.' : 'no unique original entry receipt and thesis matched a currently held broker-confirmed options lot in this account/sandbox.'} Do not invent or apply a historical plan. Reconcile current holdings and use only a verifiable current thesis.\n`;
+      }
+      this.state.positionPlanContext = { status: 'matched', accountId, sandboxId: this.sandboxId, matches: plans };
+      return `\n\nORIGINAL EXIT PLAN CONTEXT (historical entry receipts; matched to current broker-held lots in this account/sandbox; not fresh authorization):\n${plans.map(plan => `${plan.symbol}: ${plan.thesis}`).join('\n')}\nPreserve the original rules and timeframe verbatim. Reconcile live broker positions/fills before acting; never treat historical prices or pending receipts as current market evidence.\n`;
+    } catch {
+      this.state.positionPlanContext = { status: 'unavailable', accountId, sandboxId: this.sandboxId, matches: [] };
+      return '\n\nORIGINAL EXIT PLAN CONTEXT: unavailable because live positions/orders or retained account-scoped receipt history could not be verified. Do not infer a prior plan or invent levels.\n';
+    }
   }
 
   async _persistMessages(sessionId, messages = [], accountId = this.state.activeAccountId, actorSnapshot = null) {
@@ -789,6 +934,7 @@ export class AgentHarness {
     this._pendingMessages = [];
     const allMessages = [userMessage, ...queued].filter(Boolean);
     const userBlock = allMessages.map(m => `USER MESSAGE: ${m}`).join('\n');
+    const exitPlanContext = await this._heldPositionPlanContext(beatAccountId);
 
     this._isMessageBeat = true;
     this.state.emit('beat_start', { beat: beatNum, phase, time: this.state.lastBeatTime, isMessage: true });
@@ -807,6 +953,7 @@ ${renderPrefixedToolMenu(isOwnedHeraldWorkflow(this._agentConfig) ? { scope: 'he
 - If the user asks about trading, use your trading/market data tools.
 - Always respond with concrete actions and details. Never ask what tools you have - they are listed above.
 
+${exitPlanContext}
 ${userBlock}`;
 
     let failedResult = null;
@@ -980,7 +1127,8 @@ ${userBlock}`;
         managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=UNKNOWN, revision=UNKNOWN, scope=UNKNOWN. Managed policy is unavailable or invalid. Do not request a new options entry. Re-evaluate on the next ordinary heartbeat; do not treat old assistant approval narratives as configuration.`;
       }
     }
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}\n\nPerform your duties for this phase.`;
+    const exitPlanContext = await this._heldPositionPlanContext(beatAccountId);
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}${exitPlanContext}\nPerform your duties for this phase.`;
 
     let failedResult = null;
     let executionFailed = false;
@@ -1480,13 +1628,13 @@ ${userBlock}`;
           ...(safeError ? { error: safeError } : {}),
           ...(resultTruncated ? { resultTruncated: true, resultLength } : {}),
         });
-        this.state.emit('tool_result', { name: toolName, result: resultStr.substring(0, 500), beat: beatNum });
+        this.state.emit('tool_result', { name: toolName, result: resultStr.substring(0, 500), ...(safeError ? { error: safeError } : {}), beat: beatNum });
 
         // Track only tools that execute trades. Read-only tools such as
         // get_orders and get_managed_positions must not inflate trade telemetry.
-        const trade = tradeEventFromToolUse(fullToolName, toolInput, resultStr);
+        const trade = tradeEventFromToolUse(fullToolName, toolInput, resultStr, state.error);
         if (trade) {
-          this.state.stats.trades++;
+          if (trade.executionConfirmed) this.state.stats.trades++;
           this.state.addTrade(trade);
         }
         break;

@@ -195,6 +195,15 @@ export class AgentOrchestrator extends EventEmitter {
         getClient: id => this.getSandboxRuntime(id)?.goAxios,
         isAvailable: id => Boolean(this.getSandboxRuntime(id)?.goReady && getSandbox(id)?.plugins?.alphadesk?.requireManagedApprovalGate === true),
       }),
+      getHeldPositionSnapshot: async id => {
+        const client = this.getSandboxRuntime(id)?.goAxios;
+        if (!client) throw new Error('sandbox trading backend unavailable');
+        const [positions, orders] = await Promise.all([
+          client.get('/api/v1/options/positions'),
+          client.get('/api/v1/orders?status=all'),
+        ]);
+        return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true };
+      },
       chatStore: this.chatStore,
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,

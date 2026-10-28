@@ -41,6 +41,8 @@ test('option order permission requires explicit position intent', () => {
 });
 
 test('trade telemetry distinguishes broker acknowledgement from confirmed fill', () => {
+  assert.equal(tradeEventFromToolUse('prophet_place_options_order', { symbol: 'TSLA251219C00400000', quantity: 1 }, '', 'price_action_not_confirming'), null);
+  assert.equal(tradeEventFromToolUse('prophet_place_options_order', { symbol: 'TSLA251219C00400000', quantity: 1 }, JSON.stringify({ status: 'rejected', filled_qty: 0 })), null);
   const accepted = tradeEventFromToolUse('prophet_place_options_order', {
     symbol: 'TSLA251219C00400000', side: 'buy', quantity: 1, position_intent: 'buy_to_open',
   }, JSON.stringify({ order_id: 'broker-1', status: 'accepted', filled_qty: 0 }));
@@ -59,6 +61,13 @@ test('trade telemetry distinguishes broker acknowledgement from confirmed fill',
   }, JSON.stringify({ order_id: 'broker-3', status: 'canceled', filled_qty: 1, filled_avg_price: 1.2, execution_confirmed: true }));
   assert.equal(canceledPartial.executionConfirmed, true);
   assert.equal(canceledPartial.lifecycle, 'partially_filled_canceled');
+
+  const rejectedPartial = tradeEventFromToolUse('prophet_place_options_order', {
+    symbol: 'TSLA251219C00400000', side: 'buy', quantity: 2, position_intent: 'buy_to_open',
+  }, JSON.stringify({ order_id: 'broker-4', status: 'rejected', filled_qty: 1, filled_avg_price: 2.1, execution_confirmed: true }));
+  assert.equal(rejectedPartial.executionConfirmed, true);
+  assert.equal(rejectedPartial.lifecycle, 'partially_filled_rejected');
+  assert.equal(rejectedPartial.quantity, 1);
 });
 
 test('ledger uses positive filled quantity even for terminal canceled status', () => {

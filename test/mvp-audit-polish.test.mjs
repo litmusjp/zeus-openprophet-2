@@ -28,6 +28,17 @@ test('both strategy-agent prompts retain option guardrails across override varia
   }
 });
 
+test('scoped Pendulum and Surge prompts actively require bounded fresh discovery', async () => {
+  for (const [sandboxId, id] of [['sbx_723be98b', 'mean-reversion'], ['sbx_956ff9e4', 'momentum']]) {
+    const prompt = await buildSystemPrompt({
+      id, sandboxId, name: id, systemPromptTemplate: 'custom',
+      customSystemPrompt: `Identity\n### MARKET-OPEN ALPHADESK WORKFLOW\nworkflow\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`,
+    });
+    assert.match(prompt, /On each normal entry-eligible regular-session heartbeat, manage exposure first.*bounded rotating shortlist/s);
+    assert.match(prompt, /including while holding a position/i);
+  }
+});
+
 test('explicit owned multi-session MVP mode keeps the checkpoint without a daily quota or forced exit', async () => {
   const marker = '### ALPHA_MVP_MODE: MULTI_SESSION';
   const build = (sandboxId, id, body = marker, workflow = true) => buildSystemPrompt({

@@ -355,6 +355,17 @@ test('tool audit retains critical outcomes with bounded truncation metadata and 
   assert.doesNotMatch(captured[4].error, /secret/);
 });
 
+test('empty order output with separate MCP error remains a zero-fill rejection in handler telemetry', () => {
+  const harness = new AgentHarness();
+  const ctx = { addToolCall() {}, recordToolEvent() {}, addText() {}, setSession() {}, addCost() {}, addTokens() {} };
+  harness._handleOpenCodeEvent({ type: 'tool_use', part: { tool: 'prophet_place_options_order', state: {
+    input: { symbol: 'QQQ261120C00732000', quantity: 1, position_intent: 'buy_to_open' },
+    output: '', error: 'FAIL/price_action_not_confirming', status: 'error',
+  } } }, ctx);
+  assert.equal(harness.state.stats.trades, 0);
+  assert.equal(harness.state.recentTrades.length, 0);
+});
+
 test('tool audit recursively redacts structured credentials and bounds errors without changing safe outcomes', async () => {
   const harness = new AgentHarness();
   const captured = [];

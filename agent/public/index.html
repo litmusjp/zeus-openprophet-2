@@ -844,6 +844,20 @@
     <!-- Agents Panel -->
     <div class="panel" id="panel-agents">
       <div class="settings-content">
+        <div class="section" id="manager-settings-card">
+          <div class="config-card">
+            <div class="config-card-header"><span class="config-card-title">Manager settings</span><span><span class="badge" id="mgr-settings-status" role="status">Loading saved settings…</span> <button class="btn sm" onclick="loadManagerSettings()">Reload</button></span></div>
+            <div class="config-card-desc" style="margin-bottom:12px">Shared Manager model and custom instructions. Instruction changes apply to a new conversation.</div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+              <label style="font-size:12px">Provider<br><select id="mgr-provider" onchange="updateManagerModelDropdown()" style="min-width:150px;padding:6px"></select></label>
+              <label style="font-size:12px">Model<br><select id="mgr-model" onchange="markManagerDraft('model')" style="min-width:220px;padding:6px"></select></label>
+            </div>
+            <div id="mgr-model-note" class="form-hint" style="margin-bottom:8px"></div>
+            <label for="mgr-custom-prompt" style="font-size:12px">Custom instructions</label>
+            <textarea id="mgr-custom-prompt" rows="4" oninput="markManagerDraft('prompt')" style="width:100%;font-size:12px;font-family:monospace;padding:8px" placeholder="Add custom instructions for the Manager…"></textarea>
+            <button class="btn sm primary" onclick="saveManagerSettings()" style="margin-top:8px">Save Manager settings</button>
+          </div>
+        </div>
         <h2>Agents &amp; Strategies</h2>
         <p class="subtitle">Agents define personality and thinking style. Strategies set hard rules and guardrails.</p>
         <div class="sandbox-page-picker" id="agents-sandbox-picker"></div>
@@ -2452,6 +2466,7 @@ function addTradeCard(trade) { loadVerifiedTrades(); }
 function renderAll() {
   renderSandboxSelector();
   renderSandboxTabs();
+  if (!_managerSettings.loaded && !_managerSettings.loading) loadManagerSettings();
   renderAgents(); renderStrategies(); renderAccounts();
   renderHeartbeat(); renderPermissions(); renderSlack(); renderAlphaDesk(); renderPromptPreview(); renderToolReference();
   document.getElementById('footer-model').textContent = ((sandboxScoped.agent?.model || config.activeModel || '--')).replace('claude-','').split('-202')[0];
@@ -2586,23 +2601,66 @@ function renderSandboxTabs() {
   }
 }
 
-function refreshManagerModelSelectors() {
-  const providerSel = document.getElementById('mgr-provider');
-  const modelSel = document.getElementById('mgr-model');
-  if (!providerSel || !modelSel) return;
-  const models = config.models || [];
-  const mgr = config.manager || {};
-  const currentModel = mgr.model || config.activeModel || 'anthropic/claude-sonnet-4-6';
-  const currentProvider = currentModel.split('/')[0];
+let _managerSettings = { model: '', customPrompt: '', models: [], dirty: false, dirtyModel: false, dirtyPrompt: false, loading: false, loaded: false, saving: false, draftRevision: 0 };
+let _managerLoadVersion = 0;
+function managerSettingsStatus(message) { const el = document.getElementById('mgr-settings-status'); if (el) el.textContent = message; }
+function markManagerDraft(field) {
+  _managerSettings.draftRevision++;
+  _managerSettings.dirty = true;
+  if (!field || field === 'model') _managerSettings.dirtyModel = true;
+  if (!field || field === 'prompt') _managerSettings.dirtyPrompt = true;
+  managerSettingsStatus('Unsaved changes');
+}
+async function loadManagerSettings() {
+  if (_managerSettings.loading) return;
+  _managerSettings.loading = true;
+  const version = ++_managerLoadVersion;
+  try {
+    const [settingsResult, catalogResult] = await Promise.allSettled([fetch('/api/manager/config'), fetch('/api/models')]);
+    if (settingsResult.status === 'rejected') throw settingsResult.reason;
+    const settingsResponse = settingsResult.value;
+    if (!settingsResponse.ok) throw Error('Manager settings could not be loaded (HTTP ' + settingsResponse.status + ').');
+    const saved = await settingsResponse.json();
+    if (version !== _managerLoadVersion || _managerSettings.dirty) return;
+    let catalogueFailed = catalogResult.status === 'rejected' || !catalogResult.value.ok;
+    let catalogue = {};
+    if (!catalogueFailed) { try { catalogue = await catalogResult.value.json(); } catch { catalogueFailed = true; } }
+    if (version !== _managerLoadVersion || _managerSettings.dirty) return;
+    _managerSettings.model = saved.model || '';
+    _managerSettings.customPrompt = saved.customPrompt || '';
+    _managerSettings.models = Array.isArray(catalogue.models) ? catalogue.models.filter(m => m && typeof m.id === 'string') : [];
+    _managerSettings.loaded = true;
+    renderManagerSettings();
+    managerSettingsStatus(catalogueFailed ? 'Saved settings loaded; live model catalogue unavailable. Reload to retry.' : 'Saved settings loaded');
+  } catch (error) {
+    if (version === _managerLoadVersion) managerSettingsStatus(error.message || 'Manager settings could not be loaded. Retry by reopening Agents.');
+  } finally { if (version === _managerLoadVersion) _managerSettings.loading = false; }
+}
+function renderManagerSettings() {
+  const providerSel = document.getElementById('mgr-provider'), modelSel = document.getElementById('mgr-model'), prompt = document.getElementById('mgr-custom-prompt');
+  if (!providerSel || !modelSel || !prompt || _managerSettings.dirty) return;
+  const models = _managerSettings.models, currentModel = _managerSettings.model;
   const providers = [...new Set(models.map(m => m.id.split('/')[0]))].sort();
-  providerSel.innerHTML = providers.map(p => '<option value="' + esc(p) + '"' + (p === currentProvider ? ' selected' : '') + '>' + esc(p) + '</option>').join('');
-  const provider = providerSel.value || currentProvider;
-  modelSel.innerHTML = models.filter(m => m.id.startsWith(provider + '/')).map(m => '<option value="' + esc(m.id) + '"' + (m.id === currentModel ? ' selected' : '') + '>' + esc(m.name) + '</option>').join('');
+  const currentProvider = currentModel.split('/')[0];
+  providerSel.innerHTML = (currentModel ? '' : '<option value="">Choose a provider</option>') + providers.map(p => '<option value="' + esc(p) + '">' + esc(p === 'openai' ? 'ChatGPT (subscription)' : p) + '</option>').join('');
+  if (currentProvider && !providers.includes(currentProvider)) providerSel.insertAdjacentHTML('beforeend', '<option value="' + esc(currentProvider) + '">' + esc((currentProvider === 'openai' ? 'ChatGPT (subscription)' : currentProvider) + ' (saved model unavailable)') + '</option>');
+  providerSel.value = currentProvider;
+  renderManagerModelOptions();
+  prompt.value = _managerSettings.customPrompt;
+}
+function renderManagerModelOptions() {
+  const modelSel = document.getElementById('mgr-model'), note = document.getElementById('mgr-model-note'), provider = document.getElementById('mgr-provider')?.value;
+  if (!modelSel) return;
+  const saved = _managerSettings.model, eligible = _managerSettings.models.filter(m => m.id.startsWith((provider || '') + '/'));
+  const savedForProvider = !!saved && saved.split('/')[0] === provider;
+  modelSel.innerHTML = (saved ? (savedForProvider ? '' : '<option value="">Choose a model</option>') : '<option value="">No saved model — choose a model</option>') + eligible.map(m => '<option value="' + esc(m.id) + '">' + esc(m.name || m.id) + '</option>').join('');
+  if (saved && saved.split('/')[0] === provider && !eligible.some(m => m.id === saved)) modelSel.insertAdjacentHTML('afterbegin', '<option value="' + esc(saved) + '">' + esc(saved) + ' (saved; unavailable)</option>');
+  modelSel.value = saved && [...modelSel.options].some(o => o.value === saved) ? saved : '';
+  if (note) note.textContent = saved && !_managerSettings.models.some(m => m.id === saved) ? 'Saved model is not in the current connected catalogue. Choose an available model to replace it.' : 'Models come from the live connected catalogue; provider verification rules still apply.';
 }
 
 function ensureManagerTerminal() {
   if (sandboxTerminals['_manager']) {
-    refreshManagerModelSelectors();
     return;
   }
   const container = document.getElementById('sandbox-terminals');
@@ -2614,26 +2672,10 @@ function ensureManagerTerminal() {
   wrapper.style.height = '100%';
   wrapper.style.overflow = 'hidden';
   
-  // Build provider/model options
-  const models = config.models || [];
-  const providers = [...new Set(models.map(m => m.id.split('/')[0]))].sort();
-  const mgr = config.manager || {};
-  const currentModel = mgr.model || config.activeModel || 'anthropic/claude-sonnet-4-6';
-  const currentProvider = currentModel.split('/')[0];
-  const provOpts = providers.map(p => '<option value="' + esc(p) + '"' + (p === currentProvider ? ' selected' : '') + '>' + esc(p) + '</option>').join('');
-  const modelOpts = models.filter(m => m.id.startsWith(currentProvider + '/')).map(m => '<option value="' + esc(m.id) + '"' + (m.id === currentModel ? ' selected' : '') + '>' + esc(m.name) + '</option>').join('');
-
   wrapper.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap">'
-    + '<select id="mgr-provider" onchange="updateManagerModelDropdown()" style="padding:4px 6px;font-size:11px;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:3px">' + provOpts + '</select>'
-    + '<select id="mgr-model" onchange="saveManagerModel()" style="padding:4px 6px;font-size:11px;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:3px;max-width:200px">' + modelOpts + '</select>'
     + '<button class="btn sm" onclick="newManagerSession()" style="font-size:10px;padding:3px 8px">New Chat</button>'
     + '<button class="btn sm" onclick="stopManager()" style="font-size:10px;padding:3px 8px" id="mgr-stop-btn">Stop</button>'
-    + '<button class="btn sm" onclick="toggleManagerSettings()" style="font-size:10px;padding:3px 8px">Settings</button>'
-    + '</div>'
-    + '<div id="mgr-settings" style="display:none;padding:8px 10px;border-bottom:1px solid var(--border);flex-shrink:0">'
-    + '<div style="font-size:11px;font-weight:600;margin-bottom:6px">Manager Custom Instructions</div>'
-    + '<textarea id="mgr-custom-prompt" rows="4" style="width:100%;font-size:11px;font-family:monospace;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:6px" placeholder="Add custom instructions for the manager...">' + esc(mgr.customPrompt || '') + '</textarea>'
-    + '<button class="btn sm primary" onclick="saveManagerPrompt()" style="margin-top:4px;font-size:10px">Save</button>'
+    + '<button class="btn sm" onclick="openManagerSettings()" style="font-size:10px;padding:3px 8px">Settings</button>'
     + '</div>'
     + '<div class="terminal-split">'
     + '<div class="terminal" data-terminal="_manager" style="flex:1">'
@@ -2648,33 +2690,39 @@ function ensureManagerTerminal() {
 }
 
 function updateManagerModelDropdown() {
-  const prov = document.getElementById('mgr-provider')?.value;
-  const modelSel = document.getElementById('mgr-model');
-  if (!prov || !modelSel) return;
-  const filtered = (config.models || []).filter(m => m.id.startsWith(prov + '/'));
-  modelSel.innerHTML = filtered.map(m => '<option value="' + esc(m.id) + '">' + esc(m.name) + '</option>').join('');
-  saveManagerModel();
+  renderManagerModelOptions(); markManagerDraft('model');
 }
 
-async function saveManagerModel() {
-  const model = document.getElementById('mgr-model')?.value;
-  if (!model) return;
-  await fetch('/api/manager/config', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model }),
-  });
-  showToast('Manager model: ' + model.split('/').pop(), 'info');
+async function saveManagerSettings() {
+  if (!_managerSettings.loaded) { managerSettingsStatus('Load saved settings before saving.'); return; }
+  if (_managerSettings.saving) { managerSettingsStatus('Save already in progress.'); return; }
+  const model = document.getElementById('mgr-model')?.value, prompt = document.getElementById('mgr-custom-prompt')?.value ?? '';
+  const body = {};
+  if (_managerSettings.dirtyModel && !model) { managerSettingsStatus('Choose an available connected model before saving.'); return; }
+  if (_managerSettings.dirtyModel && !_managerSettings.models.some(m => m.id === model)) { managerSettingsStatus('Choose a model in the current connected catalogue before saving.'); return; }
+  if (_managerSettings.dirtyModel && model) body.model = model;
+  if (_managerSettings.dirtyPrompt) body.customPrompt = prompt;
+  if (!Object.keys(body).length) { _managerSettings.dirty = false; _managerSettings.dirtyModel = false; _managerSettings.dirtyPrompt = false; managerSettingsStatus('No changes to save'); return; }
+  managerSettingsStatus('Saving…');
+  const revision = _managerSettings.draftRevision;
+  _managerSettings.saving = true;
+  try {
+    const response = await fetch('/api/manager/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!response.ok) { let detail = ''; try { detail = (await response.json()).error || ''; } catch {} throw Error(detail || 'Save failed (HTTP ' + response.status + ').'); }
+    if (body.model !== undefined) _managerSettings.model = body.model;
+    if (body.customPrompt !== undefined) _managerSettings.customPrompt = body.customPrompt;
+    _managerSettings.loaded = true;
+    if (_managerSettings.draftRevision === revision) {
+      _managerSettings.dirty = false; _managerSettings.dirtyModel = false; _managerSettings.dirtyPrompt = false;
+      managerSettingsStatus('Saved');
+    } else managerSettingsStatus('Saved earlier draft; newer changes remain unsaved.');
+  } catch (error) { managerSettingsStatus(error.message || 'Save failed. Your draft is kept.'); }
+  finally { _managerSettings.saving = false; }
 }
 
-async function saveManagerPrompt() {
-  const prompt = document.getElementById('mgr-custom-prompt')?.value || '';
-  await fetch('/api/manager/config', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customPrompt: prompt }),
-  });
-  showToast('Manager instructions saved', 'success');
+function openManagerSettings() {
+  switchTab('agents');
+  document.getElementById('manager-settings-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 async function newManagerSession() {
@@ -2687,11 +2735,6 @@ async function newManagerSession() {
 async function stopManager() {
   await fetch('/api/manager/stop', { method: 'POST' });
   showToast('Manager stopped', 'warning');
-}
-
-function toggleManagerSettings() {
-  const el = document.getElementById('mgr-settings');
-  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
 let _managerThinking = false;

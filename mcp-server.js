@@ -11,6 +11,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { checkPermissions } from './permissions.js';
 import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
+import { assertManagerToolAllowed, filterManagerTools } from './manager-safety-policy.js';
 import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
 import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
@@ -264,7 +265,7 @@ const server = new Server(
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
-    tools: [
+    tools: filterManagerTools(OPENPROPHET_ROLE, [
       {
         name: 'get_account',
         description: 'Get trading account information including cash, buying power, and portfolio value',
@@ -1379,7 +1380,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['agentId'],
         },
       },
-    ],
+    ]),
   };
 });
 
@@ -1417,6 +1418,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    // Enforce the role boundary before permission lookup or any backend/action side effect.
+    assertManagerToolAllowed(OPENPROPHET_ROLE, name);
     // Enforce permissions before executing any tool
     await enforcePermissions(name, args);
 

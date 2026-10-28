@@ -6,6 +6,7 @@ import http from 'http';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
+import { buildManagerOpenCodeConfig, managerOpenCodeArgs, managerOpenCodePermissionEnv } from '../manager-safety-policy.js';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import { randomBytes } from 'crypto';
@@ -803,14 +804,15 @@ app.post('/api/manager/message', async (req, res) => {
     
     const managerPrompt = `You are the OpenProphet Manager — a configuration and research assistant.
 
-## CRITICAL: You do NOT trade. You NEVER place orders, buy, or sell anything.
+## Safety boundary
+You cannot place, approve, execute, cancel, or close trades, create protective orders, or fabricate financial records. Never send agents trade entry, exit, or order instructions. You may help configure agents and strategies and provide research; the trading agents make their own decisions.
 
 You help the user:
 - Create and configure trading agents (their personality and model)
 - Create and edit strategies (the rules agents follow)
 - Assign agents and strategies to accounts
 - Research markets, analyze stocks, gather news
-- Configure heartbeats, permissions, and session modes
+- Configure heartbeats and session modes
 
 ## Your Available Tools
 
@@ -832,7 +834,6 @@ You help the user:
 
 **System**:
 - get_heartbeat_profiles, apply_heartbeat_profile, set_heartbeat: Heartbeat config
-- update_permissions: Update trading permissions/guardrails
 - get_datetime: Current time and market status
 
 ## How Agents and Strategies Work
@@ -850,7 +851,7 @@ When creating an agent:
 
 ## Instructions
 - Be direct and actionable
-- If the user describes an agent, create both the strategy and agent immediately
+- If the user asks to create an agent, create a strategy and agent as requested; never direct agents to make a particular trade
 - Don't ask unnecessary questions — use reasonable defaults
 - When creating strategies, write comprehensive markdown rules covering: what to trade, position sizing, risk management, entry/exit criteria, and any special instructions
 
@@ -860,8 +861,7 @@ ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
 ## User Message
 ${message.trim()}${customPromptAddition}`;
 
-    const args = ['run', '--format', 'json', '--model', ocModel];
-    if (_managerSessionId) args.push('--session', _managerSessionId);
+    const args = managerOpenCodeArgs(ocModel, _managerSessionId);
 
     const isNewSession = !_managerSessionId;
     const priorManagerContext = isNewSession ? await getManagerContext() : '';
@@ -882,11 +882,13 @@ ${message.trim()}${customPromptAddition}`;
     // Kill any existing manager process
     if (_managerProc) { try { _managerProc.kill('SIGTERM'); } catch {} }
 
+    let managerConfig = {};
+    try { managerConfig = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}'); } catch {}
+    managerConfig = managerConfig && typeof managerConfig === 'object' && !Array.isArray(managerConfig) ? managerConfig : {};
+    managerConfig = buildManagerOpenCodeConfig(managerConfig);
+
     let managerEnv;
     if (ocModel.startsWith('openai/')) {
-      let managerConfig = {};
-      try { managerConfig = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}'); } catch {}
-      managerConfig = managerConfig && typeof managerConfig === 'object' && !Array.isArray(managerConfig) ? managerConfig : {};
       managerConfig.model = ocModel; managerConfig.small_model = ocModel;
       if (managerConfig.provider?.openai && typeof managerConfig.provider.openai === 'object') {
         const provider = managerConfig.provider.openai;
@@ -898,8 +900,18 @@ ${message.trim()}${customPromptAddition}`;
           delete provider.models[modelName].options?.apiKey; delete provider.models[modelName].options?.baseURL;
         }
       }
-      managerEnv = { ...nativeOpenCodeEnv({ dataDir: path.join(PROJECT_ROOT, 'data') }), OPENCODE_CONFIG_CONTENT: JSON.stringify(managerConfig), OPENPROPHET_ROLE: 'manager' };
-    } else managerEnv = { ...stripOperatorSecrets(process.env), OPENPROPHET_ROLE: 'manager' };
+      managerEnv = {
+        ...nativeOpenCodeEnv({ dataDir: path.join(PROJECT_ROOT, 'data') }),
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(managerConfig),
+        OPENCODE_PERMISSION: managerOpenCodePermissionEnv(),
+        OPENPROPHET_ROLE: 'manager',
+      };
+    } else managerEnv = {
+      ...stripOperatorSecrets(process.env),
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(managerConfig),
+      OPENCODE_PERMISSION: managerOpenCodePermissionEnv(),
+      OPENPROPHET_ROLE: 'manager',
+    };
     const proc = spawn('opencode', args, {
       cwd: process.cwd(),
       env: managerEnv,

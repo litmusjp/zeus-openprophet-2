@@ -47,17 +47,24 @@ function boundedAssessment(order) {
   try { doc = JSON.parse(raw); } catch { return null; }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc) || typeof doc.assessment_id !== 'string' || !doc.assessment_id || !['PASS','FAIL','UNAVAILABLE'].includes(doc.decision)) return null;
   const score = doc.signal_score;
-  if (score !== undefined && (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100)) return null;
+  if (score !== undefined && score !== null && (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 100)) return null;
   const evidence = doc.evidence && typeof doc.evidence === 'object' && !Array.isArray(doc.evidence) ? doc.evidence : {};
-  const confidence = evidence.catalyst_confidence;
+  // The standalone assessment audit stores the full provider receipt directly
+  // in AlphaDeskAssessment.Evidence; do not infer wrapper keys or traverse it.
+  const receipt = evidence;
+  const confidence = receipt.catalyst_confidence ?? receipt.catalystConfidence;
   const catalystConfidence = typeof confidence === 'number' && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1 ? confidence : undefined;
-  const safeText = value => typeof value === 'string' && value.length <= 128 ? value : null;
+  const safeText = value => typeof value === 'string' && value.length <= 128 && /^[A-Za-z0-9_.:+-]+$/.test(value) ? value : null;
+  const scoreComponents = receipt.score_components && typeof receipt.score_components === 'object' && !Array.isArray(receipt.score_components) ? receipt.score_components : {};
+  const momentum = scoreComponents.directional_momentum;
+  const scoreProfile = safeText(receipt.score_profile ?? doc.score_profile);
   return {
     assessmentId: doc.assessment_id.slice(0, 128), decision: doc.decision,
-    signalScore: score === undefined ? null : score,
-    scoreProfile: safeText(evidence.score_profile), scoreType: safeText(evidence.score_source),
-    observedAt: safeText(doc.observed_at), effectiveExpiresAt: safeText(doc.op2_effective_expires_at),
+    signalScore: score == null ? null : score,
+    scoreProfile, scoreType: safeText(doc.score_source ?? evidence.score_source),
+    observedAt: safeText(doc.score_observed_at ?? doc.observed_at), effectiveExpiresAt: safeText(doc.op2_effective_expires_at),
     ...(catalystConfidence !== undefined ? { catalystConfidence } : {}),
+    ...(scoreProfile === 'catalyst_momentum_v1' && typeof momentum === 'number' && Number.isFinite(momentum) && momentum >= 0 && momentum <= 0.2 ? { directionalMomentum: momentum } : {}),
   };
 }
 
@@ -149,7 +156,7 @@ export async function readPaperAccountOrderHistory(account, { fetchImpl = global
   const request = async (pathname, params) => {
     const url = new URL(`${ALPACA_PAPER_TRADING_URL}${pathname}`);
     for (const [key, value] of Object.entries(params || {})) if (value !== undefined) url.searchParams.set(key, value);
-    const response = await fetchImpl(url, { method: 'GET', headers });
+    const response = await fetchImpl(url, { method: 'GET', headers, signal: AbortSignal.timeout(5000) });
     return { body: await readJson(response), headers: response.headers };
   };
 

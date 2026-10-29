@@ -106,6 +106,36 @@ test('entry catalyst confidence accepts only finite numeric values in range', ()
   }
   assert.equal(entryAssessmentsByBroker([entry(0)], [broker], identity).get(broker).catalystConfidence, 0);
   assert.equal(entryAssessmentsByBroker([entry(1)], [broker], identity).get(broker).catalystConfidence, 1);
+  const missingScore = { ...entry(0), Metadata: JSON.stringify({ assessment_id: 'assessment-1', decision: 'PASS', signal_score: null }) };
+  assert.equal(entryAssessmentsByBroker([missingScore], [broker], identity).get(broker).signalScore, null);
+});
+
+test('persisted AlphaDesk assessment projects score context from the actual standalone receipt DTO', async () => {
+  const identity = { brokerAccountId: 'acct', tenantId: 'tenant', sandboxId: 'sandbox' };
+  const broker = normalizeBrokerOrder({ id: 'broker-entry', client_order_id: 'entry-client' });
+  const receipt = JSON.parse(await fs.readFile('services/testdata/op2-pass-receipt.json', 'utf8'));
+  const dto = { assessment_id: receipt.assessment_id, decision: receipt.decision, signal_score: receipt.signal_score,
+    score_source: receipt.score_source, observed_at: receipt.observed_at,
+    score_observed_at: receipt.evidence_observed_at, evidence: receipt };
+  const entry = { ID: 'broker-entry', ClientOrderID: 'entry-client', Purpose: 'entry', BrokerAccountID: 'acct', PaperLive: 'paper', TenantID: 'tenant', SandboxID: 'sandbox', Metadata: JSON.stringify(dto) };
+  const assessment = entryAssessmentsByBroker([entry], [broker], identity).get(broker);
+  assert.equal(assessment.signalScore, receipt.signal_score);
+  assert.equal(assessment.scoreProfile, 'catalyst_momentum_v1');
+  assert.equal(assessment.scoreType, 'alphadesk_direct_market_data');
+  assert.equal(assessment.catalystConfidence, receipt.catalyst_confidence);
+  assert.equal(assessment.directionalMomentum, 0.18);
+  assert.equal(assessment.observedAt, receipt.evidence_observed_at);
+  assert.equal(JSON.stringify(assessment).includes('trade_fingerprint'), false);
+  assert.equal(entryAssessmentsByBroker([{ ...entry, SandboxID: 'foreign' }], [broker], identity).size, 0);
+  assert.equal(entryAssessmentsByBroker([{ ...entry, Symbol: 'QQQ', TenantID: 'other', BrokerAccountID: 'foreign-account' }], [broker], identity).size, 0);
+  for (const [profile, momentum, expected] of [
+    ['catalyst_momentum_v1', 0, 0], ['catalyst_momentum_v1', 0.2, 0.2],
+    ['catalyst_momentum_v1', -0.01, undefined], ['catalyst_momentum_v1', 0.201, undefined],
+    ['other-profile', 0.18, undefined], ['catalyst_momentum_v1', '0.18', undefined],
+  ]) {
+    const malformed = { ...entry, Metadata: JSON.stringify({ ...dto, evidence: { score_profile: profile, score_components: { directional_momentum: momentum } } }) };
+    assert.equal(entryAssessmentsByBroker([malformed], [broker], identity).get(broker)?.directionalMomentum, expected);
+  }
 });
 
 test('excludes broker identity collisions instead of overwriting records', () => {

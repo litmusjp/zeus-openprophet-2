@@ -39,6 +39,7 @@ import {
 } from './config-store.js';
 import { redactSecrets } from './redaction.js';
 import { formatSlackNotification } from './slack-format.js';
+import { createSlackDailyCollector, formatTradeSlackNotification, nextDailySummaryAt, runDailySummaryTick, sanitizeSlackFailure, shouldNotifyTradeLifecycle } from './slack-notifications.js';
 import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, createBasicAuthMiddleware, createBasicOperatorOnlyMiddleware, resolveApiAuthToken } from './auth.js';
 import { createManagedGateProxy, registerManagedGateProxy, createManagedQualityProxy, registerManagedQualityProxy } from './managed-gate-proxy.js';
@@ -430,6 +431,13 @@ let harness = createHarnessForActiveSandbox();
 const sseClients = new Set();
 const boundOperationalHarnesses = new WeakSet();
 const dailySummaryTimers = new Map();
+const slackDeliveryStatus = new Map();
+const slackTradeWatermarks = new Map();
+
+function slackStatusForSandbox(sandboxId) {
+  const current = slackDeliveryStatus.get(sandboxId) || {};
+  return { ...current, history: 'Process-local; resets when the agent server restarts' };
+}
 
 function createHarnessForActiveSandbox() {
   const sandbox = getActiveSandbox();
@@ -503,6 +511,11 @@ function getGoClientForSandbox(sandboxId) {
   return getOrCreateSandboxRuntime(sandboxId)?.goAxios || null;
 }
 
+function getExistingGoClientForSandbox(sandboxId) {
+  if (!sandboxId || sandboxId === getActiveSandbox()?.id) return goAxios;
+  return orchestrator.runtimes.get(sandboxId)?.goAxios || null;
+}
+
 async function refreshHarnessConfigForSandbox(sandboxId, options = {}) {
   const targetHarness = getHarnessForSandbox(sandboxId);
   if (!targetHarness) return;
@@ -555,15 +568,23 @@ function getSlackAccountLabel(sandboxId) {
 }
 
 async function notifySlack(text, sandboxId) {
+  const state = slackDeliveryStatus.get(sandboxId) || {};
+  state.lastAttempt = new Date().toISOString();
+  slackDeliveryStatus.set(sandboxId, state);
   try {
     const slack = sandboxId ? getPluginForSandbox(sandboxId, 'slack') : getPlugin('slack');
-    if (!slack?.enabled || !slack?.webhookUrl) return;
+    if (!slack?.enabled || !slack?.webhookUrl) throw new Error('Slack is not configured or enabled');
     await axios.post(slack.webhookUrl, {
       text: formatSlackNotification(text, getSlackAccountLabel(sandboxId)),
       channel: slack.channel || undefined,
     }, { timeout: 5000 });
+    state.lastSuccess = new Date().toISOString();
+    state.lastError = null;
+    return true;
   } catch (err) {
-    console.error('Slack notification failed:', err.message);
+    state.lastError = sanitizeSlackFailure(err);
+    console.error(`[slack] Delivery failed for ${sandboxId}: ${state.lastError}`);
+    return false;
   }
 }
 
@@ -578,24 +599,25 @@ function scheduleDailySummaryForHarness(targetHarness) {
   const existing = dailySummaryTimers.get(sandboxId);
   if (existing) clearTimeout(existing);
   const now = new Date();
-  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const target = new Date(et);
-  target.setHours(16, 30, 0, 0);
-  if (et >= target) target.setDate(target.getDate() + 1);
-  const ms = target.getTime() - et.getTime();
+  const target = nextDailySummaryAt(now);
+  const status = slackDeliveryStatus.get(sandboxId) || {};
+  status.nextSummaryAt = target.toISOString();
+  slackDeliveryStatus.set(sandboxId, status);
+  const ms = target.getTime() - now.getTime();
   const timer = setTimeout(async () => {
-    if (slackEnabled('dailySummary', sandboxId)) {
-      try {
-        const client = getGoClientForSandbox(sandboxId);
-        if (!client) return;
-        const { data: acc } = await client.get('/api/v1/account');
-        const daily = accountDailyPnl(acc);
-        if (!daily) throw new Error('broker daily P&L is unavailable or invalid');
-        const emoji = daily.pnl >= 0 ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:';
-        notifySlack(`${emoji} *Daily Summary*\nP&L: ${daily.pnl >= 0 ? '+' : ''}$${daily.pnl.toFixed(2)} (${daily.percent.toFixed(2)}%)\nPortfolio: $${daily.equity.toFixed(2)}\nBeats: ${targetHarness.state.stats.totalBeats} | Order events: ${targetHarness.state.stats.trades} | Errors: ${targetHarness.state.stats.errors}`, sandboxId);
-      } catch {}
-    }
-    scheduleDailySummaryForHarness(targetHarness);
+    const state = slackDeliveryStatus.get(sandboxId) || {};
+    state.lastSummaryAttempt = new Date().toISOString();
+    slackDeliveryStatus.set(sandboxId, state);
+    void runDailySummaryTick({
+      sandboxId, at: target, enabled: id => slackEnabled('dailySummary', id),
+      collect: collectSlackDailySummary, deliver: notifySlack,
+      onSuccess: () => { state.lastSummarySuccess = new Date().toISOString(); },
+      onError: err => {
+      state.lastError = sanitizeSlackFailure(err);
+      console.error(`[slack] Daily summary failed for ${sandboxId}: ${state.lastError}`);
+      },
+      reschedule: () => scheduleDailySummaryForHarness(targetHarness),
+    });
   }, ms);
   dailySummaryTimers.set(sandboxId, timer);
 }
@@ -616,35 +638,38 @@ function bindOperationalHooks(targetHarness) {
 
   targetHarness.state.on('trade', (trade) => {
     const sandboxId = targetHarness.sandboxId;
-    if (slackEnabled('tradeExecuted', sandboxId)) {
-      const side = (trade.side || '').toUpperCase();
-      const lifecycleLabels = {
-        filled: 'Filled',
-        filled_canceled: 'Filled — Canceled',
-        filled_rejected: 'Filled — Rejected',
-        filled_expired: 'Filled — Expired',
-        filled_done_for_day: 'Filled — Done for Day',
-        filled_replaced: 'Filled — Replaced',
-        partially_filled: 'Partially Filled',
-        partially_filled_canceled: 'Partially Filled — Canceled',
-        partially_filled_rejected: 'Partially Filled — Rejected',
-        partially_filled_expired: 'Partially Filled — Expired',
-        partially_filled_done_for_day: 'Partially Filled — Done for Day',
-        partially_filled_replaced: 'Partially Filled — Replaced',
-        submitted: 'Submitted — execution not confirmed',
-        planned: 'Planned for Next Session — not submitted',
-        rejected: 'Rejected',
-        canceled: 'Canceled',
-        expired: 'Expired',
-        submit_failed: 'Submission Failed',
-        submission_uncertain: 'Submission Uncertain — reconcile before retrying',
-        unknown: 'Result Unknown',
-      };
-      const label = lifecycleLabels[trade.lifecycle] || `Lifecycle: ${trade.lifecycle || 'unknown'}`;
-      const emoji = trade.executionConfirmed ? (side === 'BUY' ? ':chart_with_upwards_trend:' : ':chart_with_downwards_trend:') : ':information_source:';
-      notifySlack(`${emoji} *Order ${label}*\n${side} ${trade.quantity || '?'}x ${trade.symbol || '??'}${trade.price ? ' @ $' + trade.price : ''}\nStatus: ${trade.status || 'unknown'}${trade.orderId ? ` | Broker ID: ${trade.orderId}` : ''}\nTool: ${trade.tool || 'unknown'}`, sandboxId);
+    const account = getAccountById(getSandbox(sandboxId)?.accountId);
+    const orderId = trade.orderId || trade.clientOrderId || '';
+    const watermark = { accountId: account?.id, orderId, lifecycle: trade.lifecycle, filledQty: trade.executionConfirmed ? trade.quantity : '' };
+    const lifecycleChanged = shouldNotifyTradeLifecycle(slackTradeWatermarks, watermark);
+    if (slackEnabled('tradeExecuted', sandboxId) && lifecycleChanged) {
+      void (async () => {
+        let brokerOrder = null;
+        let assessment = null;
+        if (account && orderId) {
+          try {
+            const reconciled = await reconcileSandboxOrders(getSandbox(sandboxId), account);
+            const matched = matchBrokerOrder({ ID: trade.orderId, ClientOrderID: trade.clientOrderId }, reconciled.orders);
+            brokerOrder = matched?.broker_identity_verified === true ? matched : null;
+            assessment = brokerOrder?.entry_assessment || null;
+          } catch { /* reporting enrichment never affects order handling */ }
+        }
+        try { await notifySlack(formatTradeSlackNotification({
+          account: account?.name || 'Unavailable',
+          agent: getAgentById(trade.agentId)?.name || 'Unavailable',
+          side: trade.side, symbol: brokerOrder?.Symbol || trade.symbol,
+          requestedQty: brokerOrder?.Qty ?? trade.requestedQuantity,
+          status: brokerOrder?.Status || trade.lifecycle,
+          confirmedQty: brokerOrder?.FilledQty,
+          averageFillPrice: brokerOrder?.FilledAvgPrice,
+          brokerIdentityVerified: brokerOrder?.broker_identity_verified === true,
+          brokerOrderId: brokerOrder?.ID || trade.orderId,
+          timestamp: brokerOrder?.FilledAt || brokerOrder?.SubmittedAt || trade.timestamp,
+          lifecycle: trade.lifecycle, assessment,
+        }), sandboxId); } catch { /* reporting formatter/delivery failures never affect trading */ }
+      })();
     }
-    if (!trade.executionConfirmed || !trade.fullFill) return;
+    if (!lifecycleChanged || !trade.executionConfirmed || !trade.fullFill) return;
     const sideLower = (trade.side || '').toLowerCase();
     const intent = String(trade.positionIntent || '').toLowerCase();
     const opening = intent ? intent.endsWith('to_open') : sideLower === 'buy';
@@ -1292,6 +1317,7 @@ app.get('/api/sandboxes/:id/dashboard', (req, res) => {
       heartbeatPhases: getPhaseTimeRanges(),
       permissions,
       slack: redactSecrets(slack || {}),
+      slackDelivery: slackStatusForSandbox(req.params.id),
       state,
     });
   } catch (err) { res.status(400).json({ error: err.message }); }
@@ -1925,18 +1951,33 @@ app.post('/api/plugins/alphadesk/test', operatorAuthMiddleware, async (req, res)
   } catch { res.status(502).json({ ok: false, status: 'connection', message: 'AlphaDesk connection failed' }); }
 });
 
-app.post('/api/plugins/slack/test', async (req, res) => {
+app.get('/api/plugins/slack/preview', async (req, res) => {
+  const sandboxId = typeof req.query.sandboxId === 'string' ? req.query.sandboxId : '';
+  if (!sandboxId || !getSandbox(sandboxId)) return res.status(400).json({ ok: false, error: 'An explicit valid sandboxId is required' });
   try {
-    const sandboxId = req.body?.sandboxId || req.query.sandboxId;
+    const report = await collectSlackDailySummary(sandboxId);
+    res.json({ ok: true, sandboxId, date: report.date, complete: report.complete, preview: report.summary });
+  } catch {
+    res.status(500).json({ ok: false, sandboxId, error: 'Slack preview unavailable' });
+  }
+});
+
+app.post('/api/plugins/slack/test', async (req, res) => {
+  const sandboxId = req.body?.sandboxId;
+  try {
     const slack = sandboxId ? getPluginForSandbox(sandboxId, 'slack') : getPlugin('slack');
-    if (!slack?.webhookUrl) return res.status(400).json({ error: 'No Slack webhook URL configured' });
-    const { default: axios } = await import('axios');
-    await axios.post(slack.webhookUrl, {
-      text: formatSlackNotification(':robot_face: *Prophet Agent* - Test notification\nSlack integration is working!', getSlackAccountLabel(sandboxId)),
-      channel: slack.channel || undefined,
-    }, { timeout: 5000 });
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: 'Failed to send test message: ' + err.message }); }
+    if (!slack?.enabled || !slack?.webhookUrl) return res.status(400).json({ ok: false, error: 'Slack is not enabled or configured' });
+    if (!getSandbox(sandboxId)) return res.status(400).json({ ok: false, error: 'Select a valid sandbox' });
+    const report = await collectSlackDailySummary(sandboxId);
+    const delivered = await notifySlack(`:mag: *VERIFICATION — NOT A TRADE*\n${report.summary}`, sandboxId);
+    if (!delivered) return res.status(502).json({ ok: false, error: 'Slack delivery failed; see delivery status for the sanitized error' });
+    res.json({ ok: true, message: 'Verification message accepted by Slack webhook' });
+  } catch (err) {
+    const state = slackDeliveryStatus.get(sandboxId) || {};
+    state.lastError = sanitizeSlackFailure(err);
+    slackDeliveryStatus.set(sandboxId, state);
+    res.status(502).json({ ok: false, error: `Slack verification failed: ${state.lastError}` });
+  }
 });
 
 // ── Verified trade ledger ─────────────────────────────────────────
@@ -2034,6 +2075,11 @@ async function reconcileSandboxOrders(sandbox, account) {
     return { orders: [], complete: false, broker_state: 'unavailable', error: err.message };
   }
 }
+
+const collectSlackDailySummary = createSlackDailyCollector({
+  getSandbox, getAccount: getAccountById, getClient: getExistingGoClientForSandbox,
+  reconcile: reconcileSandboxOrders, buildLedger: buildTradeLedger,
+});
 
 app.get('/api/trades', async (req, res) => {
   try {

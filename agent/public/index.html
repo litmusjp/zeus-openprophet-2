@@ -926,6 +926,7 @@
               <span class="badge" id="slack-badge" style="border-color:var(--ink-faint);color:var(--ink-faint)">Disabled</span>
             </div>
             <div class="config-card-desc">Send trade notifications, alerts, and daily summaries to Slack</div>
+            <div id="slack-delivery-status" class="config-card-meta" style="margin-top:10px">Delivery status unavailable</div>
             <div style="margin-top:16px">
               <div class="form-group">
                 <label><input type="checkbox" id="slack-enabled" onchange="saveSlackConfig()"> Enable Slack Notifications</label>
@@ -1098,7 +1099,7 @@ let config = { accounts: [], agents: [], strategies: [], models: [] };
 let historyState = { sandboxes: [], chatSessions: [], chatMessages: [], selectedChatId: null, loaded: false, activities: [], activityOffset: 0, activityTotal: 0, activityAccount: null, activityCursors: {}, accounts: [], selectedLabels: null, listRequest: 0, detailRequest: 0, selectedActivity: null, legacyRequest: 0 };
 let selectedSandboxId = null;
 let promptPreviewRequestId = 0;
-let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases: {}, permissions: {}, slack: {}, alphadesk: {} };
+let sandboxScoped = { sandbox: null, agent: null, heartbeat: {}, heartbeatPhases: {}, permissions: {}, slack: {}, slackDelivery: {}, alphadesk: {} };
 const authToken = new URLSearchParams(window.location.search).get('token') || '';
 let autoScroll = true;
 let nextBeatTime = null, heartbeatSeconds = 0, progressInterval = null;
@@ -1202,6 +1203,7 @@ async function refreshSelectedSandboxConfig() {
       heartbeatPhases: phaseData.phases || data.heartbeatPhases || {},
       permissions: data.permissions || {},
       slack: data.slack || {},
+      slackDelivery: data.slackDelivery || {},
       alphadesk: data.sandbox?.plugins?.alphadesk || {},
     };
     if (data.state) {
@@ -4303,6 +4305,17 @@ function renderSlack() {
     badge.textContent = 'Active'; badge.style.borderColor = 'var(--success)'; badge.style.color = 'var(--success)'; badge.style.background = 'var(--success-bg)';
   } else {
     badge.textContent = 'Disabled'; badge.style.borderColor = 'var(--ink-faint)'; badge.style.color = 'var(--ink-faint)'; badge.style.background = 'transparent';
+  }
+  const statusLine = document.getElementById('slack-delivery-status');
+  if (statusLine) {
+    const delivery = sandboxScoped.slackDelivery || {};
+    statusLine.textContent = [
+      `Next daily summary: ${delivery.nextSummaryAt || 'Not scheduled'}`,
+      `Last attempt: ${delivery.lastAttempt || 'None'}`,
+      `Last success: ${delivery.lastSuccess || 'None'}`,
+      delivery.lastError ? `Last error: ${delivery.lastError}` : 'Last error: None',
+      delivery.history || 'Process-local status',
+    ].join(' · ');
   }
 }
 

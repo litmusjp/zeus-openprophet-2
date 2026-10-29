@@ -1422,6 +1422,7 @@ function connectSSE() {
     const sid = d.sandboxId;
     if (!sid) return;
     sandboxSchedule[sid] = { nextBeatTime: d.nextBeat ? new Date(d.nextBeat) : null, seconds: d.seconds };
+    if (typeof updateSandboxHeartbeatCountdowns === 'function') updateSandboxHeartbeatCountdowns();
     const hbEl = document.querySelector(`[data-stat="${sid}-hb-interval"]`);
     if (hbEl) hbEl.textContent = fmtInt(d.seconds);
     if (selectedSandboxId && d.sandboxId !== selectedSandboxId) return;
@@ -1493,7 +1494,8 @@ function updateOperatorCard(s) {
   _set('operator-phase', labels[s.phase] || s.phase || '--');
   _set('operator-heartbeat', s.heartbeatSeconds ? fmtInt(s.heartbeatSeconds) : '--');
   const next = s.nextBeatTime ? new Date(s.nextBeatTime) : (sandboxSchedule[sid]?.nextBeatTime || null);
-  _set('operator-next-heartbeat', next instanceof Date && !Number.isNaN(next.getTime()) ? Math.max(0, Math.ceil((next - Date.now()) / 1000)) + 's' : '--');
+  _set('operator-next-heartbeat', s.running && !s.paused && next instanceof Date && Number.isFinite(next.getTime())
+    ? Math.max(0, Math.ceil((next.getTime() - Date.now()) / 1000)) + 's' : '--');
   const attention = document.getElementById('operator-attention');
   const count = Number(s.stats?.errors || 0);
   const failure = s.lastHeartbeatFailure;
@@ -1522,6 +1524,7 @@ function updateState(s) {
   sandboxRuntime[sid] = s;
   updateInitialStateLabel(sid, s);
   if ('nextBeatTime' in s) sandboxSchedule[sid] = { nextBeatTime: s.nextBeatTime ? new Date(s.nextBeatTime) : null, seconds: s.heartbeatSeconds };
+  if (typeof updateSandboxHeartbeatCountdowns === 'function') updateSandboxHeartbeatCountdowns();
   
   // Update per-sandbox sidebar stats
   if (sid) {
@@ -1585,16 +1588,48 @@ function updatePhase(phase) {
 
 function fmtInt(s) { return s>=3600? (s/3600).toFixed(1)+'h' : s>=60? Math.floor(s/60)+'m '+s%60+'s' : s+'s'; }
 
+function sandboxHeartbeatCountdown(sid, now) {
+  if (now === undefined) now = Date.now();
+  const state = sandboxRuntime[sid];
+  const schedule = sandboxSchedule[sid];
+  if (!state?.running || state.paused || !schedule?.nextBeatTime || !(schedule.seconds > 0)) return '--';
+  const nextBeat = new Date(schedule.nextBeatTime);
+  if (!Number.isFinite(nextBeat.getTime())) return '--';
+  return Math.max(0, Math.ceil((nextBeat.getTime() - now) / 1000)) + 's';
+}
+
+function updateSandboxHeartbeatCountdowns(now) {
+  if (now === undefined) now = Date.now();
+  for (const element of (document.querySelectorAll?.('[data-stat$="-hb-next"]') || [])) {
+    const stat = element.dataset?.stat || element.getAttribute('data-stat') || '';
+    const suffix = '-hb-next';
+    if (stat.endsWith(suffix)) _setData(stat, sandboxHeartbeatCountdown(stat.slice(0, -suffix.length), now));
+  }
+}
+
 function startProgress() {
   if(progressInterval) clearInterval(progressInterval);
-  progressInterval = setInterval(() => {
-    if(!nextBeatTime||!heartbeatSeconds) return;
-    const rem = nextBeatTime.getTime() - Date.now();
-    const pct = Math.max(0, Math.min(100, ((heartbeatSeconds*1000 - rem)/(heartbeatSeconds*1000))*100));
-    const fillEl = document.getElementById('hb-fill'); if(fillEl) fillEl.style.width = pct + '%';
-    _set('hb-next', Math.max(0, Math.ceil(rem/1000)) + 's');
-    _set('operator-next-heartbeat', Math.max(0, Math.ceil(rem/1000)) + 's');
-  }, 1000);
+  const update = () => {
+    const sid = getEffectiveSandboxId();
+    const schedule = sandboxSchedule[sid];
+    const countdown = sandboxHeartbeatCountdown(sid);
+    const next = schedule?.nextBeatTime ? new Date(schedule.nextBeatTime) : null;
+    if (countdown === '--') {
+      _set('hb-next', '--');
+      _set('operator-next-heartbeat', '--');
+      const fillEl = document.getElementById('hb-fill'); if(fillEl) fillEl.style.width = '0%';
+    } else {
+      const rem = next.getTime() - Date.now();
+      const seconds = schedule.seconds;
+      const pct = Math.max(0, Math.min(100, ((seconds * 1000 - rem)/(seconds * 1000))*100));
+      const fillEl = document.getElementById('hb-fill'); if(fillEl) fillEl.style.width = pct + '%';
+      _set('hb-next', countdown);
+      _set('operator-next-heartbeat', countdown);
+    }
+    updateSandboxHeartbeatCountdowns();
+  };
+  update();
+  progressInterval = setInterval(update, 1000);
 }
 
 // ── API calls ──────────────────────────────

@@ -39,6 +39,11 @@ test('reading a known dormant sandbox returns default state without creating run
     assert.equal(orchestrator.portOwners.size, 0);
 
     const runtime = orchestrator.ensureRuntime('sbx_known');
+    assert.equal(typeof runtime.harness.ensureBackendReady, 'function');
+    assert.equal(typeof runtime.harness.getMarketCalendar, 'function');
+    assert.equal(runtime.harness.state.stats.totalBeats, 0);
+    await assert.rejects(runtime.harness.ensureBackendReady('sbx_known'), /execution mode is inert/);
+    assert.equal(runtime.harness.state.stats.totalBeats, 0);
     runtime.harness.state.beatCount = 4;
     const current = orchestrator.getState('sbx_known');
     assert.equal(current.beatCount, 4);

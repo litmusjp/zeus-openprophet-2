@@ -1131,6 +1131,10 @@ type marketClockService interface {
 	GetMarketClock(context.Context) (*interfaces.MarketClock, error)
 }
 
+type marketCalendarService interface {
+	GetMarketCalendar(context.Context, time.Time, time.Time) ([]interfaces.MarketSession, error)
+}
+
 // HandleGetMarketClock returns the broker-authoritative session state without
 // mutating account or order state.
 func (oc *OrderController) HandleGetMarketClock(c *gin.Context) {
@@ -1145,6 +1149,38 @@ func (oc *OrderController) HandleGetMarketClock(c *gin.Context) {
 		return
 	}
 	c.JSON(200, clock)
+}
+
+// HandleGetMarketCalendar exposes a small read-only broker calendar window.
+func (oc *OrderController) HandleGetMarketCalendar(c *gin.Context) {
+	service, ok := oc.tradingService.(marketCalendarService)
+	if !ok {
+		c.JSON(503, gin.H{"error": "broker market calendar is unavailable"})
+		return
+	}
+	clockService, ok := oc.tradingService.(marketClockService)
+	if !ok {
+		c.JSON(503, gin.H{"error": "broker market clock is unavailable"})
+		return
+	}
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		c.JSON(503, gin.H{"error": "exchange timezone unavailable"})
+		return
+	}
+	clock, err := clockService.GetMarketClock(c.Request.Context())
+	if err != nil || clock == nil || clock.Timestamp.IsZero() {
+		c.JSON(503, gin.H{"error": "broker market clock is unavailable"})
+		return
+	}
+	now := clock.Timestamp.In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	rows, err := service.GetMarketCalendar(c.Request.Context(), today, today.AddDate(0, 0, 10))
+	if err != nil {
+		c.JSON(503, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"clock": clock, "sessions": rows})
 }
 
 func orderIdentityKeys(order *interfaces.Order) []string {

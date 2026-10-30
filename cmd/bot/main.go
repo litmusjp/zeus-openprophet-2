@@ -439,6 +439,7 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		api.DELETE("/orders/:id", orderController.HandleCancelOrder)
 		api.GET("/orders", orderController.HandleGetOrders)
 		api.GET("/clock", orderController.HandleGetMarketClock)
+		api.GET("/calendar", orderController.HandleGetMarketCalendar)
 
 		// Position and account endpoints
 		api.GET("/positions", orderController.HandleGetPositions)

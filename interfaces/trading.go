@@ -111,6 +111,12 @@ type MarketClock struct {
 	NextClose time.Time `json:"next_close"`
 }
 
+type MarketSession struct {
+	Date  string `json:"date"`
+	Open  string `json:"open"`
+	Close string `json:"close"`
+}
+
 // OrderResult describes broker acknowledgement separately from confirmed execution.
 type OrderResult struct {
 	BrokerAccountID              string                      `json:"broker_account_id,omitempty"`

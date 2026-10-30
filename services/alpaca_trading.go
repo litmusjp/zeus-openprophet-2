@@ -451,6 +451,26 @@ func (s *AlpacaTradingService) GetMarketClock(ctx context.Context) (*interfaces.
 	}, nil
 }
 
+// GetMarketCalendar returns the broker's exchange-local session rows for a
+// bounded horizon. It is read-only and is kept separate from order validation.
+func (s *AlpacaTradingService) GetMarketCalendar(ctx context.Context, start, end time.Time) ([]interfaces.MarketSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if start.IsZero() || end.IsZero() || end.Before(start) || end.Sub(start) > 14*24*time.Hour {
+		return nil, fmt.Errorf("invalid market calendar range")
+	}
+	days, err := s.client.GetCalendar(alpaca.GetCalendarRequest{Start: start, End: end})
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]interfaces.MarketSession, 0, len(days))
+	for _, day := range days {
+		rows = append(rows, interfaces.MarketSession{Date: day.Date, Open: day.Open, Close: day.Close})
+	}
+	return rows, nil
+}
+
 // PlaceOrder places a new equity order. OCC option symbols must use the
 // explicit options route so intent and options permissions cannot be bypassed.
 func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces.Order) (*interfaces.OrderResult, error) {

@@ -1004,13 +1004,14 @@
               <div><span>U.S. Eastern</span> <strong id="heartbeat-eastern-clock">--</strong></div>
               <div><span>Japan Standard (JST)</span> <strong id="heartbeat-jst-clock">--</strong></div>
             </div>
+            <div class="form-group"><label for="hb-market-mode">AI review schedule</label><select id="hb-market-mode" onchange="saveMarketHeartbeatMode()"><option value="legacy">Configured heartbeat intervals</option><option value="market_aware">Market aware: sleep offline, review session</option></select><span id="hb-market-effective" class="form-hint">Legacy interval schedule</span></div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px" id="heartbeat-grid">
-              <div class="form-group"><label>Pre-Market <span id="hb-range-pre_market" class="form-hint"></span></label><input type="number" id="hb-pre_market" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-pre_market" class="form-hint"></span></div>
+              <div class="form-group"><label><span id="hb-label-pre_market">Pre-Market</span> <span id="hb-range-pre_market" class="form-hint"></span></label><input type="number" id="hb-pre_market" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-pre_market" class="form-hint"></span></div>
               <div class="form-group"><label>Market Open <span id="hb-range-market_open" class="form-hint"></span></label><input type="number" id="hb-market_open" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-market_open" class="form-hint"></span></div>
               <div class="form-group"><label>Midday <span id="hb-range-midday" class="form-hint"></span></label><input type="number" id="hb-midday" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-midday" class="form-hint"></span></div>
               <div class="form-group"><label>Market Close <span id="hb-range-market_close" class="form-hint"></span></label><input type="number" id="hb-market_close" min="30" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-market_close" class="form-hint"></span></div>
-              <div class="form-group"><label>After Hours <span id="hb-range-after_hours" class="form-hint"></span></label><input type="number" id="hb-after_hours" min="60" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-after_hours" class="form-hint"></span></div>
-              <div class="form-group"><label>Closed <span id="hb-range-closed" class="form-hint"></span></label><input type="number" id="hb-closed" min="60" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-closed" class="form-hint"></span></div>
+              <div class="form-group"><label><span id="hb-label-after_hours">After Hours</span> <span id="hb-range-after_hours" class="form-hint"></span></label><input type="number" id="hb-after_hours" min="60" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-after_hours" class="form-hint"></span></div>
+              <div class="form-group"><label><span id="hb-label-closed">Closed</span> <span id="hb-range-closed" class="form-hint"></span></label><input type="number" id="hb-closed" min="60" max="14400" oninput="updateHeartbeatHours()" onchange="saveHeartbeat()"><span id="hb-hours-closed" class="form-hint"></span></div>
             </div>
             <label style="display:flex;align-items:flex-start;gap:8px;margin-top:14px;text-transform:none;font-weight:400;font-size:13px;line-height:1.4">
               <input type="checkbox" id="hb-force-agent" onchange="saveHeartbeat()">
@@ -1423,7 +1424,7 @@ function connectSSE() {
     const d = JSON.parse(e.data);
     const sid = d.sandboxId;
     if (!sid) return;
-    sandboxSchedule[sid] = { nextBeatTime: d.nextBeat ? new Date(d.nextBeat) : null, seconds: d.seconds };
+    sandboxSchedule[sid] = { nextBeatTime: d.nextReviewAt ? new Date(d.nextReviewAt) : (d.nextBeat ? new Date(d.nextBeat) : null), seconds: d.seconds, scheduleStatus: d.reason === 'calendar-retry' ? 'unavailable' : 'available' };
     if (typeof updateSandboxHeartbeatCountdowns === 'function') updateSandboxHeartbeatCountdowns();
     const hbEl = document.querySelector(`[data-stat="${sid}-hb-interval"]`);
     if (hbEl) hbEl.textContent = fmtInt(d.seconds);
@@ -1495,8 +1496,8 @@ function updateOperatorCard(s) {
   _set('operator-model-name', (s.activeModel || sandbox.agent?.model || '--').replace('opencode/', ''));
   _set('operator-phase', labels[s.phase] || s.phase || '--');
   _set('operator-heartbeat', s.heartbeatSeconds ? fmtInt(s.heartbeatSeconds) : '--');
-  const next = s.nextBeatTime ? new Date(s.nextBeatTime) : (sandboxSchedule[sid]?.nextBeatTime || null);
-  _set('operator-next-heartbeat', s.running && !s.paused && next instanceof Date && Number.isFinite(next.getTime())
+  const next = s.nextReviewAt ? new Date(s.nextReviewAt) : (s.nextBeatTime ? new Date(s.nextBeatTime) : (sandboxSchedule[sid]?.nextBeatTime || null));
+  _set('operator-next-heartbeat', s.scheduleStatus === 'unavailable' ? 'Clock unavailable' : s.running && !s.paused && next instanceof Date && Number.isFinite(next.getTime())
     ? Math.max(0, Math.ceil((next.getTime() - Date.now()) / 1000)) + 's' : '--');
   const attention = document.getElementById('operator-attention');
   const count = Number(s.stats?.errors || 0);
@@ -1525,7 +1526,7 @@ function updateState(s) {
   if (!sid) return;
   sandboxRuntime[sid] = s;
   updateInitialStateLabel(sid, s);
-  if ('nextBeatTime' in s) sandboxSchedule[sid] = { nextBeatTime: s.nextBeatTime ? new Date(s.nextBeatTime) : null, seconds: s.heartbeatSeconds };
+  if ('nextBeatTime' in s) sandboxSchedule[sid] = { nextBeatTime: s.nextReviewAt ? new Date(s.nextReviewAt) : (s.nextBeatTime ? new Date(s.nextBeatTime) : null), seconds: s.heartbeatSeconds, scheduleStatus:s.scheduleStatus };
   if (typeof updateSandboxHeartbeatCountdowns === 'function') updateSandboxHeartbeatCountdowns();
   
   // Update per-sandbox sidebar stats
@@ -1594,6 +1595,7 @@ function sandboxHeartbeatCountdown(sid, now) {
   if (now === undefined) now = Date.now();
   const state = sandboxRuntime[sid];
   const schedule = sandboxSchedule[sid];
+  if (state?.scheduleStatus === 'unavailable' || schedule?.scheduleStatus === 'unavailable') return 'Clock unavailable';
   if (!state?.running || state.paused || !schedule?.nextBeatTime || !(schedule.seconds > 0)) return '--';
   const nextBeat = new Date(schedule.nextBeatTime);
   if (!Number.isFinite(nextBeat.getTime())) return '--';
@@ -4078,15 +4080,51 @@ async function sendMessage() {
 function renderHeartbeat() {
   const hb = sandboxScoped.heartbeat || config.heartbeat || {};
   const phases = ['pre_market','market_open','midday','market_close','after_hours','closed'];
+  const marketAwareLabels = { pre_market:'15 min before open', market_open:'First actual hour', midday:'Actual session middle', market_close:'Last actual hour', after_hours:'15 min after close', closed:'Sleep' };
   phases.forEach(p => {
     const el = document.getElementById('hb-' + p);
     if (el && hb[p] !== undefined) el.value = hb[p];
     const rangeEl = document.getElementById('hb-range-' + p);
-    if (rangeEl) rangeEl.textContent = formatHeartbeatPhaseRange((sandboxScoped.heartbeatPhases || {})[p]);
+    if (rangeEl) rangeEl.textContent = hb.mode === 'market_aware' ? marketAwareLabels[p] : formatHeartbeatPhaseRange((sandboxScoped.heartbeatPhases || {})[p]);
   });
   updateHeartbeatHours();
   const forceEl = document.getElementById('hb-force-agent');
   if (forceEl) forceEl.checked = hb.forceHeartbeatIntervals === true;
+  const modeEl = document.getElementById('hb-market-mode');
+  if (modeEl) modeEl.value = hb.mode === 'market_aware' ? 'market_aware' : 'legacy';
+  const locked = hb.mode === 'market_aware';
+  ['market_open','midday','market_close'].forEach(p => { const el = document.getElementById('hb-' + p); if (el) el.disabled = false; });
+  const pre = document.getElementById('hb-pre_market'); if (pre) pre.disabled = locked;
+  const preLabel = document.getElementById('hb-label-pre_market'); if (preLabel) preLabel.textContent = locked ? 'Once Before Open' : 'Pre-Market';
+  ['after_hours','closed'].forEach((p,i) => { const el = document.getElementById('hb-' + p); if (el) el.disabled = locked; const label = document.getElementById('hb-label-' + p); if (label) label.textContent = locked ? (i ? 'Sleep' : 'Once After Close') : (i ? 'Closed' : 'After Hours'); });
+  const forceControl = document.getElementById('hb-force-agent');
+  if (forceControl) forceControl.disabled = locked;
+  const effective = document.getElementById('hb-market-effective');
+  if (effective) {
+    const cadence = ['market_open','midday','market_close'].map(key => Number(hb[key] || 0));
+    const cadenceText = cadence.every(value => value > 0 && value % 60 === 0)
+      ? `${cadence.map(value => value / 60).join('/')} minutes`
+      : `${cadence.join('/')} seconds`;
+    effective.textContent = hb.mode === 'market_aware'
+      ? `Once 15 minutes before open; every ${cadenceText} across the actual session; once 15 minutes after close; sleeps otherwise.`
+      : 'Legacy interval schedule';
+  }
+}
+
+async function saveMarketHeartbeatMode() {
+  const sandboxId = getEffectiveSandboxId();
+  const mode = document.getElementById('hb-market-mode')?.value;
+  if (!sandboxId) return;
+  const expectedCurrentHeartbeat = structuredClone((config?.sandboxes || {})[sandboxId]?.heartbeat || {});
+  const intervals = Object.fromEntries(['market_open','midday','market_close'].map(key => [key, Number(document.getElementById('hb-' + key)?.value)]));
+  const response = await fetch('/api/heartbeat/market-mode', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ sandboxId, mode, intervals, expectedCurrentHeartbeat }) });
+  const detail = await response.json().catch(() => ({}));
+  if (!response.ok) { toast(detail.error || 'Market schedule update rejected', 'error'); if (getEffectiveSandboxId() === sandboxId) renderHeartbeat(); return; }
+  if (getEffectiveSandboxId() !== sandboxId) return;
+  try { const read = await fetch('/api/config'); if (read.ok && getEffectiveSandboxId() === sandboxId) config = await read.json(); } catch {}
+  if (getEffectiveSandboxId() !== sandboxId) return;
+  try { await refreshSelectedSandboxConfig(); } catch { /* save succeeded; refresh can be retried separately */ }
+  if (getEffectiveSandboxId() === sandboxId) renderHeartbeat();
 }
 
 async function verifyBuilderChatGPTModel() {
@@ -4150,18 +4188,28 @@ function updateHeartbeatClocks(now = new Date()) {
 
 let _hbTimer = null;
 function saveHeartbeat() {
+  const sid = getEffectiveSandboxId();
   clearTimeout(_hbTimer);
   _hbTimer = setTimeout(async () => {
     const body = {};
-    ['pre_market','market_open','midday','market_close','after_hours','closed'].forEach(p => {
-      const v = parseInt(document.getElementById('hb-' + p)?.value);
-      if (v && v >= 30) body[p] = v;
-    });
-    body.forceHeartbeatIntervals = document.getElementById('hb-force-agent')?.checked === true;
-    const sid = getEffectiveSandboxId();
+    const aware = document.getElementById('hb-market-mode')?.value === 'market_aware';
+    const phases = aware ? ['market_open','midday','market_close'] : ['pre_market','market_open','midday','market_close','after_hours','closed'];
+    for (const p of phases) {
+      const raw = String(document.getElementById('hb-' + p)?.value ?? '').trim(), v = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(v) || v < (['after_hours','closed'].includes(p) ? 60 : 30) || v > 14400) { toast(`Enter a valid ${p.replace('_',' ')} interval`, 'error'); return; }
+      body[p] = v;
+    }
+    if (sid) {
+      body.expectedCurrentHeartbeat = structuredClone((config?.sandboxes || {})[sid]?.heartbeat || {});
+    }
+    body.forceHeartbeatIntervals = aware || document.getElementById('hb-force-agent')?.checked === true;
+    if (sid && getEffectiveSandboxId() !== sid) return;
     if (sid) body.sandboxId = sid;
-    await fetch('/api/heartbeat', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    await refreshSelectedSandboxConfig();
+    const response = await fetch('/api/heartbeat', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (!response.ok) { const detail = await response.json().catch(() => ({})); toast(detail.error || 'Heartbeat settings save rejected', 'error'); return; }
+    if (!sid || getEffectiveSandboxId() === sid) {
+      try { await refreshSelectedSandboxConfig(); } catch { /* write succeeded; selected readback can be retried */ }
+    }
   }, 600);
 }
 

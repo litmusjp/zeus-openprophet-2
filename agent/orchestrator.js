@@ -204,6 +204,20 @@ export class AgentOrchestrator extends EventEmitter {
         ]);
         return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true };
       },
+      ensureBackendReadyFn: async id => {
+        let current = this.getSandboxRuntime(id);
+        if (!current?.goReady && !(await this.startGoBackend(id))) throw new Error('Trading backend readiness/reconciliation unavailable');
+        current = this.getSandboxRuntime(id);
+        if (!current?.goReady || !current.goAxios || current.sandbox.id !== id || current.sandbox.accountId !== getSandbox(id)?.accountId) throw new Error('Trading backend readiness/reconciliation unavailable');
+        return true;
+      },
+      getMarketCalendarFn: async id => {
+        const current = this.getSandboxRuntime(id);
+        if (!current?.goReady || !current.goAxios || current.sandbox.id !== id || current.sandbox.accountId !== getSandbox(id)?.accountId) throw new Error('Trading backend unavailable');
+        const response = await current.goAxios.get('/api/v1/calendar', { timeout: 5000 });
+        if (!Array.isArray(response.data?.sessions) || typeof response.data?.clock?.is_open !== 'boolean') throw new Error('Broker calendar response invalid');
+        return response.data;
+      },
       chatStore: this.chatStore,
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,

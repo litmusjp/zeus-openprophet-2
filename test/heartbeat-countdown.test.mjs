@@ -107,3 +107,70 @@ test('one heartbeat timer updates each sandbox sidebar from its own active sched
   tick();
   assert.equal(nodes.get('a-next').textContent, '--', 'stopped sandboxes are cleared');
 });
+
+test('market-aware settings render effective cadence and save only the selected sandbox with lock enabled', async () => {
+  const ids = ['pre_market','market_open','midday','market_close','after_hours','closed'];
+  const nodes = new Map(ids.flatMap(p => [[`hb-${p}`, { value:'600', disabled:false }], [`hb-hours-${p}`, { textContent:'' }], [`hb-range-${p}`, { textContent:'' }]]));
+  nodes.set('hb-force-agent', { checked:true, disabled:false });
+  nodes.set('hb-market-mode', { value:'market_aware' });
+  nodes.set('hb-label-pre_market', { textContent:'' }); nodes.set('hb-label-after_hours', { textContent:'' }); nodes.set('hb-label-closed', { textContent:'' });
+  nodes.set('hb-market-effective', { textContent:'' });
+  let save, posted, refreshed=0;
+  const ctx = {
+    document:{ getElementById:id => nodes.get(id) || null },
+    structuredClone:value=>JSON.parse(JSON.stringify(value)),
+    sandboxScoped:{ heartbeat:{ mode:'market_aware', forceHeartbeatIntervals:true, pre_market:600, market_open:600, midday:1200, market_close:600, after_hours:7200, closed:14400 }, heartbeatPhases:{market_close:{start:900,end:960,label:'Markets Close'}} },
+    config:{ heartbeat:{}, sandboxes:{ 'sbx-selected':{ heartbeat:{mode:'legacy',market_open:600,midday:1200,market_close:600} } } },
+    formatHeartbeatPhaseRange:()=>'range', formatHeartbeatHours:()=>'h', updateHeartbeatHours:()=>{},
+    getEffectiveSandboxId:()=> 'sbx-selected',
+    clearTimeout:()=>{}, setTimeout:fn=>{ save=fn; return 1; }, _hbTimer:null,
+    fetch:async (url, options) => { posted={url, ...options, body:JSON.parse(options.body)}; return { ok:true }; },
+    refreshSelectedSandboxConfig:async()=>{refreshed++;}, toast:()=>{},
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${productionFunction('renderHeartbeat')}\n${productionFunction('saveHeartbeat')}`, ctx);
+  ctx.renderHeartbeat();
+  assert.equal(nodes.get('hb-market-effective').textContent.includes('10/20/10'), true);
+  assert.deepEqual(ids.map(p=>nodes.get(`hb-range-${p}`).textContent), ['15 min before open','First actual hour','Actual session middle','Last actual hour','15 min after close','Sleep']);
+  assert.equal(nodes.get('hb-pre_market').disabled, true);
+  for (const p of ['market_open','midday','market_close']) assert.equal(nodes.get(`hb-${p}`).disabled, false);
+  assert.equal(nodes.get('hb-after_hours').disabled, true); assert.equal(nodes.get('hb-closed').disabled, true);
+  assert.equal(nodes.get('hb-force-agent').disabled, true);
+  ctx.saveHeartbeat(); await save();
+  assert.equal(posted.url, '/api/heartbeat');
+  assert.equal(posted.body.sandboxId, 'sbx-selected');
+  assert.equal(posted.body.forceHeartbeatIntervals, true);
+  assert.equal(posted.body.midday, 1200);
+  assert.equal(posted.body.pre_market, undefined);
+  assert.equal(refreshed, 1);
+});
+
+test('heartbeat settings save handler surfaces rejected writes and does not refresh as if saved', async () => {
+  let save, refreshed=0, notice='';
+  const ctx = {
+    document:{ getElementById:id => id === 'hb-market-mode' ? { value:'legacy' } : id === 'hb-force-agent' ? { checked:false } : { value:'600' } },
+    structuredClone:value=>JSON.parse(JSON.stringify(value)), config:{sandboxes:{}}, getEffectiveSandboxId:()=> 'sbx-selected', clearTimeout:()=>{}, setTimeout:fn=>{ save=fn; return 1; }, _hbTimer:null,
+    fetch:async()=>({ ok:false, json:async()=>({error:'operator authorization required'}) }),
+    toast:message=>{notice=message;}, refreshSelectedSandboxConfig:async()=>{refreshed++;},
+  };
+  vm.createContext(ctx);
+  vm.runInContext(productionFunction('saveHeartbeat'), ctx);
+  ctx.saveHeartbeat(); await save();
+  assert.equal(notice, 'operator authorization required');
+  assert.equal(refreshed, 0);
+});
+
+test('market-mode save uses the captured sandbox, interval values and current-heartbeat CAS', async () => {
+  const nodes=new Map([['hb-market-mode',{value:'legacy'}],['hb-market_open',{value:'360'}],['hb-midday',{value:'900'}],['hb-market_close',{value:'480'}]]);
+  let posted,refresh=0;const ctx={document:{getElementById:id=>nodes.get(id)||null},structuredClone:value=>JSON.parse(JSON.stringify(value)),config:{sandboxes:{'sbx-a':{heartbeat:{market_open:600,midday:1200,market_close:600,forceHeartbeatIntervals:true}}}},getEffectiveSandboxId:()=> 'sbx-a',fetch:async(_url,options)=>{posted=JSON.parse(options.body);return{ok:true,json:async()=>({ok:true})};},refreshSelectedSandboxConfig:async()=>{refresh++;},renderHeartbeat:()=>{},toast:()=>{}};
+  ctx.fetch=async(url,options)=>{if(options?.method==='PUT'){posted=JSON.parse(options.body);return{ok:true,json:async()=>({ok:true})};}return{ok:true,json:async()=>({sandboxes:{}})};};
+  vm.createContext(ctx);vm.runInContext(`async ${productionFunction('saveMarketHeartbeatMode')}`,ctx);await ctx.saveMarketHeartbeatMode();
+  assert.equal(posted.sandboxId,'sbx-a');assert.equal(posted.mode,'legacy');assert.equal(posted.intervals.market_open,360);assert.equal(posted.expectedCurrentHeartbeat.midday,1200);assert.equal(refresh,1);
+});
+
+test('market-mode operator rejection restores the rendered value and reports no save', async () => {
+  const nodes=new Map([['hb-market-mode',{value:'market_aware'}],['hb-market_open',{value:'600'}],['hb-midday',{value:'1200'}],['hb-market_close',{value:'600'}]]);
+  let message='',renders=0,refresh=0;const ctx={document:{getElementById:id=>nodes.get(id)||null},structuredClone:value=>JSON.parse(JSON.stringify(value)),config:{sandboxes:{'sbx-a':{heartbeat:{mode:'legacy',market_open:900,midday:1800,market_close:900}}}},getEffectiveSandboxId:()=> 'sbx-a',fetch:async()=>({ok:false,json:async()=>({error:'Heartbeat settings changed; refresh and review before saving'})}),refreshSelectedSandboxConfig:async()=>{refresh++;},renderHeartbeat:()=>{renders++;nodes.get('hb-market-mode').value='legacy';},toast:text=>{message=text;}};
+  vm.createContext(ctx);vm.runInContext(`async ${productionFunction('saveMarketHeartbeatMode')}`,ctx);await ctx.saveMarketHeartbeatMode();
+  assert.equal(message,'Heartbeat settings changed; refresh and review before saving');assert.equal(nodes.get('hb-market-mode').value,'legacy');assert.equal(renders,1);assert.equal(refresh,0);
+});

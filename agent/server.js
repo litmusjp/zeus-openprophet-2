@@ -465,6 +465,26 @@ function createHarnessForActiveSandbox() {
       ]);
       return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true };
     },
+    ensureBackendReadyFn: async sandboxId => {
+      if (isActiveSandbox(sandboxId) && !goReady) {
+        const selected = getSandbox(sandboxId);
+        const account = selected && getAccountById(selected.accountId);
+        if (!account || !(await startGoBackend(account))) throw new Error('Trading backend readiness/reconciliation unavailable');
+      }
+      if (!isActiveSandbox(sandboxId)) {
+        const runtime = orchestrator.runtimes.get(sandboxId);
+        if (!runtime?.goReady && !(await orchestrator.startGoBackend(sandboxId))) throw new Error('Trading backend readiness/reconciliation unavailable');
+      }
+      if (!getGoClientForSandbox(sandboxId)) throw new Error('Trading backend readiness/reconciliation unavailable');
+      return true;
+    },
+    getMarketCalendarFn: async sandboxId => {
+      const client = getGoClientForSandbox(sandboxId);
+      if (!client) throw new Error('Trading backend unavailable');
+      const response = await client.get('/api/v1/calendar', { timeout: 5000 });
+      if (!Array.isArray(response.data?.sessions) || typeof response.data?.clock?.is_open !== 'boolean') throw new Error('Broker calendar response invalid');
+      return response.data;
+    },
     chatStore,
     opencodeEnv: {
       OPENPROPHET_DATA_DIR: path.join(PROJECT_ROOT, 'data'),
@@ -1807,9 +1827,21 @@ app.get('/api/heartbeat', (req, res) => {
 
 app.put('/api/heartbeat', async (req, res) => {
   try {
-    const { sandboxId, ...heartbeatBody } = req.body || {};
+    const { sandboxId, expectedCurrentHeartbeat, ...heartbeatBody } = req.body || {};
     const targetSandboxId = sandboxId || getActiveSandbox()?.id;
     if (targetSandboxId) {
+      const currentHeartbeat = getSandbox(targetSandboxId)?.heartbeat || {};
+      if (expectedCurrentHeartbeat) {
+        const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
+          ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+        if (JSON.stringify(stable(expectedCurrentHeartbeat)) !== JSON.stringify(stable(currentHeartbeat))) return res.status(409).json({ error:'Heartbeat settings changed; refresh and review before saving' });
+      }
+      if (currentHeartbeat.mode === 'market_aware') {
+        if (heartbeatBody.mode !== undefined) throw new Error('Market-aware mode can only be changed through operator settings');
+        for (const key of ['market_open','midday','market_close']) if (heartbeatBody[key] !== undefined && (!Number.isSafeInteger(heartbeatBody[key]) || heartbeatBody[key] < 30 || heartbeatBody[key] > 14400)) throw new Error(`Invalid ${key} interval`);
+        if (heartbeatBody.forceHeartbeatIntervals === false) throw new Error('Market-aware heartbeat lock cannot be disabled');
+        heartbeatBody.forceHeartbeatIntervals = true;
+      }
       await updateHeartbeatForSandbox(targetSandboxId, heartbeatBody);
     } else {
       await updateHeartbeat(heartbeatBody);
@@ -1960,6 +1992,46 @@ app.get('/api/plugins/slack/preview', async (req, res) => {
   } catch {
     res.status(500).json({ ok: false, sandboxId, error: 'Slack preview unavailable' });
   }
+});
+
+app.get('/api/market-session', async (req, res) => {
+  const sandboxId = typeof req.query.sandboxId === 'string' ? req.query.sandboxId : '';
+  const sandbox = getSandbox(sandboxId), client = sandbox && getGoClientForSandbox(sandboxId);
+  if (!sandbox || !client || (isActiveSandbox(sandboxId) ? !goReady : orchestrator.getSandboxRuntime(sandboxId)?.goReady !== true)) return res.status(503).json({ error:'market_session_unavailable' });
+  try {
+    const response = await client.get('/api/v1/calendar', { timeout:5000 });
+    if (!Array.isArray(response.data?.sessions) || !response.data?.clock) return res.status(503).json({ error:'market_session_unavailable' });
+    res.json({ sandboxId, ...response.data });
+  } catch { res.status(503).json({ error:'market_session_unavailable' }); }
+});
+
+app.put('/api/heartbeat/market-mode', operatorAuthMiddleware, async (req, res) => {
+  try {
+    const { sandboxId, mode, intervals, expectedCurrentHeartbeat } = req.body || {};
+    if (!sandboxId || !getSandbox(sandboxId)) throw new Error('Selected sandbox is required');
+    if (mode !== 'market_aware' && mode !== 'legacy') throw new Error('Mode must be market_aware or legacy');
+    const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+    const currentHeartbeat = getSandbox(sandboxId).heartbeat || {};
+    if (!expectedCurrentHeartbeat || JSON.stringify(stable(expectedCurrentHeartbeat)) !== JSON.stringify(stable(currentHeartbeat))) {
+      return res.status(409).json({ error:'Heartbeat settings changed; refresh and review before saving' });
+    }
+    let updates;
+    if (mode === 'market_aware') {
+      const selected = intervals || { market_open:600, midday:1200, market_close:600 };
+      for (const key of ['market_open','midday','market_close']) if (!Number.isSafeInteger(selected[key]) || selected[key] < 30 || selected[key] > 14400) throw new Error(`Invalid ${key} interval`);
+      updates = { mode, ...selected, forceHeartbeatIntervals:true };
+    }
+    else {
+      const selected = intervals || Object.fromEntries(['market_open','midday','market_close'].map(key => [key, currentHeartbeat[key]]));
+      for (const key of ['market_open','midday','market_close']) if (!Number.isSafeInteger(selected[key]) || selected[key] < 30 || selected[key] > 14400) throw new Error(`Invalid ${key} interval`);
+      updates = { ...selected, mode:undefined, forceHeartbeatIntervals:true };
+    }
+    await updateHeartbeatForSandbox(sandboxId, updates);
+    await refreshHarnessConfigForSandbox(sandboxId, { resetSession:false });
+    broadcast('config', safeConfig());
+    res.json({ ok:true, sandboxId, heartbeat:getSandbox(sandboxId).heartbeat });
+  } catch (err) { res.status(400).json({ error:err.message }); }
 });
 
 app.post('/api/plugins/slack/test', async (req, res) => {

@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
+import { nextMarketReview, marketSession, marketSessionPhase, validateMarketCalendar } from './market-aware-scheduler.js';
 
 // Default max tool rounds; overridden by permissions config at runtime
 
@@ -409,7 +410,7 @@ ${alphaDeskBudgetGuidance}
 - Stale MarketWatch items are informational only and never current market evidence.
 
 ## Phase Context (ET)
-- Pre-market (4–9:30), after hours (4–8), and Closed are outside the regular-session options execution window; research and planning remain available.
+- Broker-authoritative session times define pre-market, regular-session, after-hours and closed phases; research and planning remain available outside the regular session.
 - During the regular session, evaluate entries and manage positions under assigned strategies, recorded plans, permissions and existing controls. The phase does not add a trade, target or stop rule.
 - Completed qualifying prior bars remain usable. Do not assume or add a strategy bar timeframe. The assigned strategy and recorded plan control exit conditions and timing.
 ${heartbeatIntervalsForced
@@ -480,6 +481,8 @@ export class AgentState extends EventEmitter {
     this.lastBeatTime = null;
     this.lastHeartbeatFailure = null;
     this.nextBeatTime = null;
+    this.nextReviewAt = null;
+    this.scheduleStatus = null;
     this.activeAgentId = null;
     this.activeAccountId = null;
     this.activeModel = null;
@@ -513,7 +516,7 @@ export class AgentState extends EventEmitter {
   toJSON() {
     const planContextIsCurrent = this.positionPlanContext?.accountId === this.activeAccountId
       && this.positionPlanContext?.sandboxId === this.activeSandboxId;
-    return {
+    const snapshot = {
       running: this.running,
       paused: this.paused,
       phase: this.phase,
@@ -540,6 +543,11 @@ export class AgentState extends EventEmitter {
       recentTrades: this.recentTrades.slice(0, 10),
       stats: this.stats,
     };
+    if (this.scheduleStatus !== null) {
+      snapshot.nextReviewAt = this.nextReviewAt;
+      snapshot.scheduleStatus = this.scheduleStatus;
+    }
+    return snapshot;
   }
 }
 
@@ -563,6 +571,11 @@ export class AgentHarness {
       spawnFn = spawn,
       checkCliAuthFn = checkCliAuth,
       getCurrentPhaseFn = getCurrentPhase,
+      getMarketCalendarFn = async () => { throw new Error('market calendar unavailable'); },
+      ensureBackendReadyFn = async () => true,
+      nowFn = () => Date.now(),
+      setTimeoutFn = (fn, ms) => setTimeout(fn, ms),
+      clearTimeoutFn = timer => clearTimeout(timer),
     } = options;
 
     this.state = new AgentState();
@@ -578,6 +591,15 @@ export class AgentHarness {
     this.getPermissions = getPermissions;
     this.getManagedReviewPolicy = getManagedReviewPolicy;
     this.getHeldPositionSnapshot = getHeldPositionSnapshot;
+    this.getMarketCalendar = getMarketCalendarFn;
+    this.ensureBackendReady = ensureBackendReadyFn;
+    this.now = nowFn;
+    this.setTimeoutFn = setTimeoutFn;
+    this.clearTimeoutFn = clearTimeoutFn;
+    this._marketCalendar = null;
+    this._marketSession = null;
+    this._marketScheduleUnavailable = false;
+    this._marketScheduleEpoch = 0;
     this.chatStore = chatStore;
     this.opencodeEnv = opencodeEnv;
     this.spawnFn = spawnFn;
@@ -748,12 +770,23 @@ export class AgentHarness {
       level: 'success',
     });
 
-    await this._beat();
-    this._scheduleNext();
+    if (this._sandboxConfig?.heartbeat?.mode === 'market_aware') {
+      try {
+        await this._refreshMarketSchedule(true);
+      } catch (err) {
+        this.state.running = false;
+        this.state.emit('status', { status:'error', error:String(err?.message || err) });
+        throw err;
+      }
+    } else {
+      await this._beat();
+      this._scheduleNext();
+    }
   }
 
   async reloadConfig(options = {}) {
     const { resetSession = true, silent = false } = options;
+    const wasMarketAware = this._marketAwareEnabled();
 
     this._sandboxConfig = this._resolveSandbox();
     if (!this._sandboxConfig) throw new Error(`Sandbox not found: ${this.sandboxId || 'unknown'}`);
@@ -794,11 +827,24 @@ export class AgentHarness {
         level: 'info',
       });
     }
+    if (this.state.running && wasMarketAware !== this._marketAwareEnabled()) {
+      this._marketScheduleEpoch += 1;
+      if (this._timer) { this.clearTimeoutFn(this._timer); this._timer = null; }
+      if (this._marketAwareEnabled()) await this._refreshMarketSchedule(false);
+      else {
+        this.state.nextReviewAt = null;
+        this.state.scheduleStatus = null;
+        this._scheduleNext();
+      }
+    }
   }
 
   async stop() {
     this.state.running = false;
-    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    this._marketScheduleEpoch += 1;
+    if (this._timer) { this.clearTimeoutFn(this._timer); this._timer = null; }
+    this.state.nextReviewAt = null;
+    this.state.nextBeatTime = null;
     if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
     this._sessionEpoch += 1;
     this._sessionId = null;
@@ -831,6 +877,7 @@ export class AgentHarness {
 
   pause() {
     this.state.paused = true;
+    if (this._marketAwareEnabled() && this._timer) { this.clearTimeoutFn(this._timer); this._timer = null; }
     this.state.emit('status', { status: 'paused' });
     this.state.emit('agent_log', { message: 'Agent paused.', level: 'warning' });
   }
@@ -839,6 +886,7 @@ export class AgentHarness {
     this.state.paused = false;
     this.state.emit('status', { status: 'resumed' });
     this.state.emit('agent_log', { message: 'Agent resumed.', level: 'success' });
+    if (this._marketAwareEnabled()) void this._refreshMarketSchedule(false);
   }
 
   /**
@@ -948,7 +996,8 @@ export class AgentHarness {
     const beatNum = ++this.state.beatCount;
     this.state.stats.totalBeats = beatNum;
     this.state.lastBeatTime = new Date().toISOString();
-    const phase = this.getCurrentPhaseFn();
+    const phase = this._marketAwareEnabled() && this._marketSession
+      ? marketSessionPhase(this._marketSession, this.now()) : this.getCurrentPhaseFn();
     this.state.phase = phase;
     const model = this.state.activeModel;
     const beatEpoch = this._sessionEpoch;
@@ -961,6 +1010,7 @@ export class AgentHarness {
     const allMessages = [userMessage, ...queued].filter(Boolean);
     const userBlock = allMessages.map(m => `USER MESSAGE: ${m}`).join('\n');
     const exitPlanContext = await this._heldPositionPlanContext(beatAccountId);
+    if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
 
     this._isMessageBeat = true;
     this.state.emit('beat_start', { beat: beatNum, phase, time: this.state.lastBeatTime, isMessage: true });
@@ -984,6 +1034,7 @@ ${userBlock}`;
 
     let failedResult = null;
     try {
+      if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
       const result = await this._runClaude(prompt, model, actorSnapshot);
       if (result.error) failedResult = result;
       if (result.error) throw new Error(result.error);
@@ -1048,6 +1099,76 @@ ${userBlock}`;
     return this._sandboxConfig?.heartbeat?.forceHeartbeatIntervals === true;
   }
 
+  _marketAwareEnabled() { return this._sandboxConfig?.heartbeat?.mode === 'market_aware'; }
+
+  async _refreshMarketSchedule(start = false, runReview = false, scheduledReason = null) {
+    const scheduleEpoch = this._marketScheduleEpoch;
+    const current = () => this.state.running && !this.state.paused && this._marketAwareEnabled() && scheduleEpoch === this._marketScheduleEpoch;
+    if (!current()) return;
+    try {
+      await this.ensureBackendReady(this.sandboxId);
+      if (!current()) return;
+      const schedule = await this.getMarketCalendar(this.sandboxId);
+      this._marketCalendar = Array.isArray(schedule) ? schedule : schedule?.sessions;
+      const clock = schedule?.clock || null;
+      if (!validateMarketCalendar(this._marketCalendar)) throw new Error('Broker calendar response invalid');
+      if (!current()) return;
+      const now = this.now();
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone:'America/New_York', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date(now));
+      const session = marketSession(this._marketCalendar, today);
+      this._marketSession = session;
+      const phase = marketSessionPhase(session, now);
+      const clockAt = Date.parse(clock?.timestamp);
+      const clockFresh = Number.isFinite(clockAt) && Math.abs(now - clockAt) <= 120_000;
+      const inSession = Boolean(session && now >= session.open && now < session.close && clock?.is_open === true && clockFresh);
+      this.state.phase = phase;
+      this.state.scheduleStatus = 'available';
+      this._marketScheduleUnavailable = false;
+      this.state.heartbeatSeconds = 600;
+      const researchEvent = scheduledReason === 'pre-open-review' || scheduledReason === 'post-close-review';
+      if ((start && inSession) || (runReview && (inSession || researchEvent))) await this._beat();
+      if (!current()) return;
+      const backoffFactor = this._consecutiveErrors >= BEAT_BACKOFF.threshold
+        ? Math.min(2 ** (this._consecutiveErrors - 2), BEAT_BACKOFF.factor) : 1;
+      const intervals = Object.fromEntries(['market_open','midday','market_close'].map(phase => [phase,
+        Math.min(this.getHeartbeatForPhase(this.sandboxId, phase) * backoffFactor, BEAT_BACKOFF.capSeconds)]));
+      const next = nextMarketReview(this._marketCalendar, this.now(), clock, intervals);
+      if (!next?.at) {
+        this._marketScheduleUnavailable = true;
+        this.state.scheduleStatus = 'unavailable';
+        this.state.nextReviewAt = null;
+        this._scheduleMarketAware(this.now() + 60_000, 'calendar-retry');
+        return;
+      }
+      this.state.nextReviewAt = next?.at ? new Date(next.at).toISOString() : null;
+      this._scheduleMarketAware(next.at, next.reason);
+    } catch (err) {
+      if (!current()) return;
+      this.state.scheduleStatus = 'unavailable';
+      this._marketScheduleUnavailable = true;
+      this.state.nextReviewAt = null;
+      this.state.emit('agent_log', { message: `Market calendar unavailable; AI review will retry in 60 seconds: ${String(err?.message || err).slice(0, 180)}`, level: 'warning' });
+      this._scheduleMarketAware(this.now() + 60_000, 'calendar-retry');
+    }
+  }
+
+  _scheduleMarketAware(at, reason = 'session-review') {
+    const scheduleEpoch = this._marketScheduleEpoch;
+    if (!this.state.running || this.state.paused || !this._marketAwareEnabled()) return;
+    if (this._timer) { this.clearTimeoutFn(this._timer); this._timer = null; }
+    const ms = Math.max(1000, at - this.now());
+    this.state.nextBeatTime = new Date(at).toISOString();
+    this.state.heartbeatSeconds = Math.ceil(ms / 1000);
+    this._marketNextReason = reason;
+    this.state.emit('schedule', { seconds:this.state.heartbeatSeconds, nextBeat:this.state.nextBeatTime, nextReviewAt:this.state.nextReviewAt, reason:this._marketScheduleUnavailable ? 'calendar-retry' : reason });
+    this._timer = this.setTimeoutFn(async () => {
+      if (!this.state.running || this.state.paused || !this._marketAwareEnabled() || scheduleEpoch !== this._marketScheduleEpoch) return;
+      if (this._marketScheduleUnavailable) return this._refreshMarketSchedule(false);
+      if (this.now() - at > 30_000) return this._refreshMarketSchedule(false);
+      await this._refreshMarketSchedule(false, true, reason);
+    }, ms);
+  }
+
   _getHeartbeatSeconds() {
     const base = this._baseHeartbeatSeconds();
     // Exponential backoff after repeated beat failures: slow the loop so a broken
@@ -1065,7 +1186,8 @@ ${userBlock}`;
       if (override.oneTime) this.state.heartbeatOverride = null;
       return override.seconds;
     }
-    const phase = this.getCurrentPhaseFn();
+    const phase = this._marketAwareEnabled() && this._marketSession
+      ? marketSessionPhase(this._marketSession, this.now()) : this.getCurrentPhaseFn();
     this.state.phase = phase;
     // Settings are the operator baseline. Agent-specific defaults do not outrank them.
     const configured = this.getHeartbeatForPhase(this.sandboxId, phase);
@@ -1075,6 +1197,10 @@ ${userBlock}`;
 
   _scheduleNext() {
     if (!this.state.running) return;
+    if (this._marketAwareEnabled()) {
+      void this._refreshMarketSchedule(false);
+      return;
+    }
     // Always clear any existing timer first to prevent dual timers
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     const seconds = getHeartbeatScheduleSeconds(this._getHeartbeatSeconds(), this.state.phase);
@@ -1095,13 +1221,14 @@ ${userBlock}`;
   }
 
   async _beat() {
-    if (this._beating) return;
+    if ((this._marketAwareEnabled() && (!this.state.running || this.state.paused)) || this._beating) return;
     this._beating = true;
 
     const beatNum = ++this.state.beatCount;
     this.state.stats.totalBeats = beatNum;
     this.state.lastBeatTime = new Date().toISOString();
-    const phase = this.getCurrentPhaseFn();
+    const phase = this._marketAwareEnabled() && this._marketSession
+      ? marketSessionPhase(this._marketSession, this.now()) : this.getCurrentPhaseFn();
     this.state.phase = phase;
     this._noteMarketSession(phase);
     const model = this.state.activeModel;
@@ -1154,6 +1281,7 @@ ${userBlock}`;
       }
     }
     const exitPlanContext = await this._heldPositionPlanContext(beatAccountId);
+    if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
     const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}${exitPlanContext}\nPerform your duties for this phase.`;
 
     let failedResult = null;
@@ -1161,6 +1289,7 @@ ${userBlock}`;
     try {
       let result;
       try {
+        if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
         result = await this._runClaude(prompt, model, actorSnapshot);
       } catch (err) {
         executionFailed = true;

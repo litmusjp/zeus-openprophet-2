@@ -86,9 +86,11 @@ test('previews resolve identity and strategy per sandbox while sharing system in
   assert.equal(l1Shared, l2Shared);
   assert.match(l2Shared, /indicative\/testing_only.*permitted for this paper-advisory assessment/i);
   assert.match(l2Shared, /Missing OI is unknown, not zero; latest-trade size is not daily volume/i);
-  assert.match(l2Shared, /freshly re-evaluate a bounded small set of relevant candidates/i);
+  assert.match(l2Shared, /seek qualifying opportunities under the assigned strategy and current controls/i);
   assert.match(l2Shared, /recoverable feed\/data objection.*not an all-day no-setup conclusion/i);
   assert.match(l2Shared, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/i);
+  assert.match(l2Shared, /prophet_get_options_assessment_policy.*optional affordability research.*backend obtains and enforces current policy/i);
+  assert.doesNotMatch(l2Shared, /require a valid POLICY_ONLY response|Skip the candidate if policy is unavailable/i);
 });
 
 test('shared operational instructions keep waits inside the heartbeat budget', async () => {
@@ -113,105 +115,61 @@ test('selected rulesFile takes precedence over customRules, with customRules as 
   assert.match(customFallback, /CUSTOM RULES FALLBACK/);
 });
 
-test('owned complete instruction markers scope the temporary entry exception and permanent workflow', async () => {
-  const temp = `### TEMPORARY_ALPHA_MVP_OVERRIDE\nPaper validation objective: obtain at least one broker-confirmed options entry in your own account per regular market session.\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nBefore the open: prepare a small ranked shortlist using confirmed news and completed historical data. Record underlying, direction, candidate expiry, budget and exit plan. Label it research only—not submitted. Do not place new options orders before the broker clock confirms the market is open.\nAt the open: reconcile positions, active orders, planned intents and uncertain submissions. Refresh current price action and exact option-contract bid, ask, sizes and timestamps. Reuse useful research; do not restart everything from scratch.\nAssess: call prophet_assess_options_trade with legs: one exact OCC symbol, with side='buy'; quantity: 1; limit_price: the proposed positive quoted premium—not total dollar debit.\nAlphaDesk obtains its own evidence and score. Indicative/testing-only data is admissible for this paper-advisory workflow. Missing chain open interest is unknown, not zero; latest-trade size is not daily volume.\nRead decision, signal_score, checks and blocking_reasons. Score alone is not approval. On FAIL, address the genuine failed criteria or research another candidate. On UNAVAILABLE, report or recheck the specific problem; never turn a missing score into zero.\nExecute after PASS: call prophet_place_options_order with a new client_order_id, the same contract, quantity and price, its underlying, side='buy', position_intent='buy_to_open' and order_type='limit'. If the proposal changes, reassess. OP2 performs its own final checks.\nVerify and manage: confirm the broker fill. Never blindly retry an uncertain submission. Close the same contract with sell_to_close for the confirmed remaining quantity, following the documented exit plan, and verify the outcome.\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
-  const complete = (body) => `Identity and original strategy: ${body}\n\n${temp}`;
-  const build = (sandboxId, agentId, prompt) => buildSystemPrompt({
-    id: agentId, sandboxId, name: agentId, systemPromptTemplate: 'custom',
-    customSystemPrompt: prompt, strategyId: `${agentId}-rules`,
-  }, { getStrategyById: () => ({ customRules: 'ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory.' }) });
+test('owned marker-delimited legacy text is removed while custom instructions and controls remain', async () => {
+  const prompt = await buildSystemPrompt({
+    id: 'momentum', sandboxId: 'sbx_956ff9e4', name: 'Surge', systemPromptTemplate: 'custom',
+    customSystemPrompt: 'Surge identity\n### TEMPORARY_ALPHA_MVP_OVERRIDE\n### ALPHA_MVP_MODE: MULTI_SESSION\nquantity one; two entry-and-exit cycles\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nUse exact OCC quote; PASS before entry.\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW',
+    strategyId: 'surge',
+  }, { getStrategyById: () => ({ customRules: 'Surge strategy rules and custom risk exits.' }) });
+  assert.match(prompt, /Surge identity/);
+  assert.match(prompt, /Surge strategy rules and custom risk exits/);
+  assert.match(prompt, /### MARKET-OPEN ALPHADESK WORKFLOW/);
+  assert.doesNotMatch(prompt, /TEMPORARY_ALPHA_MVP_OVERRIDE|ALPHA_MVP_MODE|quantity one|two entry-and-exit cycles/);
+  assert.match(prompt, /max-position and max-deployed/i);
+  assert.match(prompt, /exact OCC contract/);
+  assert.match(prompt, /fresh genuine PASS/i);
+  assert.match(prompt, /backend independently obtains and enforces/i);
+  assert.match(prompt, /entry-eligible regular-session heartbeat, seek qualifying opportunities/i);
+});
 
-  for (const [sandboxId, agentId] of [
-    ['sbx_723be98b', 'catalyst'], ['sbx_723be98b', 'mean-reversion'],
-    ['sbx_956ff9e4', 'mean-reversion'], ['sbx_956ff9e4', 'momentum'],
+test('effective prompts normalize both actual saved market-open workflows and remove the temporary block', async () => {
+  const temporary = `### TEMPORARY_ALPHA_MVP_OVERRIDE\n### ALPHA_MVP_MODE: MULTI_SESSION\nMulti-session MVP: keep the existing relaxed ordinary entry filters in force. Two completed broker-confirmed entry-and-exit cycles are a validation checkpoint across sessions, not a per-day quota, deadline to sell, or ceiling on later ordinary opportunities. Validate only single-contract long calls or puts (quantity one); do not increase size to meet the checkpoint. Manage open exposure first; valid no-trade days are allowed. Count a carry-in closure once against its original broker-confirmed opening fill. Accepted, planned, unfilled orders and runtime counters are not cycles. Never close to complete a cycle, meet a daily target, or reset at a date boundary. Hold across sessions when the original thesis, strategy-specific conditional time exit, expiry and risk permit; risk exits stay immediate and losers are never extended. Record underlying or premium basis, target, numerical invalidation, time/expiry exit and allowed discretionary exit rationale. Current tools provide no broker-held continuous options stop/OCO. Standalone prophet_assess_options_trade is optional research, not a prerequisite. Prefer one guarded prophet_place_options_order call for the eligible unchanged proposal; the backend independently obtains and enforces a fresh genuine AlphaDesk PASS before broker submission. Do not use caller-evidence prophet_assess_options_strategy. Preserve all market, PAPER identity, permissions, risk, exits, expiry, account, review and reconciliation gates.\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE`;
+  const actualWorkflow = `### MARKET-OPEN ALPHADESK WORKFLOW
+Before the open: prepare a small ranked shortlist using confirmed news and completed historical data. Record underlying, direction, candidate expiry, budget and exit plan. Label it research only—not submitted. Do not place new options orders before the broker clock confirms the market is open.
+At the open: reconcile options positions, active broker orders, planned intents and uncertain submissions. Refresh current price action and exact option-contract bid, ask, sizes and timestamps. Reuse useful research; do not restart everything from scratch.
+Select one exact eligible single-leg proposal at quantity 1. Read current managed policy and OP2 confirmation; if either is ON or unknown, do not submit. Generate one stable client_order_id and submit this exact OCC contract, side='buy', quantity 1, and proposed positive limit premium once through prophet_place_options_order, which independently assesses at the broker boundary. Use the same client_order_id for this intent. The first submission is not a retry. A standalone assessment is optional research only and is not a prerequisite to this guarded call. If an optional standalone assessment has already been made, its first submission must occur before that receipt's op2_effective_expires_at; on a direct guarded call the backend obtains and enforces fresh assessment expiry.
+AlphaDesk obtains its own evidence and score. Indicative/testing-only data is admissible for this paper-advisory workflow. Missing chain open interest is unknown, not zero; latest-trade size is not daily volume.
+Read decision, signal_score, checks and blocking_reasons. Score alone is not approval. On FAIL, address the genuine failed criteria or research another candidate. On UNAVAILABLE, report or recheck the specific problem; never turn a missing score into zero.
+After the guarded order call, read its actual assessment and broker result. Only its genuine PASS for the unchanged proposal can proceed; do not make a second submission. If any proposal field changes, requalify it. Discard stale assistant approval narratives. Never blindly retry uncertainty or sequence spread legs. OP2 performs its own final checks.
+Verify and manage: confirm the broker result and fill. Never blindly retry an uncertain submission. Close the same contract with sell_to_close for the broker-reconciled remaining quantity, following the documented exit plan, and verify the outcome. Option exits are periodic agent-managed market/limit closes; they are not broker-held stops/OCO and do not provide guaranteed instantaneous protection.
+
+### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
+
+  for (const [sandboxId, id, identity, strategy] of [
+    ['sbx_723be98b', 'mean-reversion', 'You are Pendulum, a selective ETF mean-reversion trader who waits for a completed-bar rebound before entering.', '- Trade liquid broad-market and sector ETFs after a sharp short-term selloff; require completed bars.'],
+    ['sbx_956ff9e4', 'momentum', 'You are Surge, a breakout-continuation trader who requires a completed daily close and volume confirmation.', '- Require a completed daily close above a clearly bounded range on volume above its recent average.'],
   ]) {
-    const prompt = await build(sandboxId, agentId, complete(`${agentId} identity`));
-    const l2SurgePriority = '### L2 Surge multi-session MVP entry priority';
-    assert.doesNotMatch(prompt, /### ALPHA_MVP_MODE: MULTI_SESSION/);
-    assert.doesNotMatch(prompt, new RegExp(l2SurgePriority));
-    assert.match(prompt, /ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory\./);
-    assert.equal((prompt.match(/### TEMPORARY_ALPHA_MVP_OVERRIDE/g) || []).length, 1);
-    assert.equal((prompt.match(/### MARKET-OPEN ALPHADESK WORKFLOW/g) || []).length, 1);
-    assert.match(prompt, /supersedes ordinary entry filters and discretionary no-trade conditions only for this objective/i);
-    assert.doesNotMatch(prompt, /Do not trade to test tools\./);
-    assert.match(prompt, /Market eligibility, PAPER identity, permissions, risk\/exits, genuine AlphaDesk PASS, backend\/account\/freshness\/review\/execution gates and reconciliation remain hard gates/i);
-    assert.doesNotMatch(prompt, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
-    assert.match(prompt, /two entry-and-exit cycles in this agent’s own PAPER account/i);
-    assert.match(prompt, /prophet_get_session_context/);
-    assert.match(prompt, /prophet_get_orders/);
-    assert.match(prompt, /prophet_get_options_positions/);
-    assert.match(prompt, /count only broker-confirmed evidence for this account\/session/i);
-    assert.match(prompt, /a prior candidate FAIL\/UNAVAILABLE is not an all-day prohibition/i);
-    assert.match(prompt, /Never blindly retry an uncertain submission/);
-    assert.match(prompt, /sell_to_close for the confirmed remaining quantity/);
-    assert.match(prompt, /prophet_get_options_assessment_policy/);
-    assert.match(prompt, /max_investment_per_candidate divided by \(quantity \* standard contract multiplier\)/i);
-    assert.match(prompt, /do not assess an unaffordable candidate/i);
-
-    const withoutTemp = `${agentId} identity\n\n### MARKET-OPEN ALPHADESK WORKFLOW\nPermanent workflow\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`;
-    const ordinary = await build(sandboxId, agentId, withoutTemp);
-    assert.doesNotMatch(ordinary, /### L2 Surge multi-session MVP entry priority/);
-    assert.match(ordinary, /Do not trade to test tools\./);
-    assert.match(ordinary, /ORIGINAL STRATEGY: require entry filters/);
-    assert.match(ordinary, /### MARKET-OPEN ALPHADESK WORKFLOW/);
-    assert.match(ordinary, /prophet_get_options_assessment_policy/);
-    assert.match(ordinary, /max_investment_per_candidate divided by \(quantity \* standard contract multiplier\)/i);
-    assert.match(ordinary, /do not assess an unaffordable candidate/i);
-    assert.doesNotMatch(ordinary, /supersedes the ordinary strategy entry filters/i);
-    assert.match(ordinary, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
-    assert.match(ordinary, /Do not trade to test tools\./);
-    assert.doesNotMatch(ordinary, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/);
-    assert.doesNotMatch(ordinary, /signal scores are nullable provider-owned evidence/);
-
-    const malformed = await build(sandboxId, agentId, `${agentId} identity\n### TEMPORARY_ALPHA_MVP_OVERRIDE\npartial`);
-    assert.match(malformed, /Do not trade to test tools\./);
-    assert.doesNotMatch(malformed, /supersedes the ordinary strategy entry filters/i);
-
-    const incompleteWorkflow = await build(sandboxId, agentId, `${agentId} identity\n\n### TEMPORARY_ALPHA_MVP_OVERRIDE\npartial\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n\n### MARKET-OPEN ALPHADESK WORKFLOW\npartial`);
-    assert.match(incompleteWorkflow, /Do not trade to test tools\./);
-    assert.match(incompleteWorkflow, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/);
-    assert.doesNotMatch(incompleteWorkflow, /### L2 Surge multi-session MVP entry priority/);
+    const savedText = `${identity}\n\n${temporary}\n\n${actualWorkflow}`;
+    const prompt = await buildSystemPrompt({
+      id, sandboxId, systemPromptTemplate: 'custom', customSystemPrompt: savedText, strategyId: id,
+    }, { getStrategyById: () => ({ customRules: strategy }) });
+    assert.ok(prompt.includes(identity));
+    assert.ok(prompt.includes(strategy));
+    assert.equal(prompt.includes('Select one exact eligible single-leg proposal at quantity 1.'), false, `${id} legacy selector must not survive in the effective prompt`);
+    assert.equal(prompt.includes("side='buy', quantity 1, and proposed positive limit premium"), false, `${id} legacy order quantity must not survive in the effective prompt`);
+    assert.doesNotMatch(prompt, /TEMPORARY_ALPHA_MVP_OVERRIDE|ALPHA_MVP_MODE|quantity one|quantity 1|quantity 1,/i);
+    assert.match(prompt, /Select an exact eligible single-leg proposal within available account capacity/);
+    assert.match(prompt, /the exact proposed quantity/);
+    assert.match(prompt, /current managed policy and OP2 confirmation/);
+    assert.match(prompt, /same contract with sell_to_close for the broker-reconciled remaining quantity/);
+    assert.match(prompt, /genuine AlphaDesk PASS/);
+    assert.match(prompt, /backend independently obtains and enforces a fresh genuine PASS/);
+    assert.match(prompt, /prophet_place_options_order/);
+    assert.match(prompt, /max-position and max-deployed/i);
+    assert.match(prompt, /settings-owned capacity/i);
+    assert.doesNotMatch(prompt, /require a valid POLICY_ONLY response|Skip the candidate if policy is unavailable/i);
+    assert.doesNotMatch(prompt, /bounded rotating shortlist|manage(?:ment)? (?:open )?(?:exposure|positions?) first|entry quota/i);
   }
-
-  const multiSessionMarker = '### ALPHA_MVP_MODE: MULTI_SESSION\n';
-  const multiSessionPrompt = complete('momentum identity').replace('### TEMPORARY_ALPHA_MVP_OVERRIDE\n', `### TEMPORARY_ALPHA_MVP_OVERRIDE\n${multiSessionMarker}`);
-  const l2Surge = await build('sbx_956ff9e4', 'momentum', multiSessionPrompt);
-  const l2SurgePriority = '### L2 Surge multi-session MVP entry priority';
-  assert.ok(l2Surge.indexOf(l2SurgePriority) > l2Surge.indexOf('ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory.'));
-  assert.match(l2Surge, /ordinary daily-close and volume entry filters are preferences/i);
-  assert.match(l2Surge, /completed historical bars as context/i);
-  assert.match(l2Surge, /otherwise affordable, liquid candidate/i);
-  assert.match(l2Surge, /fresh exact-contract evidence and use the existing guarded AlphaDesk order path/i);
-  assert.match(l2Surge, /creates no entry quota and never requires a trade/i);
-  assert.match(l2Surge, /genuine AlphaDesk FAIL or UNAVAILABLE.*still block entry/i);
-  assert.match(l2Surge, /Mandatory risk limits, strategy exits, expiry exits, and time exits remain unchanged/i);
-  const wrongOwnerMvp = await build('sbx_956ff9e4', 'mean-reversion', multiSessionPrompt);
-  assert.doesNotMatch(wrongOwnerMvp, /### L2 Surge multi-session MVP entry priority/);
-  const wrongSandboxMvp = await build('sbx_723be98b', 'momentum', multiSessionPrompt);
-  assert.doesNotMatch(wrongSandboxMvp, /### L2 Surge multi-session MVP entry priority/);
-
-  const wrongSandbox = await build('sbx_other', 'catalyst', complete('Herald'));
-  assert.match(wrongSandbox, /Do not trade to test tools\./);
-  assert.doesNotMatch(wrongSandbox, /supersedes the ordinary strategy entry filters/i);
-
-  for (const [sandboxId, agentId] of [
-    ['sbx_723be98b', 'momentum'], ['sbx_956ff9e4', 'catalyst'], ['sbx_other', 'mean-reversion'],
-  ]) {
-    const wrongPair = await build(sandboxId, agentId, complete(`${agentId} identity`));
-    assert.match(wrongPair, /Do not trade to test tools\./);
-    assert.doesNotMatch(wrongPair, /supersedes the ordinary strategy entry filters/i);
-    assert.match(wrongPair, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
-    assert.doesNotMatch(wrongPair, /### L2 Surge multi-session MVP entry priority/);
-  }
-
-  // Stored custom text is inert when the selected template does not use it.
-  const defaultTemplatePrompt = await buildSystemPrompt({
-    id: 'catalyst', sandboxId: 'sbx_723be98b', name: 'catalyst',
-    systemPromptTemplate: 'default', customSystemPrompt: complete('Herald'), strategyId: 'catalyst-rules',
-  }, { getStrategyById: () => ({ customRules: 'ORIGINAL STRATEGY: require entry filters; exits and risk remain mandatory.' }) });
-  assert.match(defaultTemplatePrompt, /Do not trade to test tools\./);
-  assert.match(defaultTemplatePrompt, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/);
-  assert.doesNotMatch(defaultTemplatePrompt, /supersedes the ordinary strategy entry filters/i);
 });
 
 test('changing the selected agent clears stale overrides but preserves explicit customization for the new agent', async () => {

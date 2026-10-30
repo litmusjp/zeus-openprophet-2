@@ -6,8 +6,8 @@ import { buildSystemPrompt } from '../agent/harness.js';
 
 const mcp = fs.readFileSync(new URL('../mcp-server.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
-test('both strategy-agent prompts retain option guardrails across override variants', async () => {
-  for (const [sandboxId, id] of [['sbx_test_catalyst', 'catalyst'], ['sbx_test_mean_reversion', 'mean-reversion']]) {
+test('both scoped strategy-agent prompts retain option guardrails across override variants', async () => {
+  for (const [sandboxId, id] of [['sbx_723be98b', 'catalyst'], ['sbx_956ff9e4', 'mean-reversion']]) {
     for (const override of [true, false]) {
       const marked = override
         ? `### TEMPORARY_ALPHA_MVP_OVERRIDE\nobjective\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n### MARKET-OPEN ALPHADESK WORKFLOW\nworkflow\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`
@@ -20,26 +20,26 @@ test('both strategy-agent prompts retain option guardrails across override varia
       assert.match(prompt, /underlying-based invalidation does not cap option-premium drawdown/i);
       assert.match(prompt, /no broker-held continuous options stop/i);
       if (override) {
-        assert.match(prompt, /### TEMPORARY_ALPHA_MVP_OVERRIDE\nobjective\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE/s);
+        assert.doesNotMatch(prompt, /TEMPORARY_ALPHA_MVP_OVERRIDE/);
         assert.match(prompt, /### MARKET-OPEN ALPHADESK WORKFLOW/);
       }
-      assert.equal(prompt.includes('### TEMPORARY_ALPHA_MVP_OVERRIDE'), override);
+      assert.equal(prompt.includes('### TEMPORARY_ALPHA_MVP_OVERRIDE'), false);
     }
   }
 });
 
-test('scoped Pendulum and Surge prompts actively require bounded fresh discovery', async () => {
+test('scoped Pendulum and Surge prompts seek strategy-qualified entries within current controls', async () => {
   for (const [sandboxId, id] of [['sbx_723be98b', 'mean-reversion'], ['sbx_956ff9e4', 'momentum']]) {
     const prompt = await buildSystemPrompt({
       id, sandboxId, name: id, systemPromptTemplate: 'custom',
       customSystemPrompt: `Identity\n### MARKET-OPEN ALPHADESK WORKFLOW\nworkflow\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`,
     });
-    assert.match(prompt, /On each normal entry-eligible regular-session heartbeat, manage exposure first.*bounded rotating shortlist/s);
-    assert.match(prompt, /including while holding a position/i);
+    assert.match(prompt, /On each normal entry-eligible regular-session heartbeat, seek qualifying opportunities within this agent's assigned strategy and settings-owned capacity/s);
+    assert.match(prompt, /including while holding positions and after exits/i);
   }
 });
 
-test('explicit owned multi-session MVP mode keeps the checkpoint without a daily quota or forced exit', async () => {
+test('legacy multi-session markers do not override strategy, settings, or provider controls', async () => {
   const marker = '### ALPHA_MVP_MODE: MULTI_SESSION';
   const build = (sandboxId, id, body = marker, workflow = true) => buildSystemPrompt({
     id, sandboxId, name: id, systemPromptTemplate: 'custom',
@@ -49,28 +49,19 @@ test('explicit owned multi-session MVP mode keeps the checkpoint without a daily
 
   for (const [sandboxId, id] of [['sbx_723be98b', 'catalyst'], ['sbx_956ff9e4', 'mean-reversion']]) {
     const prompt = await build(sandboxId, id);
-    assert.match(prompt, /MULTI_SESSION/);
-    assert.match(prompt, /two completed broker-confirmed entry-and-exit cycles.*across sessions/i);
-    assert.match(prompt, /carry-in position.*original broker-confirmed opening fill/i);
-    assert.match(prompt, /manage open exposure first/i);
-    assert.match(prompt, /hold across sessions/i);
-    assert.match(prompt, /risk exits remain immediate/i);
-    assert.match(prompt, /prophet_assess_options_trade/);
+    assert.doesNotMatch(prompt, /MULTI_SESSION|two completed broker-confirmed entry-and-exit cycles|quantity one/i);
+    assert.match(prompt, /Strategy Rules/);
+    assert.match(prompt, /settings-owned capacity/i);
+    assert.match(prompt, /prophet_place_options_order/);
     assert.match(prompt, /genuine AlphaDesk PASS/);
-    assert.match(prompt, /keep the existing relaxed ordinary entry filters in force/i);
-    assert.match(prompt, /single-contract long calls or puts \(quantity one\)/i);
-    assert.match(prompt, /prophet_assess_options_trade.*prophet_place_options_order/s);
-    assert.match(prompt, /standalone `?prophet_assess_options_trade`? is optional research, not a prerequisite/i);
     assert.match(prompt, /backend independently obtains and enforces a fresh genuine PASS before broker submission/i);
-    assert.match(prompt, /never use caller-evidence `prophet_assess_options_strategy`/i);
     assert.match(prompt, /Herald intraday\/fewdays; Pendulum 1–10 trading days/);
-    assert.doesNotMatch(prompt, /during each U\.S\. regular session|while fewer than two|complete two .* each/i);
-    assert.match(prompt, /Never close to complete a cycle, meet a daily target or reset at a date boundary/i);
   }
 
   const legacy = await build('sbx_723be98b', 'catalyst', 'legacy objective');
-  assert.match(legacy, /during each U\.S\. regular session/i);
+  assert.doesNotMatch(legacy, /during each U\.S\. regular session/i);
   const wrongOwner = await build('sbx_other', 'catalyst');
+  assert.match(wrongOwner, /ALPHA_MVP_MODE: MULTI_SESSION/, 'unowned custom prompt text is left intact');
   assert.doesNotMatch(wrongOwner, /two completed broker-confirmed entry-and-exit cycles.*across sessions/i);
   const incomplete = await build('sbx_723be98b', 'catalyst', marker, false);
   assert.doesNotMatch(incomplete, /two completed broker-confirmed entry-and-exit cycles.*across sessions/i);

@@ -180,3 +180,50 @@ func TestTradingPolicyDailyLossUsesBrokerEquityAndFailsClosed(t *testing.T) {
 		t.Fatalf("expected invalid daily P&L to fail closed, got %v", err)
 	}
 }
+
+func TestValidateOptionsOrderAllowsQuantityTwoWithinTenPositionCapacity(t *testing.T) {
+	policy := TradingPolicy{
+		IsPaper: true, AllowPaperTrading: true, AllowOptions: true,
+		MaxPositionPct: 100, MaxDeployedPct: 100, MaxOpenPositions: 10, MaxDailyLoss: 100,
+		Allow0DTE: true,
+	}
+	order := &interfaces.OptionsOrder{
+		ClientOrderID: "capacity-qty-two", Symbol: "AAPL270115C00200000", Underlying: "AAPL",
+		Qty: 2, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+	}
+	for _, existing := range []int{1, 9} {
+		t.Run(strings.Join([]string{"existing", strings.TrimSpace(string(rune('0' + existing)))}, "-"), func(t *testing.T) {
+			positions := make([]*interfaces.Position, 0, existing)
+			for i := 0; i < existing; i++ {
+				positions = append(positions, &interfaces.Position{Symbol: "OLD" + string(rune('A'+i)), Qty: 1, Side: "long", MarketValue: 100})
+			}
+			notional, err := policy.ValidateOptionsOrder(order, BrokerRiskSnapshot{Account: validRiskAccount(), Positions: positions})
+			if err != nil {
+				t.Fatalf("valid quantity-two options entry with %d existing distinct positions was rejected: %v", existing, err)
+			}
+			if notional != 200 {
+				t.Fatalf("notional = %.2f, want 200.00", notional)
+			}
+		})
+	}
+}
+
+func TestValidateOptionsOrderBlocksEleventhDistinctPositionAtCapacityTen(t *testing.T) {
+	policy := TradingPolicy{
+		IsPaper: true, AllowPaperTrading: true, AllowOptions: true,
+		MaxPositionPct: 100, MaxDeployedPct: 100, MaxOpenPositions: 10, MaxDailyLoss: 100,
+		Allow0DTE: true,
+	}
+	order := &interfaces.OptionsOrder{
+		ClientOrderID: "capacity-eleven", Symbol: "AAPL270115C00200000", Underlying: "AAPL",
+		Qty: 2, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: floatPtr(1),
+	}
+	positions := make([]*interfaces.Position, 0, 10)
+	for i := 0; i < 10; i++ {
+		positions = append(positions, &interfaces.Position{Symbol: "OLD" + string(rune('A'+i)), Qty: 1, Side: "long", MarketValue: 100})
+	}
+	_, err := policy.ValidateOptionsOrder(order, BrokerRiskSnapshot{Account: validRiskAccount(), Positions: positions})
+	if err == nil || !strings.Contains(err.Error(), "max open positions exceeded") {
+		t.Fatalf("eleventh distinct options position error = %v, want capacity rejection", err)
+	}
+}

@@ -276,35 +276,37 @@ function isOwnedHeraldWorkflow(agentConfig) {
     && prompt.includes('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
 }
 
+function stripLegacyMvpOverride(prompt) {
+  return prompt.replace(/^### TEMPORARY_ALPHA_MVP_OVERRIDE\s*$[\s\S]*?^### END_TEMPORARY_ALPHA_MVP_OVERRIDE\s*$\r?\n?/gm, '').trim();
+}
+
+function normalizeLegacyWorkflowSize(prompt, enabled) {
+  if (!enabled) return prompt;
+  return prompt.replace(/(### MARKET-OPEN ALPHADESK WORKFLOW\r?\n)([\s\S]*?)(\r?\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW)/, (_match, start, body, end) => {
+    const normalized = body
+      .replace('Select one exact eligible single-leg proposal at quantity 1.', 'Select an exact eligible single-leg proposal within available account capacity and existing controls.')
+      .replace("submit this exact OCC contract, side='buy', quantity 1, and proposed positive limit premium once", "submit this exact OCC contract, side='buy', the exact proposed quantity, and proposed positive limit premium once");
+    return `${start}${normalized}${end}`;
+  });
+}
+
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
   const scopedPromptOwner = {
     sbx_723be98b: ['catalyst', 'mean-reversion'],
     sbx_956ff9e4: ['mean-reversion', 'momentum'],
   };
-  const customPrompt = agentConfig.customSystemPrompt || '';
-  const temporaryStart = customPrompt.indexOf('### TEMPORARY_ALPHA_MVP_OVERRIDE');
-  const temporaryEnd = customPrompt.indexOf('### END_TEMPORARY_ALPHA_MVP_OVERRIDE');
-  const workflowStart = customPrompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW');
-  const workflowEnd = customPrompt.indexOf('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
   const scopedPrompt = scopedPromptOwner[agentConfig.sandboxId]?.includes(agentConfig.id)
     && agentConfig.systemPromptTemplate === 'custom';
+  const storedCustomPrompt = agentConfig.customSystemPrompt || '';
+  const withoutLegacyOverride = scopedPrompt ? stripLegacyMvpOverride(storedCustomPrompt) : storedCustomPrompt;
+  const customPrompt = normalizeLegacyWorkflowSize(withoutLegacyOverride,
+    (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'mean-reversion')
+    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'momentum'));
+  const workflowStart = customPrompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW');
+  const workflowEnd = customPrompt.indexOf('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
   const scopedWorkflowPresent = scopedPrompt && workflowStart >= 0 && workflowEnd > workflowStart;
   const heraldWorkflowActive = isOwnedHeraldWorkflow(agentConfig) && scopedWorkflowPresent;
-  const temporaryOverrideActive = scopedWorkflowPresent
-    && temporaryStart >= 0
-    && temporaryEnd > temporaryStart
-    && workflowStart > temporaryEnd;
-  const temporaryBody = temporaryOverrideActive
-    ? customPrompt.slice(temporaryStart, temporaryEnd)
-    : '';
-  const multiSessionMarkerCount = (temporaryBody.match(/^### ALPHA_MVP_MODE:/gm) || []).length;
-  const multiSessionMvpActive = temporaryOverrideActive
-    && multiSessionMarkerCount === 1
-    && /^### ALPHA_MVP_MODE: MULTI_SESSION\s*$/m.test(temporaryBody);
-  const l2SurgeMultiSessionMvpActive = multiSessionMvpActive
-    && agentConfig.sandboxId === 'sbx_956ff9e4'
-    && agentConfig.id === 'momentum';
   let strategyRules = '';
   if (agentConfig.customStrategyRules) {
     strategyRules = agentConfig.customStrategyRules;
@@ -327,7 +329,7 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
 
   // Layer 1: Agent Identity (custom or default)
   const identity = (agentConfig.systemPromptTemplate === 'custom' && agentConfig.customSystemPrompt)
-    ? agentConfig.customSystemPrompt
+    ? customPrompt
     : `You are ${agentConfig.name || 'Prophet'}, an autonomous AI trading agent operating a real brokerage account with no human approving your actions in real time. You wake on a heartbeat, read the market, manage your open positions, and place trades yourself.
 
 ${agentConfig.description || 'You are a disciplined trading agent.'}
@@ -341,38 +343,23 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
 
   // Layer 2: Strategy Rules
   const rulesBlock = tradingRules
-    ? `## Strategy Rules\n${temporaryOverrideActive
-      ? 'Preserve the original strategy text. During the temporary validation objective, only its entry filters and discretionary no-trade conditions are superseded; risk limits and exits remain mandatory.'
-      : 'These are the hard rules you MUST follow. They define what you can trade, position sizes, risk limits, and exit criteria.'}\n\n${tradingRules}`
+    ? `## Strategy Rules\nThese are the hard rules you MUST follow. They define what you can trade, position sizes, risk limits, and exit criteria.\n\n${tradingRules}`
     : '## No Strategy Rules Assigned\nNo trading rules have been configured. Use conservative defaults: max 10% per position, always use limit orders, maintain 50%+ cash.';
-  const l2SurgePriorityClarification = l2SurgeMultiSessionMvpActive && tradingRules
-    ? `\n\n### L2 Surge multi-session MVP entry priority\nFor this explicitly scoped PAPER, quantity-one validation, ordinary daily-close and volume entry filters are preferences; use completed historical bars as context, and do not treat an unfinished current-day close as a blanket reason to avoid evaluating an otherwise affordable, liquid candidate. If otherwise eligible, inspect fresh exact-contract evidence and use the existing guarded AlphaDesk order path. This creates no entry quota and never requires a trade. Missing genuinely necessary evidence, genuine AlphaDesk FAIL or UNAVAILABLE, current OP2 confirmation or managed review lock ON or unknown, and account, PAPER, market, permission, risk, or reconciliation boundaries still block entry. Mandatory risk limits, strategy exits, expiry exits, and time exits remain unchanged.`
-    : '';
-  const strategyRulesBlock = `${rulesBlock}${l2SurgePriorityClarification}`;
+  const strategyRulesBlock = rulesBlock;
 
   // Layer 3: System Instructions (tools, heartbeat, operational)
   const alphaDeskGuidance = scopedWorkflowPresent
     ? `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2, the current heartbeat USER input carries OP2 confirmation and the freshly read managed lock, scope and revision; either ON or unknown blocks new options entries. For an eligible unchanged single-leg proposal, prefer one guarded \`prophet_place_options_order\` call; the backend independently obtains and enforces a fresh genuine PASS before broker submission. Standalone \`prophet_assess_options_trade\` is optional research, not a prerequisite. Indicative/testing-only evidence is admissible for this paper-advisory workflow. Missing OI is unknown, not zero; latest-trade size is not daily volume. Backend, account, paper, identity, permission, market, risk and reconciliation checks remain mandatory.`
     : `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, first honor the current heartbeat USER input: either OP2 confirmation or the freshly read managed review lock ON or unknown blocks new options entries. For an eligible affordable candidate, call \`prophet_assess_options_trade\` for the exact proposal. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. Submit only exact contract legs, quantity and proposed limit price; the service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. On genuine PASS for an unchanged proposal, prefer one \`prophet_place_options_order\` call; the backend independently reassesses the exact proposal at the final broker boundary and may still reject it after fresh account, paper, identity, permission, market, risk and reconciliation checks. Standalone assessment is optional research. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Never blindly retry an uncertain submission or sequence spread legs. Acknowledgement is not a fill.
 In PAPER_ADVISORY_OP2, provider \`indicative/testing_only\` quotes are permitted for this paper-advisory assessment and do not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI: assessment obtains its own reference evidence. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; genuine FAIL or UNAVAILABLE blocks opening, and the broker boundary retains fresh server-side assessment.
-For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capital must freshly re-evaluate a bounded small set of relevant candidates on the permitted cadence. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion; keep management first, and stop only for a current hard exclusion or no setup with its specific reason.`;
-  const alphaDeskBudgetGuidance = '- Before selecting a new single-leg long candidate in PAPER_ADVISORY_OP2 when its gate is enabled, call `prophet_get_options_assessment_policy` and require a valid POLICY_ONLY response. Skip the candidate if policy is unavailable or malformed. Compute the maximum affordable premium as max_investment_per_candidate divided by (quantity * standard contract multiplier), then compare the proposed premium. Keep quantity within maximum_contracts_per_candidate and do not assess an unaffordable candidate. This policy lookup is neither PASS nor execution authority.';
+For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capacity should seek qualifying opportunities under the assigned strategy and current controls, including while holding positions and after exits. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion. Genuine FAIL or UNAVAILABLE blocks that opening proposal; all existing market, account, permission, risk, and reconciliation controls remain in force.`;
+  const alphaDeskBudgetGuidance = '- `prophet_get_options_assessment_policy` is optional affordability research. When a valid POLICY_ONLY response is available, estimate the maximum affordable premium as max_investment_per_candidate divided by (quantity * standard contract multiplier) and keep quantity within maximum_contracts_per_candidate; an unavailable lookup is not a separate entry gate. The guarded order backend obtains and enforces current policy and account capacity. This lookup is neither PASS nor execution authority.';
   const scopedDiscoveryGuidance = scopedWorkflowPresent
-    ? `\n- On each normal entry-eligible regular-session heartbeat, manage exposure first, then refresh and screen a bounded rotating shortlist inside this agent's existing strategy universe when capacity remains, including while holding a position. If candidates fail or have no setup, assess other eligible names within the existing tool budget on that beat. Revisit rejected names only with material fresh evidence and a valid new proposal; never blindly retry an uncertain order. Reuse fresh broad research, but obtain fresh exact-contract and AlphaDesk evidence before entry. Honor strategy windows, permissions, capacity and all hard gates. End with screened names, concise reasons and the next refresh trigger.`
+    ? `\n- On each normal entry-eligible regular-session heartbeat, seek qualifying opportunities within this agent's assigned strategy and settings-owned capacity, including while holding positions and after exits. Use the existing heartbeat and tool budget. Refresh relevant evidence, obtain fresh exact-contract evidence and genuine AlphaDesk PASS before entry when required, and honor strategy windows, permissions, capacity and all hard gates. Never blindly retry an uncertain order.`
     : '';
-  const noTestGuidance = multiSessionMvpActive
-    ? '- Multi-session MVP validation: keep the existing relaxed ordinary entry filters in force for this objective, and reach two completed broker-confirmed entry-and-exit cycles in this agent’s own PAPER account as a validation checkpoint across sessions. Validate only single-contract long calls or puts (quantity one); do not increase size to meet the checkpoint. Count a carry-in position’s completed reducing exit once against its original broker-confirmed opening fill; accepted, planned, unfilled orders, runtime counters and another account’s activity are not cycles. This checkpoint is not a per-day quota, deadline, or ceiling: after it, continue bounded fresh research and eligible opportunities under existing capacity and permissions; valid no-trade days are allowed. Manage open exposure first. Never close to complete a cycle, meet a daily target or reset at a date boundary. Hold across sessions while the original thesis, strategy-specific conditional time exit, expiry and risk permit; risk exits remain immediate and losers are never extended past invalidation. Record underlying or premium basis, target, numerical invalidation, time/expiry exit and allowed discretionary exit rationale. Standalone `prophet_assess_options_trade` is optional research, not a prerequisite. Prefer one guarded `prophet_place_options_order` call for the eligible unchanged proposal; the backend independently obtains and enforces a fresh genuine AlphaDesk PASS before broker submission. Never use caller-evidence `prophet_assess_options_strategy`. Current tools provide no broker-held continuous options stop/OCO. The operator-owned temporary override supersedes ordinary entry filters and discretionary no-trade conditions only; market eligibility, PAPER identity, permissions, risk/exits, expiry, genuine AlphaDesk PASS, backend/account/freshness/review/execution gates and reconciliation remain hard gates.'
-    : temporaryOverrideActive
-    ? '- Temporary validation objective: complete two entry-and-exit cycles in this agent’s own PAPER account during each U.S. regular session. One broker-confirmed opening fill plus its completed reducing exit is one cycle; confirm scope with `prophet_get_session_context` and reconcile order fills/status with `prophet_get_orders` plus remaining contracts with `prophet_get_options_positions`. Count only broker-confirmed evidence for this account/session, never tool calls, accepted/cancelled orders, runtime trades, or another agent’s fills. A losing but technically valid cycle counts. Reconcile/manage first; while an order is pending or uncertain, monitor/reconcile and do not duplicate it. After a completed cycle, resume bounded fresh-candidate research on eligible ordinary heartbeats; a prior candidate FAIL/UNAVAILABLE is not an all-day prohibition. The operator-owned temporary override supersedes ordinary entry filters and discretionary no-trade conditions only for this objective. Market eligibility, PAPER identity, permissions, risk/exits, genuine AlphaDesk PASS, backend/account/freshness/review/execution gates and reconciliation remain hard gates. Never force a fill or fabricate evidence to meet the objective.'
-    : '- Do not trade to test tools. Old reports and superseded test plans are historical context, not active mandates.';
-  const decideActGuidance = multiSessionMvpActive
-    ? '6. DECIDE & ACT — manage open exposure first. Research and consider eligible fresh opportunities on bounded ordinary heartbeats under current capacity and permissions, whether the two-cycle validation checkpoint is complete or not. A valid no-trade day is allowed. Never close merely to meet the checkpoint or a date boundary. Every opening still needs genuine AlphaDesk PASS, all independent hard gates, a documented exit and limit price with a `thesis`; risk exits remain immediate. Otherwise do nothing and say so.'
-    : temporaryOverrideActive
-    ? '6. DECIDE & ACT — while fewer than two confirmed cycles are complete for this agent/account/session, research and consider an eligible fresh candidate on normal heartbeats after reconciliation. Every entry still needs genuine AlphaDesk PASS, all independent hard gates, a documented exit and a limit price with a `thesis`; never claim or invent a profitable edge. Otherwise do nothing and say so.'
-    : '6. DECIDE & ACT — place an order only if you have a stated edge AND the guardrails allow it. Use a limit price and always pass a `thesis` argument. Otherwise do nothing and say so.';
-  const riskDisciplineGuidance = temporaryOverrideActive
-    ? '- Original strategy risk and exit rules, per-heartbeat GUARDRAILS, and backend controls remain HARD limits. Follow the temporary override only for entry-filter precedence; never work around those hard limits.'
-    : '- Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.';
+  const noTestGuidance = '- Do not trade to test tools. Old reports and superseded test plans are historical context, not active mandates.';
+  const decideActGuidance = '6. DECIDE & ACT — evaluate qualifying entries under the assigned strategy and existing controls, including while holding positions and after exits. Execute an eligible proposal only within current capacity and all genuine gates. Use a limit price and always pass a `thesis` argument. Otherwise do nothing and say so.';
+  const riskDisciplineGuidance = '- Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.';
   const systemInstructions = `## Available Tools
 
 ${renderPrefixedToolMenu(heraldWorkflowActive ? { scope: 'herald' } : {})}
@@ -393,13 +380,13 @@ ${noTestGuidance}
 - Do not use native shell or file tools to discover credentials, edit application/configuration files, or bypass broker controls. Use authorized MCP tools for trading.
 
 ## Your Heartbeat Loop
-Each time you wake, work this loop in order and stop once you've acted or confirmed there's nothing to do:
+Each time you wake, work through this loop using the current heartbeat and tool budget:
 1. ORIENT — call \`prophet_get_datetime\`; note the market phase. The heartbeat interval comes from heartbeat context and guardrails, not from \`prophet_get_datetime\`.
 2. ASSESS — call \`prophet_get_account\`, \`prophet_get_positions\`, and \`prophet_get_orders(status="active")\`, followed separately by \`prophet_get_orders(status="planned_for_next_session")\` and \`prophet_get_orders(status="submission_uncertain")\`. Know your cash, buying power, open risk, P&L, broker orders, planned application intents, and uncertain submissions before deciding anything. At the first regular-session heartbeat, preserve exactly this order: get_datetime, account, positions, get_orders (filtered active first).
 
 Keep \`prophet_wait\` within its maximum of 30 seconds, and avoid repeated or multi-minute waits inside trading beats. If longer observation is needed, finish the current beat and rely on the existing next heartbeat; a wait does not schedule a new heartbeat.
-3. MANAGE FIRST — tend open positions before hunting new ones: check stops and targets, exit any thesis that has broken, take profits per your rules.
-4. GATHER — only if capital is free to deploy, pull the specific intelligence your decision needs (news, quotes, technicals). Don't over-research.
+3. MANAGE — tend open positions under their strategy exits and risk controls; continue evaluating new qualifying entries whenever settings-owned capacity permits.
+4. GATHER — pull the specific intelligence needed for current position management and qualifying opportunities. Don't over-research.
 5. RECALL — before opening any NEW position, call \`prophet_find_similar_setups\` with your thesis. This is advisory: use only materially relevant matches and never invent a numeric similarity threshold.
 ${decideActGuidance}
 7. RECORD — call \`prophet_log_decision\` with the reasoning behind every trade; when a position closes, call \`prophet_store_trade_setup\` with the realized result so your memory compounds.
@@ -1291,8 +1278,6 @@ ${userBlock}`;
         args.push('--session', this._sessionId);
       }
 
-      // Only include system prompt on first beat (new session) and rehydrate a
-      // compact, account-scoped context window after process restarts.
       const fullPrompt = isNewSession
         ? `[SYSTEM INSTRUCTIONS - Follow these at all times]\n${this.systemPrompt}\n\n[END SYSTEM INSTRUCTIONS]\n${priorContext}\n${prompt}`
         : prompt;

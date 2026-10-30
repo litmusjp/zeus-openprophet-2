@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AgentHarness, formatOpenCodeError } from '../agent/harness.js';
+import { AgentHarness, buildSystemPrompt, formatOpenCodeError } from '../agent/harness.js';
 import { ChatStore } from '../agent/chat-store.js';
 
 function fakeProcess(lines, exitCode = 0) {
@@ -24,6 +24,32 @@ function fakeProcess(lines, exitCode = 0) {
   });
   return proc;
 }
+
+test('a normal new provider invocation receives cleaned effective instructions', async () => {
+  let input = '';
+  let args;
+  const harness = new AgentHarness({ spawnFn: (_cmd, passedArgs, options) => {
+    args = passedArgs;
+    const proc = new EventEmitter();
+    proc.stdin = new EventEmitter(); proc.stdin.write = value => { input += value; return true; }; proc.stdin.end = () => {};
+    proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.killed = false; proc.kill = () => {};
+    queueMicrotask(() => { proc.stdout.emit('data', `${JSON.stringify({ type: 'text', part: { text: 'OK' } })}\n`); proc.emit('exit', 0, null); proc.emit('close', 0, null); });
+    return proc;
+  } });
+  harness.systemPrompt = await buildSystemPrompt({
+    id: 'momentum', sandboxId: 'sbx_956ff9e4', systemPromptTemplate: 'custom', strategyId: 'momentum',
+    customSystemPrompt: `Surge saved identity\n### TEMPORARY_ALPHA_MVP_OVERRIDE\nquantity one\n### END_TEMPORARY_ALPHA_MVP_OVERRIDE\n### MARKET-OPEN ALPHADESK WORKFLOW\nSelect one exact eligible single-leg proposal at quantity 1.\nGenerate one stable client_order_id and submit this exact OCC contract, side='buy', quantity 1, and proposed positive limit premium once through prophet_place_options_order.\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW`,
+  }, { getStrategyById: () => ({ customRules: 'Surge assigned strategy rules and exits.' }) });
+  await harness._runClaude('heartbeat', 'opencode/model');
+  assert.ok(!args.includes('--session'), 'normal Start begins a fresh provider invocation');
+  assert.match(input, /SYSTEM INSTRUCTIONS - Follow these at all times/);
+  assert.match(input, /Surge saved identity/);
+  assert.match(input, /Surge assigned strategy rules and exits/);
+  assert.match(input, /Select an exact eligible single-leg proposal within available account capacity/);
+  assert.match(input, /the exact proposed quantity/);
+  assert.match(input, /heartbeat/);
+  assert.doesNotMatch(input, /quantity 1|TEMPORARY_ALPHA_MVP_OVERRIDE/);
+});
 
 test('pins primary and all auxiliary agent model overrides to selected free model', async () => {
   let captured;

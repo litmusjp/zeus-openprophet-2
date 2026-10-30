@@ -31,7 +31,7 @@ test('Herald-owned prompt alone gets a focused supported menu and coherent asses
   assert.match(prompt, /first submission is not a retry/i);
   assert.match(prompt, /same client_order_id, matching the client_reference already sent in assessment; client_reference is not an order-tool argument/);
   assert.match(prompt, /periodic agent-managed market\/limit closes.*no broker-held stops\/OCO or guaranteed instantaneous protection/i);
-  assert.match(prompt, /TEMP safety and objective must remain/);
+  assert.doesNotMatch(prompt, /TEMP safety and objective must remain|TEMPORARY_ALPHA_MVP_OVERRIDE/);
   assert.match(prompt, /ORIGINAL STRATEGY: exact strategy rules remain/);
   assert.doesNotMatch(prompt, /After genuine PASS:[^\n]*new client_order_id/i);
 

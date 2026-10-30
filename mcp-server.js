@@ -25,12 +25,22 @@ const TRADING_BOT_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_TOK
 const TRADING_BOT_OPERATOR_TOKEN = EXECUTION_START_ENABLED ? (process.env.TRADING_BOT_OPERATOR_TOKEN || '') : '';
 const OPENPROPHET_ACCOUNT_ID = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_ACCOUNT_ID || 'default') : 'inert';
 const OPENPROPHET_ROLE = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_ROLE || 'agent') : 'agent';
+const HEARTBEAT_INTERVALS_FORCED = process.env.OPENPROPHET_HEARTBEAT_INTERVALS_FORCED === 'true';
 const SESSION_CONTEXT_ACCOUNT_ID = OPENPROPHET_ROLE === 'manager' ? '__manager__' : OPENPROPHET_ACCOUNT_ID;
 const OPENPROPHET_SANDBOX_ID = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_SANDBOX_ID || `sbx_${OPENPROPHET_ACCOUNT_ID}`) : 'inert';
 const OPENPROPHET_PROCESS_NONCE = EXECUTION_START_ENABLED ? (process.env.OPENPROPHET_PROCESS_NONCE || process.env.TRADING_BOT_PROCESS_NONCE || '') : '';
 const SANDBOX_DATA_DIR = path.join(process.cwd(), 'data', 'sandboxes', OPENPROPHET_SANDBOX_ID);
 const SUMMARIES_DIR = path.join(SANDBOX_DATA_DIR, 'news_summaries');
 const DECISIONS_DIR = path.join(SANDBOX_DATA_DIR, 'decisive_actions');
+
+function filterToolsForCurrentAuthority(tools) {
+  const cadenceMutations = new Set(['set_heartbeat', 'apply_heartbeat_profile', 'update_heartbeat_phase']);
+  return tools.filter(({ name }) => {
+    if (name === 'update_permissions' && OPENPROPHET_ROLE !== 'operator') return false;
+    if (HEARTBEAT_INTERVALS_FORCED && OPENPROPHET_ROLE !== 'operator' && cadenceMutations.has(name)) return false;
+    return true;
+  });
+}
 
 function unavailableProvider() {
   throw new Error('AI provider is unavailable in inert mode');
@@ -266,7 +276,7 @@ const server = new Server(
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
-    tools: filterManagerTools(OPENPROPHET_ROLE, [
+    tools: filterToolsForCurrentAuthority(filterManagerTools(OPENPROPHET_ROLE, [
       {
         name: 'get_account',
         description: 'Get trading account information including cash, buying power, and portfolio value',
@@ -1381,7 +1391,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['agentId'],
         },
       },
-    ]),
+    ])),
   };
 });
 

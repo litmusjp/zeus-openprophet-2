@@ -12,6 +12,6 @@ test('agent order contract states single-leg limit and stable ID retry rule', ()
   assert.match(prompt, /sequential single-leg orders/i);
   assert.match(prompt, /nullable.*provider-owned/i);
   assert.match(prompt, /In PAPER_ADVISORY_OP2 mode/i);
-  assert.match(prompt, /On genuine PASS.*prefer one.*prophet_place_options_order/s);
+  assert.match(prompt, /For an eligible proposal, prefer one guarded .*prophet_place_options_order.*backend independently obtains and enforces a fresh genuine PASS/s);
   assert.match(prompt, /FAIL or UNAVAILABLE blocks this opening candidate/i);
 });

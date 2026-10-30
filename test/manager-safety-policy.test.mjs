@@ -40,7 +40,7 @@ test('direct Manager calls reject trading, fabricated records, assessments, and 
 test('MCP handlers use trusted environment role and gate before permission/backend work', async () => {
   const source = await readFile(process.env.MCP_SERVER_SOURCE_FILE || new URL('../mcp-server.js', import.meta.url), 'utf8');
   assert.match(source, /const OPENPROPHET_ROLE\s*=.*process\.env\.OPENPROPHET_ROLE/);
-  const listing = source.indexOf('tools: filterManagerTools(OPENPROPHET_ROLE');
+  const listing = source.indexOf('filterToolsForCurrentAuthority(filterManagerTools(OPENPROPHET_ROLE');
   const handler = source.indexOf('server.setRequestHandler(CallToolRequestSchema');
   const guard = source.indexOf('assertManagerToolAllowed(OPENPROPHET_ROLE, name);', handler);
   const permissions = source.indexOf('await enforcePermissions(name, args);', handler);

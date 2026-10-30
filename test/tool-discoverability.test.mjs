@@ -1,13 +1,23 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
-import { renderToolMenu } from '../agent/tool-catalog.js';
+import { renderToolMenu, renderPrefixedToolMenu } from '../agent/tool-catalog.js';
 import { buildSystemPrompt } from '../agent/harness.js';
 
 const settingsHtml = fs.readFileSync(new URL('../agent/public/index.html', import.meta.url), 'utf8');
 
 test('curated tool catalog and rendered menu include AlphaDesk assessment', () => {
   assert.match(renderToolMenu(), /\*\*Options\*\*: get_options_assessment_policy, assess_options_trade,/);
+});
+
+test('trading prompt menu hides operator-only permission and forced cadence controls but retains research', () => {
+  const menu = renderPrefixedToolMenu({ heartbeatIntervalsForced: true });
+  assert.doesNotMatch(menu, /prophet_update_permissions|prophet_set_heartbeat|prophet_apply_heartbeat_profile|prophet_update_heartbeat_phase/);
+  assert.match(menu, /prophet_analyze_stocks/);
+  assert.match(menu, /prophet_get_quote/);
+  assert.match(menu, /prophet_get_options_chain/);
+  assert.match(renderToolMenu(), /set_heartbeat/);
+  assert.doesNotMatch(renderToolMenu(), /update_permissions/);
 });
 
 test('curated tool catalog exposes the read-only assessment policy lookup', () => {
@@ -34,7 +44,7 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   assert.match(prompt, /signal scores are nullable provider-owned evidence/);
   assert.match(prompt, /Assessment PASS is trade-quality evidence only, never account permission or broker authorization/);
   assert.match(prompt, /independently reassesses the exact proposal at the final broker boundary/);
-  assert.match(prompt, /On genuine PASS .*prefer one .*prophet_place_options_order/);
+  assert.match(prompt, /For an eligible proposal, prefer one guarded `prophet_place_options_order` call; the backend independently obtains and enforces a fresh genuine PASS/);
 });
 
 test('generated system prompt clarifies zero maxOrderValue semantics', async () => {

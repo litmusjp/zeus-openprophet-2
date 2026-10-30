@@ -47,6 +47,11 @@ test('a normal new provider invocation receives cleaned effective instructions',
   assert.match(input, /Surge assigned strategy rules and exits/);
   assert.match(input, /Select an exact eligible single-leg proposal within available account capacity/);
   assert.match(input, /the exact proposed quantity/);
+  assert.match(input, /### MARKET-OPEN ALPHADESK WORKFLOW/);
+  assert.match(input, /Standalone `prophet_assess_options_trade` is optional research, not a prerequisite/);
+  assert.match(input, /OPTIONAL RECALL/);
+  assert.doesNotMatch(input, /Every open position needs a pre-defined exit \(stop and target\)|tighten stops|act before the bell/i);
+  assert.doesNotMatch(input, /call `prophet_assess_options_trade` for the exact proposal|before opening any NEW position, call `prophet_find_similar_setups`/i);
   assert.match(input, /heartbeat/);
   assert.doesNotMatch(input, /quantity 1|TEMPORARY_ALPHA_MVP_OVERRIDE/);
 });
@@ -379,6 +384,67 @@ test('tool audit retains critical outcomes with bounded truncation metadata and 
   assert.equal(captured[4].status, 'error');
   assert.match(captured[4].error, /broker unavailable/);
   assert.doesNotMatch(captured[4].error, /secret/);
+});
+test('configured heartbeat budget reaches only the selected native primary agent and preserves tighter steps', async () => {
+  let captured;
+  const inherited = {
+    default_agent: 'trader',
+    agent: {
+      trader: { steps: 40, description: 'primary', model: 'paid/provider' },
+      explore: { steps: 4, description: 'other agent' },
+    },
+  };
+  const harness = new AgentHarness({
+    getPermissions: () => ({ maxToolRoundsPerBeat: 25 }),
+    opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify(inherited) },
+    spawnFn: (_cmd, _args, options) => { captured = options.env; return fakeProcess([{ type: 'text', part: { text: 'OK' } }]); },
+  });
+  await harness._runClaude('heartbeat', 'opencode/selected-model');
+  const config = JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
+  assert.equal(config.default_agent, 'trader');
+  assert.equal(config.agent.trader.steps, 25);
+  assert.equal(config.agent.trader.description, 'primary');
+  assert.equal(config.agent.trader.model, 'opencode/selected-model');
+  assert.equal(config.agent.explore.steps, 4);
+  assert.equal(config.agent.explore.description, 'other agent');
+  assert.equal(config.agent.explore.model, undefined);
+
+  const tighter = new AgentHarness({
+    getPermissions: () => ({ maxToolRoundsPerBeat: 25 }),
+    opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ default_agent: 'build', agent: { build: { steps: 7 }, explore: { steps: 3 } } }) },
+    spawnFn: (_cmd, _args, options) => { captured = options.env; return fakeProcess([{ type: 'text', part: { text: 'OK' } }]); },
+  });
+  await tighter._runClaude('heartbeat', 'opencode/selected-model');
+  const tighterConfig = JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
+  assert.equal(tighterConfig.agent.build.steps, 7);
+  assert.equal(tighterConfig.agent.explore.steps, 3);
+});
+
+test('native budget honors deprecated primary maxSteps and rejects invalid inherited caps', async () => {
+  let captured;
+  const legacy = new AgentHarness({
+    getPermissions: () => ({ maxToolRoundsPerBeat: 25 }),
+    opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ default_agent: 'trader', model: 'preserve/model', agent: { trader: { maxSteps: 8 }, explore: { maxSteps: 3 } } }) },
+    spawnFn: (_cmd, _args, options) => { captured = options.env; return fakeProcess([{ type: 'text', part: { text: 'OK' } }]); },
+  });
+  await legacy._runClaude('heartbeat', 'opencode/selected-model');
+  const config = JSON.parse(captured.OPENCODE_CONFIG_CONTENT);
+  assert.equal(config.default_agent, 'trader');
+  assert.equal(config.model, 'opencode/selected-model');
+  assert.equal(config.agent.trader.steps, 8);
+  assert.equal(config.agent.trader.maxSteps, undefined);
+  assert.equal(config.agent.explore.maxSteps, 3);
+
+  for (const bad of [0, -1, '8', 2.5]) {
+    let spawned = false;
+    const invalid = new AgentHarness({
+      getPermissions: () => ({ maxToolRoundsPerBeat: 25 }),
+      opencodeEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { build: { steps: 12, maxSteps: bad } } }) },
+      spawnFn: () => { spawned = true; return fakeProcess([]); },
+    });
+    await assert.rejects(invalid._runClaude('heartbeat', 'opencode/selected-model'), /Invalid OpenCode configuration/);
+    assert.equal(spawned, false);
+  }
 });
 
 test('empty order output with separate MCP error remains a zero-fill rejection in handler telemetry', () => {

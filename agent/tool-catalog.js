@@ -30,14 +30,26 @@ export const HERALD_TOOL_CATALOG = Object.fromEntries(
 // Render a catalog as the `**Category**: tool, tool` block used in prompts.
 export function renderToolMenu(options = {}) {
   const catalog = options.scope === 'herald' ? HERALD_TOOL_CATALOG : TOOL_CATALOG;
+  const hidden = new Set(['update_permissions']);
+  if (options.heartbeatIntervalsForced) {
+    for (const tool of ['set_heartbeat', 'apply_heartbeat_profile', 'update_heartbeat_phase']) hidden.add(tool);
+  }
   return Object.entries(catalog)
+    .map(([category, tools]) => [category, tools.filter(tool => !hidden.has(tool))])
+    .filter(([, tools]) => tools.length)
     .map(([category, tools]) => `**${category}**: ${tools.join(', ')}`)
     .join('\n');
 }
 
 export function renderPrefixedToolMenu(options = {}) {
   const catalog = options.scope === 'herald' ? HERALD_TOOL_CATALOG : TOOL_CATALOG;
+  const hidden = new Set(['update_permissions']);
+  if (options.heartbeatIntervalsForced) {
+    for (const tool of ['set_heartbeat', 'apply_heartbeat_profile', 'update_heartbeat_phase']) hidden.add(tool);
+  }
   return Object.entries(catalog)
+    .map(([category, tools]) => [category, tools.filter(tool => !hidden.has(tool))])
+    .filter(([, tools]) => tools.length)
     .map(([category, tools]) => `**${category}**: ${tools.map(tool => `prophet_${tool}`).join(', ')}`)
     .join('\n');
 }

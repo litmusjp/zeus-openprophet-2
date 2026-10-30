@@ -349,10 +349,10 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
 
   // Layer 3: System Instructions (tools, heartbeat, operational)
   const alphaDeskGuidance = scopedWorkflowPresent
-    ? `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2, the current heartbeat USER input carries OP2 confirmation and the freshly read managed lock, scope and revision; either ON or unknown blocks new options entries. For an eligible unchanged single-leg proposal, prefer one guarded \`prophet_place_options_order\` call; the backend independently obtains and enforces a fresh genuine PASS before broker submission. Standalone \`prophet_assess_options_trade\` is optional research, not a prerequisite. Indicative/testing-only evidence is admissible for this paper-advisory workflow. Missing OI is unknown, not zero; latest-trade size is not daily volume. Backend, account, paper, identity, permission, market, risk and reconciliation checks remain mandatory.`
-    : `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, first honor the current heartbeat USER input: either OP2 confirmation or the freshly read managed review lock ON or unknown blocks new options entries. For an eligible affordable candidate, call \`prophet_assess_options_trade\` for the exact proposal. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. Submit only exact contract legs, quantity and proposed limit price; the service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. On genuine PASS for an unchanged proposal, prefer one \`prophet_place_options_order\` call; the backend independently reassesses the exact proposal at the final broker boundary and may still reject it after fresh account, paper, identity, permission, market, risk and reconciliation checks. Standalone assessment is optional research. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Never blindly retry an uncertain submission or sequence spread legs. Acknowledgement is not a fill.
-In PAPER_ADVISORY_OP2, provider \`indicative/testing_only\` quotes are permitted for this paper-advisory assessment and do not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI: assessment obtains its own reference evidence. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; genuine FAIL or UNAVAILABLE blocks opening, and the broker boundary retains fresh server-side assessment.
-For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capacity should seek qualifying opportunities under the assigned strategy and current controls, including while holding positions and after exits. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion. Genuine FAIL or UNAVAILABLE blocks that opening proposal; all existing market, account, permission, risk, and reconciliation controls remain in force.`;
+    ? `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2, the current heartbeat USER input carries OP2 confirmation and the freshly read managed lock, scope and revision; either ON or unknown blocks new options entries. For an eligible unchanged single-leg proposal, prefer one guarded \`prophet_place_options_order\` call; the backend independently obtains and enforces a fresh genuine PASS before broker submission, then revalidates at the final broker boundary. Standalone \`prophet_assess_options_trade\` is optional research, not a prerequisite. Indicative/testing-only evidence is admissible for this paper-advisory assessment. Missing OI is unknown, not zero; latest-trade size is not daily volume. Backend, account, paper, identity, permission, market, risk and reconciliation checks remain mandatory.`
+    : `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, first honor the current heartbeat USER input: either OP2 confirmation or the freshly read managed review lock ON or unknown blocks new options entries. For an eligible proposal, prefer one guarded \`prophet_place_options_order\` call; the backend independently obtains and enforces a fresh genuine PASS before broker submission. Standalone \`prophet_assess_options_trade\` is optional research, not a prerequisite. If used, assessment must be for the exact proposal; only a genuine PASS for unchanged contract legs, quantity and proposed limit price is usable. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. The service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. The backend independently reassesses the exact proposal at the final broker boundary after fresh account, paper, identity, permission, market, risk and reconciliation checks. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Never blindly retry an uncertain submission or sequence spread legs. Acknowledgement is not a fill.
+In PAPER_ADVISORY_OP2, indicative/testing_only evidence is permitted for this paper-advisory assessment and does not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; the broker boundary retains fresh server-side assessment.
+For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capacity should seek qualifying opportunities under the assigned strategy and current controls, including while holding positions and after exits. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion. Genuine FAIL or UNAVAILABLE blocks that opening proposal; all existing market, account, permission, risk and reconciliation controls remain in force.`;
   const alphaDeskBudgetGuidance = '- `prophet_get_options_assessment_policy` is optional affordability research. When a valid POLICY_ONLY response is available, estimate the maximum affordable premium as max_investment_per_candidate divided by (quantity * standard contract multiplier) and keep quantity within maximum_contracts_per_candidate; an unavailable lookup is not a separate entry gate. The guarded order backend obtains and enforces current policy and account capacity. This lookup is neither PASS nor execution authority.';
   const scopedDiscoveryGuidance = scopedWorkflowPresent
     ? `\n- On each normal entry-eligible regular-session heartbeat, seek qualifying opportunities within this agent's assigned strategy and settings-owned capacity, including while holding positions and after exits. Use the existing heartbeat and tool budget. Refresh relevant evidence, obtain fresh exact-contract evidence and genuine AlphaDesk PASS before entry when required, and honor strategy windows, permissions, capacity and all hard gates. Never blindly retry an uncertain order.`
@@ -362,11 +362,11 @@ For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session he
   const riskDisciplineGuidance = '- Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits. Never work around them.';
   const systemInstructions = `## Available Tools
 
-${renderPrefixedToolMenu(heraldWorkflowActive ? { scope: 'herald' } : {})}
+${renderPrefixedToolMenu({ ...(heraldWorkflowActive ? { scope: 'herald' } : {}), heartbeatIntervalsForced })}
 
-OpenCode registers the OpenProphet MCP server as \`prophet\`. Call these tools with their exact registered names using the \`prophet_\` prefix (for example, \`prophet_get_datetime\`, \`prophet_get_account\`, and \`prophet_get_positions\`). Do not emit the unprefixed logical names as text.
+OpenCode registers the OpenProphet MCP server as \`prophet\`. Call these tools with their exact registered names using the \`prophet_\` prefix (for example, \`prophet_get_datetime\`, \`prophet_get_account\`, and \`prophet_get_positions\`). Do not emit the unprefixed logical names as text. Stock order availability follows the configured permissions; underlying research and options workflows have their own controls.
 
-Use current-state tools for facts that can change and fetch only relevant facts needed for the decision; do not call a tool for every sentence or repeat unchanged context within one heartbeat. Native OpenCode tools \`websearch\` and \`webfetch\` are separate from the \`prophet_\` MCP tools and may be used for non-broker research.
+Use current-state tools for facts that can change and fetch only relevant facts needed for the decision; do not call a tool for every sentence or repeat unchanged context within one heartbeat. Native OpenCode tools \`websearch\` and \`webfetch\` are separate from the \`prophet_\` MCP tools and may be used for non-broker research. The configured OpenCode \`steps\` budget limits model steps, not individual tool calls; the heartbeat wall-clock timeout is a separate limit.
 
 For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\` for current broker orders, then separately call \`prophet_get_orders(status="planned_for_next_session")\` and \`prophet_get_orders(status="submission_uncertain")\` so application intents and uncertain submissions remain visible. Do not repeatedly fetch all historical orders for orientation; use relevant history filters only when needed for outcome reconciliation. If a result is incomplete, fail closed. Work directly with the available MCP tools during the heartbeat; do not spawn native task or subagent workflows to summarize routine order history.
 
@@ -374,7 +374,7 @@ For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\`
 - Keep stock research and execution separate from the options-only AlphaDesk assessment path. An unavailable optional news or AI summary does not establish that AlphaDesk is down; use actual assessment reasons and normal alternative data tools.
 - Discover options from the option chain and verify the exact OCC contract with option quote evidence. An underlying stock quote is not an option price.
 - Standalone prophet_assess_options_trade is optional on-demand research, not a prerequisite. Prefer one guarded prophet_place_options_order call for the unchanged eligible proposal; the backend independently obtains and enforces a fresh genuine PASS before broker submission. Legacy prophet_assess_options_strategy accepts caller evidence and is not an interchangeable fallback.
-- Generate one stable client_order_id before assessment and use that exact value as client_reference. After PASS submit the unchanged contract, quantity, and limit (the same proposed limit price) using the same ID; never blindly retry an uncertain order.
+- If standalone assessment is used, generate one stable client_order_id before assessment and use that exact value as client_reference. After PASS, submit the unchanged contract, quantity, and limit (the same proposed limit price) with that same ID. Never blindly retry an uncertain order.
 - Assessment currently supports long calls, long puts, and same-expiry 1:1 directional debit verticals. Agent execution is single-leg only; never claim an unsupported spread was executed.
 ${noTestGuidance}
 - Do not use native shell or file tools to discover credentials, edit application/configuration files, or bypass broker controls. Use authorized MCP tools for trading.
@@ -387,12 +387,12 @@ Each time you wake, work through this loop using the current heartbeat and tool 
 Keep \`prophet_wait\` within its maximum of 30 seconds, and avoid repeated or multi-minute waits inside trading beats. If longer observation is needed, finish the current beat and rely on the existing next heartbeat; a wait does not schedule a new heartbeat.
 3. MANAGE — tend open positions under their strategy exits and risk controls; continue evaluating new qualifying entries whenever settings-owned capacity permits.
 4. GATHER — pull the specific intelligence needed for current position management and qualifying opportunities. Don't over-research.
-5. RECALL — before opening any NEW position, call \`prophet_find_similar_setups\` with your thesis. This is advisory: use only materially relevant matches and never invent a numeric similarity threshold.
+5. OPTIONAL RECALL — \`prophet_find_similar_setups\` is optional and advisory; use only materially relevant matches. An empty result, unavailable lookup or decision not to look up examples is not an entry gate.
 ${decideActGuidance}
 7. RECORD — call \`prophet_log_decision\` with the reasoning behind every trade; when a position closes, call \`prophet_store_trade_setup\` with the realized result so your memory compounds.
 
 ## Execution Contract (strict)
-- For options, reconcile with \`prophet_get_options_positions\`/\`prophet_get_options_position\`, then use \`prophet_get_options_chain\` for the exact underlying, expiry and call/put type without entry delta or minimum-bid filters; verify the same OCC contract's timestamped bid, ask and sizes. Missing quote evidence blocks entry: never invent a premium or treat \`position.current_price\` as executable. Before submitting an entry, use the existing \`prophet_log_decision\` and \`thesis\` fields to record an actual data-backed numerical invalidation/reference, whether its price basis is the underlying or option premium, and the applicable strategy time exit or explicitly state none; do not invent a level. An underlying-based invalidation does not cap option-premium drawdown, and current tools provide no broker-held continuous options stop. Managed-position tools are equities-only. Open long options with \`buy_to_open\`; close with \`sell_to_close\` on the same OCC symbol and actual broker-reconciled remaining quantity. Reconcile active and uncertain entry/exit orders; never retry uncertain submissions. After an exit, reconcile order fills and options positions. An accepted order is not a fill, a single-position 404 means no open position was found (not a confirmed closure), and a position is not closed until broker reconciliation confirms zero remaining contracts after broker-confirmed fills. Record exit thesis, stop, target and expiry using existing history and strategy. Broker-held option stops/OCO are unavailable with the current market/limit-only tool. FAIL or UNAVAILABLE blocks new exposure but does not require AlphaDesk approval to reduce a long option; backend controls still apply.
+- For options, reconcile with \`prophet_get_options_positions\`/\`prophet_get_options_position\`, then use \`prophet_get_options_chain\` for the exact underlying, expiry and call/put type without entry delta or minimum-bid filters; verify the same OCC contract's timestamped bid, ask and sizes. Missing quote evidence blocks entry: never invent a premium or treat \`position.current_price\` as executable. Before submitting an entry, use the existing \`prophet_log_decision\` and \`thesis\` fields to record an actual data-backed numerical invalidation/reference, whether its price basis is the underlying or option premium, and the applicable strategy time exit or explicitly state none; do not invent a level. An underlying-based invalidation does not cap option-premium drawdown, and current tools provide no broker-held continuous options stop. Managed-position tools are equities-only. Open long options with \`buy_to_open\`; close with \`sell_to_close\` on the same OCC symbol and actual broker-reconciled remaining quantity. Reconcile active and uncertain entry/exit orders; never retry uncertain submissions. After an exit, reconcile order fills and options positions. An accepted order is not a fill, a single-position 404 means no open position was found (not a confirmed closure), and a position is not closed until broker reconciliation confirms zero remaining contracts after broker-confirmed fills. Record exit thesis, any applicable stop or target, and expiry using existing history and strategy. Broker-held option stops/OCO are unavailable with the current market/limit-only tool. FAIL or UNAVAILABLE blocks new exposure but does not require AlphaDesk approval to reduce a long option; backend controls still apply.
 - Every NEW direct buy/sell/options or managed-entry intent must include a fresh caller-generated \`client_order_id\`. For options that require assessment, the assessment and its unchanged first submission after PASS are one intent: generate a fresh \`client_order_id\` before assessment, pass it as \`client_reference\`, and use the same ID for the first submission; this first submission is not a retry. Reuse an ID after a prior submission ONLY with unchanged immutable fields for an eligible persisted planned retry after complete reconciliation; an uncertain submission requires broker reconciliation and must never be blindly retried. Managed exits use their persisted per-position identity.
 - Every options submission is checked against the broker-authoritative regular-session clock immediately before the broker call. A closed-session response is saved as \`planned_for_next_session\`; it is an application intent, NOT a broker order.
 - A written plan, intention, watchlist item, or statement that you "will place" a trade is NOT an order and must never be reported as queued, submitted, or placed unless the tool returns the explicit planned status.
@@ -408,12 +408,10 @@ ${alphaDeskBudgetGuidance}
 - A managed position requires exactly one executable leg: one stop loss OR one take profit OR one supported partial-exit leg. Durable OCO is unavailable; do not send stop loss and take profit concurrently.
 - Stale MarketWatch items are informational only and never current market evidence.
 
-## Phase Playbook (ET)
-- Pre-market (4–9:30): gather intelligence, build a watchlist and theses. Don't chase thin pre-market prints.
-- Market open (9:30–10:30): execute planned entries into real liquidity; monitor closely.
-- Midday (10:30–3): manage positions, tighten stops, avoid low-conviction churn.
-- Market close (3–4): decide what to hold overnight vs. flatten, and act before the bell.
-- After hours (4–8) / Closed: review, log, and plan. No impulsive after-hours trades.
+## Phase Context (ET)
+- Pre-market (4–9:30), after hours (4–8), and Closed are outside the regular-session options execution window; research and planning remain available.
+- During the regular session, evaluate entries and manage positions under assigned strategies, recorded plans, permissions and existing controls. The phase does not add a trade, target or stop rule.
+- Completed qualifying prior bars remain usable. Do not assume or add a strategy bar timeframe. The assigned strategy and recorded plan control exit conditions and timing; confirm daily-close conditions only at daily close.
 ${heartbeatIntervalsForced
     ? '- HEARTBEAT GUARDRAIL: The operator has forced the configured heartbeat intervals. Heartbeat mutation tools are operator-controlled and forbidden; Do not call apply_heartbeat_profile or set_heartbeat (or update_heartbeat_phase).'
     : 'Tune cadence with apply_heartbeat_profile or set_heartbeat (seconds). Settings are the required baseline. Do not change them just for preference: after two completed market sessions, only call set_heartbeat if the configured interval is materially impairing your work, and include a specific explanation of the problem and evidence. Use force=true only for an urgent, strongly justified market condition.'}
@@ -424,7 +422,7 @@ ${riskDisciplineGuidance}
 - daily loss is derived from current broker account/P&L state, not from a dedicated status tool.
 - Always use limit orders; never market into a position you can't price.
 - Size for survival: respect max-position and max-deployed limits and keep dry powder.
-- Every open position needs a pre-defined exit (stop and target). Cut losers at your stop without negotiation.
+- The assigned strategy and recorded trade plan control exits, including whether a target or stop applies and the confirmation timeframe. Do not invent a target, tighten a stop, or advance a strategy exit trigger without support in that plan. Honor all existing risk controls and reducing-exit safeguards.
 - One clear thesis per trade. If you can't state it in a sentence, don't take it.
 
 ## Operating Rules
@@ -973,7 +971,7 @@ The user/operator is sending you a direct message. Read it carefully and respond
 
 ## Your Available Tools (DO NOT call get_agent_config to discover these)
 
-${renderPrefixedToolMenu(isOwnedHeraldWorkflow(this._agentConfig) ? { scope: 'herald' } : {})}
+${renderPrefixedToolMenu({ ...(isOwnedHeraldWorkflow(this._agentConfig) ? { scope: 'herald' } : {}), heartbeatIntervalsForced: this.isHeartbeatIntervalsForced() })}
 
 ## Instructions
 - If the user asks to create a new agent: use create_agent to create it, then optionally create_strategy for its rules, then assign_agent_to_sandbox to activate it.
@@ -1263,7 +1261,7 @@ ${userBlock}`;
 
       // Check max tool rounds from permissions
       const perms = this._resolvePermissions();
-      const maxToolRounds = perms.maxToolRoundsPerBeat || DEFAULT_MAX_TOOL_ROUNDS;
+      const nativeStepBudget = perms.maxToolRoundsPerBeat || DEFAULT_MAX_TOOL_ROUNDS;
 
       const args = [
         'run',
@@ -1301,6 +1299,7 @@ ${userBlock}`;
         const object = value => value && typeof value === 'object' && !Array.isArray(value);
         if (!object(inherited) || (inherited.agent !== undefined && !object(inherited.agent))) throw new Error();
         for (const value of Object.values(inherited.agent || {})) if (!object(value)) throw new Error();
+        if (inherited.default_agent !== undefined && (typeof inherited.default_agent !== 'string' || !inherited.default_agent.trim())) throw new Error();
         const slash = ocModel.indexOf('/');
         const selectedProvider = slash < 0 ? '' : ocModel.slice(0, slash);
         const selectedModel = slash < 0 ? '' : ocModel.slice(slash + 1);
@@ -1353,6 +1352,16 @@ ${userBlock}`;
       }
       const agents = Object.fromEntries(Object.entries(inherited.agent || {}).map(([name, value]) => [name, { ...value, ...(value.model !== undefined ? { model: ocModel } : {}) }]));
       for (const name of ['title', 'summary', 'compaction']) agents[name] = { ...agents[name], model: ocModel };
+      const primaryAgentName = inherited.default_agent || 'build';
+      const primaryAgent = agents[primaryAgentName] ||= {};
+      const inheritedStepCaps = [primaryAgent.steps, primaryAgent.maxSteps].filter(value => value !== undefined);
+      if (inheritedStepCaps.some(value => !Number.isSafeInteger(value) || value <= 0)) {
+        throw new Error('Invalid OpenCode configuration; provider invocation blocked');
+      }
+      // Native steps bound model steps for the selected default agent, not individual tool calls.
+      // Keep the strongest inherited cap across both aliases and leave other agents alone.
+      primaryAgent.steps = Math.min(nativeStepBudget, ...inheritedStepCaps);
+      delete primaryAgent.maxSteps;
       invocationEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inherited, model: ocModel, small_model: ocModel, agent: agents });
 
       const proc = this.spawnFn('opencode', args, {
@@ -1361,6 +1370,7 @@ ${userBlock}`;
           ...invocationEnv,
           OPENPROPHET_SANDBOX_ID: this.sandboxId || '',
           OPENPROPHET_ACCOUNT_ID: this.state.activeAccountId || this.accountId || '',
+          OPENPROPHET_HEARTBEAT_INTERVALS_FORCED: this.isHeartbeatIntervalsForced() ? 'true' : 'false',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });

@@ -39,6 +39,57 @@ test('scoped Pendulum and Surge prompts seek strategy-qualified entries within c
   }
 });
 
+test('shared instructions leave exits with assigned strategy and make assessment and memory research optional', async () => {
+  const prompt = await buildSystemPrompt({
+    id: 'mean-reversion', sandboxId: 'sbx_956ff9e4', name: 'Pendulum', systemPromptTemplate: 'custom', strategyId: 'saved-rules',
+    customSystemPrompt: 'Saved Pendulum identity.',
+  }, { getStrategyById: () => ({ customRules: 'UNCHANGED STRATEGY: completed breakout bars; strategy exits.' }) });
+  assert.match(prompt, /UNCHANGED STRATEGY: completed breakout bars; strategy exits/);
+  assert.match(prompt, /Completed qualifying prior bars remain usable/);
+  assert.match(prompt, /steps.*limits model steps, not individual tool calls.*heartbeat wall-clock timeout is a separate limit/i);
+  assert.match(prompt, /Do not assume or add a strategy bar timeframe/);
+  assert.match(prompt, /strategy and recorded plan control exit conditions and timing/);
+  assert.match(prompt, /Standalone `prophet_assess_options_trade` is optional research, not a prerequisite/);
+  assert.match(prompt, /OPTIONAL RECALL/);
+  assert.match(prompt, /empty result, unavailable lookup or decision not to look up examples is not an entry gate/);
+  assert.match(prompt, /Stock order availability follows the configured permissions; underlying research and options workflows have their own controls/);
+  assert.doesNotMatch(prompt, /Every open position needs a pre-defined exit \(stop and target\)|tighten stops|act before the bell/i);
+  assert.doesNotMatch(prompt, /before opening any NEW position, call `prophet_find_similar_setups`/i);
+  assert.doesNotMatch(prompt, /call `prophet_assess_options_trade` for the exact proposal/);
+});
+
+test('forced cadence filtering preserves operator tool visibility', async () => {
+  const { spawn } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const child = spawn(process.execPath, ['mcp-server.js'], {
+    cwd: new URL('..', import.meta.url),
+    env: { ...process.env, OPENPROPHET_ROLE: 'operator', OPENPROPHET_HEARTBEAT_INTERVALS_FORCED: 'true' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.resume();
+  child.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n');
+  child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+  child.stdin.write('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n');
+  await new Promise(resolve => {
+    const timer = setTimeout(resolve, 3000);
+    child.stdout.on('data', () => {
+      if (stdout.includes('"id":2')) { clearTimeout(timer); resolve(); }
+    });
+  });
+  const closed = once(child, 'close');
+  child.kill();
+  await closed;
+  const listing = stdout.split('\n').filter(Boolean).map(line => JSON.parse(line)).find(message => message.id === 2);
+  assert.ok(listing, 'MCP tools/list response received');
+  const names = listing.result.tools.map(tool => tool.name);
+  for (const name of ['update_permissions', 'set_heartbeat', 'apply_heartbeat_profile', 'update_heartbeat_phase']) assert.ok(names.includes(name), `${name} remains visible to operators`);
+  assert.ok(names.includes('analyze_stocks'));
+  assert.ok(names.includes('get_options_chain'));
+});
+
 test('legacy multi-session markers do not override strategy, settings, or provider controls', async () => {
   const marker = '### ALPHA_MVP_MODE: MULTI_SESSION';
   const build = (sandboxId, id, body = marker, workflow = true) => buildSystemPrompt({

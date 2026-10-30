@@ -49,6 +49,7 @@ test('shared instructions leave exits with assigned strategy and make assessment
   assert.match(prompt, /steps.*limits model steps, not individual tool calls.*heartbeat wall-clock timeout is a separate limit/i);
   assert.match(prompt, /Do not assume or add a strategy bar timeframe/);
   assert.match(prompt, /strategy and recorded plan control exit conditions and timing/);
+  assert.doesNotMatch(prompt, /confirm daily-close conditions only at daily close/i);
   assert.match(prompt, /Standalone `prophet_assess_options_trade` is optional research, not a prerequisite/);
   assert.match(prompt, /OPTIONAL RECALL/);
   assert.match(prompt, /empty result, unavailable lookup or decision not to look up examples is not an entry gate/);

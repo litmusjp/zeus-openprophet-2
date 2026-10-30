@@ -411,7 +411,7 @@ ${alphaDeskBudgetGuidance}
 ## Phase Context (ET)
 - Pre-market (4–9:30), after hours (4–8), and Closed are outside the regular-session options execution window; research and planning remain available.
 - During the regular session, evaluate entries and manage positions under assigned strategies, recorded plans, permissions and existing controls. The phase does not add a trade, target or stop rule.
-- Completed qualifying prior bars remain usable. Do not assume or add a strategy bar timeframe. The assigned strategy and recorded plan control exit conditions and timing; confirm daily-close conditions only at daily close.
+- Completed qualifying prior bars remain usable. Do not assume or add a strategy bar timeframe. The assigned strategy and recorded plan control exit conditions and timing.
 ${heartbeatIntervalsForced
     ? '- HEARTBEAT GUARDRAIL: The operator has forced the configured heartbeat intervals. Heartbeat mutation tools are operator-controlled and forbidden; Do not call apply_heartbeat_profile or set_heartbeat (or update_heartbeat_phase).'
     : 'Tune cadence with apply_heartbeat_profile or set_heartbeat (seconds). Settings are the required baseline. Do not change them just for preference: after two completed market sessions, only call set_heartbeat if the configured interval is materially impairing your work, and include a specific explanation of the problem and evidence. Use force=true only for an urgent, strongly justified market condition.'}

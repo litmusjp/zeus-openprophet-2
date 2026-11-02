@@ -87,6 +87,13 @@ test('previews resolve identity and strategy per sandbox while sharing system in
   assert.match(l2Shared, /indicative\/testing_only.*permitted for this paper-advisory assessment/i);
   assert.match(l2Shared, /Missing OI is unknown, not zero; latest-trade size is not daily volume/i);
   assert.match(l2Shared, /seek qualifying opportunities under the assigned strategy and current controls/i);
+  assert.match(l2Shared, /held-position review does not complete assigned-strategy opportunity evaluation/i);
+  assert.match(l2Shared, /Distinguish an evaluated no-setup, a concrete control or data block, and incomplete research/i);
+  assert.match(l2Shared, /A stale or nonmarketable exit limit is not a reason to preserve its ID/i);
+  assert.match(l2Shared, /withdraw that local plan, then create one fresh intent with a new ID/i);
+  assert.match(l2Shared, /If attempted, broker-visible or uncertain, reconcile; never replace or blindly retry it/i);
+  assert.match(l2Shared, /Your Strategy Rules above and the per-heartbeat GUARDRAILS are HARD limits/i);
+  assert.match(l2Prompt, /Pendulum strategy rules/);
   assert.match(l2Shared, /recoverable feed\/data objection.*not an all-day no-setup conclusion/i);
   assert.match(l2Shared, /For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat/i);
   assert.match(l2Shared, /prophet_get_options_assessment_policy.*optional affordability research.*backend obtains and enforces current policy/i);

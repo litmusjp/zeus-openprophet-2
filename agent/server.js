@@ -15,6 +15,7 @@ import { testAlphaDeskAssessmentCapability } from './alphadesk-connection.js';
 
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
+import { DEFAULT_TRADING_GUIDANCE, loadTradingGuidance, getTradingGuidanceForSandbox, setTradingGuidanceForSandbox } from './trading-guidance.js';
 import { buildTradeLedger } from './trade-ledger.js';
 import { loadOrderActorMap, resolveOrderActor } from './history-attribution.js';
 import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
@@ -405,6 +406,7 @@ if (EXECUTION_START_ENABLED) {
   await import('dotenv/config');
 }
 await loadConfig();
+await loadTradingGuidance();
 const initialActiveAccount = getActiveAccount();
 if (EXECUTION_START_ENABLED && initialActiveAccount?.id) {
   const migration = await migrateLegacyDataForSandbox(getActiveSandbox()?.id || `sbx_${initialActiveAccount.id}`, initialActiveAccount.id);
@@ -1480,6 +1482,7 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
     const prompt = await buildSystemPrompt(agentConfig, {
       getStrategyById,
       heartbeatIntervalsForced: Boolean(getSandbox(sandboxId)?.heartbeat?.forceHeartbeatIntervals),
+      tradingGuidance: getTradingGuidanceForSandbox(sandboxId),
     });
     res.json({ prompt, agentId: agentConfig.id, agentName: agentConfig.name, sandboxId });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -1914,6 +1917,23 @@ app.put('/api/permissions', operatorAuthMiddleware, async (req, res) => {
     }
     broadcast('config', safeConfig());
     res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// ── Trading guidance (prompt-only reading of the strategy rules; never changes risk limits) ──
+app.get('/api/trading-guidance', (req, res) => {
+  const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : getActiveSandbox()?.id;
+  if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
+  res.json({ sandboxId, guidance: getTradingGuidanceForSandbox(sandboxId), defaults: DEFAULT_TRADING_GUIDANCE });
+});
+
+app.put('/api/trading-guidance', operatorAuthMiddleware, async (req, res) => {
+  try {
+    const { sandboxId, ...patch } = req.body || {};
+    if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
+    const guidance = await setTradingGuidanceForSandbox(sandboxId, patch);
+    await refreshHarnessConfigForSandbox(sandboxId, { resetSession: true });
+    res.json({ ok: true, sandboxId, guidance });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 

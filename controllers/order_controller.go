@@ -1447,8 +1447,13 @@ func (oc *OrderController) HandleGetQuote(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	// The last print is a better price reference than a sparse IEX top-of-book quote; it is optional.
+	trade, tradeErr := oc.dataService.GetLatestTrade(ctx, symbol)
+	if tradeErr != nil {
+		trade = nil
+	}
 
-	c.JSON(200, quote)
+	c.JSON(200, buildQuoteResponse(quote, trade, time.Now()))
 }
 
 // HandleGetBar handles HTTP get latest bar requests
@@ -1546,7 +1551,7 @@ func (oc *OrderController) HandleGetBars(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	bars, err := oc.dataService.GetHistoricalBars(ctx, symbol, start, end, timeframe)
+	bars, feed, err := historicalBarsWithFeed(ctx, oc.dataService, symbol, start, end, timeframe)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
@@ -1559,11 +1564,11 @@ func (oc *OrderController) HandleGetBars(c *gin.Context) {
 		"timeframe": timeframe,
 		"count":     len(bars),
 		"bars":      bars,
-		"feed":      "iex",
+		"feed":      feed,
 	}
 	if annotated, ok := services.AnnotateBarCompleteness(bars, timeframe, now, loc); ok {
 		resp["bars"] = annotated
-		resp["completeness_note"] = "complete=false marks a bar still forming at response time; a daily bar completes at the 16:00 New York close. Volume is IEX-feed volume, not consolidated."
+		resp["completeness_note"] = "complete=false marks a bar still forming at response time; a daily bar completes at the 16:00 New York close. " + volumeBasisNote(feed)
 	}
 	c.JSON(200, resp)
 }

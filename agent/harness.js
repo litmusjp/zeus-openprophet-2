@@ -7,7 +7,8 @@ import path from 'path';
 import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelVerified } from './chatgpt-oauth.js';
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
-import { compactHistoricalBars } from './audit-capture.js';
+import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
+import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, getTradingGuidanceForSandbox } from './trading-guidance.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
 import { nextMarketReview, marketSession, marketSessionPhase, validateMarketCalendar } from './market-aware-scheduler.js';
@@ -292,8 +293,20 @@ function normalizeLegacyWorkflowSize(prompt, enabled) {
   });
 }
 
+/**
+ * True when the model process died before it made any tool call, so nothing was started and the
+ * whole beat can safely be run once more. Timeouts and any beat that already used a tool never qualify.
+ */
+export function isEarlyOpenCodeCrash(result) {
+  return Boolean(result?.error)
+    && /^opencode exited with code \d+/.test(String(result.error))
+    && !(Number(result.toolCalls) > 0)
+    && !(Array.isArray(result.toolEvents) && result.toolEvents.length > 0);
+}
+
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
+  const guidance = normalizeTradingGuidance(options.tradingGuidance || DEFAULT_TRADING_GUIDANCE);
   const scopedPromptOwner = {
     sbx_723be98b: ['catalyst', 'mean-reversion'],
     sbx_956ff9e4: ['mean-reversion', 'momentum'],
@@ -355,7 +368,7 @@ You are evidence-based, risk-first, and decisive. You do not trade out of boredo
     : `- AlphaDesk applies to options only. In PAPER_ADVISORY_OP2 mode, when its gate is enabled, first honor the current heartbeat USER input: either OP2 confirmation or the freshly read managed review lock ON or unknown blocks new options entries. For an eligible proposal, prefer one guarded \`prophet_place_options_order\` call; the backend independently obtains and enforces a fresh genuine PASS before broker submission. Standalone \`prophet_assess_options_trade\` is optional research, not a prerequisite. If used, assessment must be for the exact proposal; only a genuine PASS for unchanged contract legs, quantity and proposed limit price is usable. Decision is PASS, FAIL or UNAVAILABLE; signal scores are nullable provider-owned evidence, never caller-invented. The service obtains evidence on demand without scanner/watchlist membership. Missing or stale quotes, a closed market, provider failure or identity mismatch can make assessment UNAVAILABLE. FAIL or UNAVAILABLE blocks this opening candidate; skip it and continue other work. The backend independently reassesses the exact proposal at the final broker boundary after fresh account, paper, identity, permission, market, risk and reconciliation checks. Assessment PASS is trade-quality evidence only, never account permission or broker authorization. Never blindly retry an uncertain submission or sequence spread legs. Acknowledgement is not a fill.
 In PAPER_ADVISORY_OP2, indicative/testing_only evidence is permitted for this paper-advisory assessment and does not claim live quality. Missing OI is unknown, not zero; latest-trade size is not daily volume. Do not reject a strategy-valid proposal solely for that feed label or missing chain OI. Exact fresh OCC bid/ask/depth and all strategy/risk checks remain required; the broker boundary retains fresh server-side assessment.
 For PAPER_ADVISORY_OP2 options discovery, each entry-eligible regular-session heartbeat with available capacity should seek qualifying opportunities under the assigned strategy and current controls, including while holding positions and after exits. A recoverable feed/data objection from an earlier beat is not an all-day no-setup conclusion. Genuine FAIL or UNAVAILABLE blocks that opening proposal; all existing market, account, permission, risk and reconciliation controls remain in force.`;
-  const alphaDeskBudgetGuidance = '- `prophet_get_options_assessment_policy` is optional affordability research and returns POLICY_ONLY metadata, never PASS or execution authority. Any max_investment_per_candidate or maximum_contracts_per_candidate it reports is informational: OP2 account limits (max position, max deployed, open positions, daily loss) govern size. The guarded order backend obtains and enforces current policy and account capacity. Pick the strike and expiry so the premium fits the sizing rule below.';
+  const alphaDeskBudgetGuidance = '- `prophet_get_options_assessment_policy` is optional affordability research and returns POLICY_ONLY metadata, never PASS or execution authority. Any max_investment_per_candidate or maximum_contracts_per_candidate it reports is informational: OP2 account limits (max position, max deployed, open positions, daily loss) govern size. The guarded order backend obtains and enforces current policy and account capacity. Never use a figure from this tool as a position budget or as max_cost. Pick the strike and expiry from the Trading Guidance, then size by the rule below.';
   const scopedDiscoveryGuidance = scopedWorkflowPresent
     ? `\n- On each normal entry-eligible regular-session heartbeat, seek qualifying opportunities within this agent's assigned strategy and settings-owned capacity, including while holding positions and after exits. Use the existing heartbeat and tool budget. Refresh relevant evidence, obtain fresh exact-contract evidence and genuine AlphaDesk PASS before entry when required, and honor strategy windows, permissions, capacity and all hard gates. Never blindly retry an uncertain order.`
     : '';
@@ -423,18 +436,18 @@ ${riskDisciplineGuidance}
 - maxOrderValue=0 means there is no single-order dollar cap; it does not disable trading and is not an order blocker. A positive maxOrderValue is the only time the dollar cap applies. All other configured risk limits and permission flags still apply.
 - daily loss is derived from current broker account/P&L state, not from a dedicated status tool.
 - Always use limit orders; never market into a position you can't price.
-- Size for survival: respect max-position and max-deployed limits and keep dry powder. Size each new entry at no less than 5% of current account equity in option premium (limit price x contracts x 100), rounded to whole contracts, and never above the max-position limit; it must also fit remaining max-deployed, max-open-position and daily-loss capacity. If one contract alone exceeds the max-position limit, or remaining capacity is below 5%, skip the entry and report the reason. Account limits, not AlphaDesk, govern size.
+- Size for survival: respect max-position and max-deployed limits and keep dry powder. Size each new entry at no less than ${guidance.minEntryPct}% of current account equity in option premium (limit price x contracts x 100), rounded to whole contracts, and never above the max-position limit; it must also fit remaining max-deployed, max-open-position and daily-loss capacity. If one contract alone exceeds the max-position limit, or remaining capacity is below 5%, skip the entry and report the reason. Account limits, not AlphaDesk, govern size.
 - The assigned strategy and recorded trade plan control exits, including whether a target or stop applies and the confirmation timeframe. Do not invent a target, tighten a stop, or advance a strategy exit trigger without support in that plan. Honor all existing risk controls and reducing-exit safeguards.
 - One clear thesis per trade. If you can't state it in a sentence, don't take it.
 
 ## Operating Rules
 - You are autonomous for permitted actions. If requireConfirmation blocks an order, stop and report that operator approval is required; do not retry or work around the guardrail.
 - Be decisive. When nothing qualifies, report NO_SETUP, DATA_BLOCK or INCOMPLETE_RESEARCH per symbol group in a line or two; a scan that skipped candidates is INCOMPLETE_RESEARCH, not NO_SETUP.
-- Daily-bar facts only change after each close. Scan the strategy universe on completed daily bars after the close or before the open (record next-session candidates with \`prophet_log_decision\`, action "WATCHLIST": symbol, trigger level, invalidation, expiry window), then during the session act on WATCHLIST triggers, refresh exact option evidence, and manage positions; do not re-fetch unchanged daily history every beat.
+- Daily-bar facts only change after each close. Scan the strategy universe on completed daily bars after the close or before the open (record next-session candidates with \`prophet_log_decision\`, action "WATCHLIST": symbol, trigger level, invalidation, expiry window), then during the session act on WATCHLIST triggers, refresh exact option evidence, and manage positions; do not re-fetch unchanged daily history every beat. When you are flat, nothing is pending and you hold no WATCHLIST candidate, do not poll bars that are still forming (they cannot satisfy a completed-bar rule): reconcile, record the outcome and end the beat. For every symbol that cleared a recent high or looked like a candidate but was rejected, record the single number that failed (for example its volume ratio, extension or average slope) in the decision log.
 - Re-establish live state (positions, orders, prices, quotes) from tools every beat. Prior-session context and your WATCHLIST records are for continuity only; verify them against live data before acting.
 - Report what you did (or deliberately didn't) and why, concisely.`;
 
-  return `${identity}\n\n${strategyRulesBlock}\n\n${systemInstructions}`;
+  return `${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance)}\n\n${systemInstructions}`;
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
@@ -813,6 +826,7 @@ export class AgentHarness {
     this.systemPrompt = await buildSystemPrompt(this._agentConfig, {
       getStrategyById: this.getStrategyById,
       heartbeatIntervalsForced,
+      tradingGuidance: getTradingGuidanceForSandbox(this.sandboxId),
     });
 
     if (heartbeatIntervalsForced && heartbeatWasOverridden && this.state.running && !this._beating) {
@@ -1293,6 +1307,15 @@ ${userBlock}`;
       try {
         if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
         result = await this._runClaude(prompt, model, actorSnapshot);
+        if (isEarlyOpenCodeCrash(result) && this.state.running && !this.state.paused
+          && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
+          this.state.emit('agent_log', { message: `Beat #${beatNum}: ${sanitizeOpenCodeError(result.error)} before any tool call; retrying once in a fresh session.`, level: 'warning' });
+          await new Promise(resolve => setTimeout(resolve, this._beatRetryDelayMs ?? 5000));
+          this._sessionId = null;
+          const retried = await this._runClaude(prompt, model, actorSnapshot);
+          if (retried?.error) retried.error = `${retried.error} (after one retry)`;
+          result = retried;
+        }
       } catch (err) {
         executionFailed = true;
         throw err;
@@ -1492,6 +1515,11 @@ ${userBlock}`;
       // Native steps bound model steps for the selected default agent, not individual tool calls.
       // Keep the strongest inherited cap across both aliases and leave other agents alone.
       primaryAgent.steps = Math.min(nativeStepBudget, ...inheritedStepCaps);
+      // The native to-do tool only adds calls to every beat; trading agents keep their plan in decisions.
+      primaryAgent.permission = {
+        ...(primaryAgent.permission && typeof primaryAgent.permission === 'object' && !Array.isArray(primaryAgent.permission) ? primaryAgent.permission : {}),
+        todowrite: 'deny', todoread: 'deny',
+      };
       delete primaryAgent.maxSteps;
       invocationEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inherited, model: ocModel, small_model: ocModel, agent: agents });
 
@@ -1794,8 +1822,8 @@ ${userBlock}`;
         const safeErrorValue = state.error == null ? undefined : safeAuditValue(typeof state.error === 'string' ? state.error : JSON.stringify(state.error));
         const safeError = safeErrorValue == null ? undefined : String(safeErrorValue).substring(0, 1200);
         const resultLength = safeResult?.length || 0;
-        const compactBars = toolName === 'get_historical_bars' && resultLength > captureLimit
-          ? compactHistoricalBars(safeResult) : null;
+        const compactBars = resultLength > captureLimit && (toolName === 'get_historical_bars' || toolName === 'get_daily_features')
+          ? (toolName === 'get_daily_features' ? compactDailyFeatures(safeResult) : compactHistoricalBars(safeResult)) : null;
         const resultTruncated = !compactBars && resultLength > captureLimit;
         ctx.recordToolEvent?.({
           eventType: 'tool_call', kind: 'tool_call', role: 'assistant', tool: toolName,

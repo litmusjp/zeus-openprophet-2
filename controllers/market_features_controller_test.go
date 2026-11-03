@@ -166,3 +166,38 @@ func distinctSymbols(n int) string {
 	}
 	return strings.Join(names, ",")
 }
+
+type sipBars struct {
+	*featureBars
+	feed string
+}
+
+func (s *sipBars) GetHistoricalBarsWithFeed(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, string, error) {
+	bars, err := s.featureBars.GetHistoricalBars(ctx, symbol, start, end, timeframe)
+	return bars, s.feed, err
+}
+
+func TestResponsesReportTheFeedThatServedTheBars(t *testing.T) {
+	data := &sipBars{featureBars: &featureBars{recordingBars: &recordingBars{}}, feed: "sip"}
+	controller := NewOrderController(nil, data, nil)
+
+	_, body := getJSON(t, controller.HandleGetDailyFeatures, "/x?symbols=SPY", nil)
+	first := body["features"].([]any)[0].(map[string]any)
+	if first["feed"] != "sip" {
+		t.Fatalf("daily features feed = %v", first["feed"])
+	}
+
+	_, bars := getJSON(t, controller.HandleGetBars, "/x?start=2026-09-01&end=2026-10-01&timeframe=1Day", gin.Params{{Key: "symbol", Value: "SPY"}})
+	if bars["feed"] != "sip" {
+		t.Fatalf("bars feed = %v", bars["feed"])
+	}
+	if note, _ := bars["completeness_note"].(string); !strings.Contains(note, "consolidated") {
+		t.Fatalf("note should describe SIP data: %q", note)
+	}
+
+	data.feed = "iex"
+	_, bars = getJSON(t, controller.HandleGetBars, "/x?start=2026-09-01&end=2026-10-01&timeframe=1Day", gin.Params{{Key: "symbol", Value: "SPY"}})
+	if note, _ := bars["completeness_note"].(string); bars["feed"] != "iex" || !strings.Contains(note, "IEX-only") {
+		t.Fatalf("iex response = %v", bars)
+	}
+}

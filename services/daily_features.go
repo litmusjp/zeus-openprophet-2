@@ -130,7 +130,7 @@ func ComputeDailyFeatures(symbol string, completed []*interfaces.Bar, loc *time.
 	for _, bar := range completed[start:] {
 		out.Recent = append(out.Recent, barFacts(bar, loc))
 	}
-	out.Notes = append(out.Notes, "volume is IEX-feed volume, not consolidated; the forming session bar is excluded")
+	out.Notes = append(out.Notes, "the forming session bar is excluded; the feed field says whether highs, lows and volume are consolidated (sip) or IEX-only (iex)")
 	return out
 }
 

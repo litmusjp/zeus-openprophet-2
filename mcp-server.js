@@ -566,7 +566,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_quote',
-        description: 'Get real-time quote data (bid/ask prices) for a stock symbol',
+        description: 'Get quote data for a stock symbol: IEX bid/ask (can be sparse or very wide for single stocks), the last trade price, spread %, and a quote_flag (ok, wide, stale, one_sided). When quote_flag is not ok, judge price from last_trade or the latest completed bar, not the bid/ask midpoint.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -594,7 +594,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_historical_bars',
-        description: 'Get historical price bars. Date-only start/end use America/New_York trading dates; end includes that date. You may also pass RFC3339 timestamps for exact bounds. Timestamp offsets are honored exactly: use UTC Z for UTC clock values (for example 2026-10-28T13:30:00Z), not 2026-10-28T13:30:00-04:00. Today is capped at now; malformed or inverted ranges are rejected. Each bar carries complete (false while still forming; a daily bar completes at the 16:00 New York close). Feed is IEX, so volume is IEX volume, not consolidated.',
+        description: 'Get historical price bars. Date-only start/end use America/New_York trading dates; end includes that date. You may also pass RFC3339 timestamps for exact bounds. Timestamp offsets are honored exactly: use UTC Z for UTC clock values (for example 2026-10-28T13:30:00Z), not 2026-10-28T13:30:00-04:00. Today is capped at now; malformed or inverted ranges are rejected. Each bar carries complete (false while still forming; a daily bar completes at the 16:00 New York close). The response states its feed: sip is consolidated market data (preferred, used when the account may read it), iex is IEX-only data whose highs, lows and volume can differ from the real market.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -994,7 +994,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_options_assessment_policy',
-        description: 'Read authenticated AlphaDesk policy budget metadata before selecting a new long-options candidate. Returns POLICY_ONLY metadata, never PASS or execution authority; does not assess or place trades.',
+        description: 'Read authenticated AlphaDesk policy metadata. Returns POLICY_ONLY metadata, never PASS or execution authority; does not assess or place trades. Position size is governed by OP2 account limits, not by this tool.',
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
         inputSchema: { type: 'object', properties: {} },
       },
@@ -1075,7 +1075,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             max_cost: {
               type: 'number',
-              description: 'Maximum cost of one contract in dollars (ask x 100); omit to apply no cost filter. Use it to keep only contracts that fit your intended position size.',
+              description: 'Optional ceiling on the cost of ONE contract in dollars (ask x 100). Normally omit it. Never derive it from AlphaDesk policy figures or treat it as a position budget: a position may hold several contracts.',
             },
             type: {
               type: 'string',
@@ -1088,7 +1088,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_daily_features',
-        description: 'Arithmetic facts about COMPLETED daily bars for up to 25 symbols in one call: last and prior-session OHLCV, SMA20 and its 5-session slope, last close vs SMA20, prior 10/20-session high and low (excluding the last bar), prior 20-session average volume and the last-volume ratio, and the last five completed bars. The session still forming is excluded. Facts only, not signals; volume is IEX volume. A symbol that fails carries its own error without failing the batch.',
+        description: 'Arithmetic facts about COMPLETED daily bars for up to 25 symbols in one call: last and prior-session OHLCV, SMA20 and its 5-session slope, last close vs SMA20, prior 10/20-session high and low (excluding the last bar), prior 20-session average volume and the last-volume ratio, and the last five completed bars. The session still forming is excluded. Facts only, not signals. Each symbol states its feed (sip = consolidated, preferred; iex = IEX-only, whose highs, lows and volume can differ). A symbol that fails carries its own error without failing the batch.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2104,7 +2104,15 @@ ${allNews.map((article, i) =>
 
       case 'get_options_assessment_policy': {
         const data = await callTradingBot('/options/assessment-policy');
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        // AlphaDesk's standalone assessment no longer caps position size; do not hand agents a stale figure.
+        const shown = data && typeof data === 'object' && !Array.isArray(data) ? { ...data } : data;
+        if (shown && typeof shown === 'object') {
+          for (const key of ['max_investment_per_candidate', 'maximum_contracts_per_candidate']) {
+            if (key in shown) shown[key] = 'not_a_limit';
+          }
+          shown.position_size = 'Governed by OP2 account limits (max position, max deployed, open positions, daily loss), not by AlphaDesk.';
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(shown, null, 2) }] };
       }
 
       case 'assess_options_trade': {

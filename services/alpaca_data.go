@@ -36,6 +36,13 @@ func NewAlpacaDataService(apiKey, secretKey string) *AlpacaDataService {
 
 // GetHistoricalBars retrieves historical bar data
 func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, error) {
+	bars, _, err := s.GetHistoricalBarsWithFeed(ctx, symbol, start, end, timeframe)
+	return bars, err
+}
+
+// GetHistoricalBarsWithFeed retrieves historical bars and reports the feed used: consolidated "sip" when
+// the account may read it for the requested window, otherwise the thin "iex" feed.
+func (s *AlpacaDataService) GetHistoricalBarsWithFeed(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, string, error) {
 	s.logger.WithFields(logrus.Fields{
 		"symbol":    symbol,
 		"start":     start,
@@ -46,19 +53,19 @@ func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string
 	// Convert timeframe string to Alpaca TimeFrame
 	tf := s.parseTimeframe(timeframe)
 
-	req := marketdata.GetBarsRequest{
-		TimeFrame:  tf,
-		Start:      start,
-		End:        end,
-		Feed:       marketdata.IEX,
-		PageLimit:  10000, // Max allowed
-		Adjustment: marketdata.All,
-	}
-
-	barsResp, err := s.client.GetBars(symbol, req)
+	barsResp, feed, err := fetchBarsPreferSIP(func(feed marketdata.Feed, from, to time.Time) ([]marketdata.Bar, error) {
+		return s.client.GetBars(symbol, marketdata.GetBarsRequest{
+			TimeFrame:  tf,
+			Start:      from,
+			End:        to,
+			Feed:       feed,
+			PageLimit:  10000, // Max allowed
+			Adjustment: marketdata.All,
+		})
+	}, start, end, time.Now())
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to fetch historical bars")
-		return nil, fmt.Errorf("failed to get historical bars: %w", err)
+		return nil, feed, fmt.Errorf("failed to get historical bars: %w", err)
 	}
 
 	bars := make([]*interfaces.Bar, 0)
@@ -75,8 +82,8 @@ func (s *AlpacaDataService) GetHistoricalBars(ctx context.Context, symbol string
 		})
 	}
 
-	s.logger.WithField("count", len(bars)).Info("Fetched historical bars")
-	return bars, nil
+	s.logger.WithFields(logrus.Fields{"count": len(bars), "feed": feed}).Info("Fetched historical bars")
+	return bars, feed, nil
 }
 
 // GetLatestBar retrieves the most recent bar for a symbol

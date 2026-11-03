@@ -84,5 +84,10 @@ test('policy lookup is listed as idempotent read-only and serializes only backen
   });
   const result = await invoke();
   assert.deepEqual(calls, [['/options/assessment-policy']]);
-  assert.deepEqual(JSON.parse(result.content[0].text), policy);
+  const shown = JSON.parse(result.content[0].text);
+  assert.equal(shown.decision, 'POLICY_ONLY');
+  assert.equal(shown.assessment_performed, false);
+  assert.equal(shown.max_investment_per_candidate, 'not_a_limit');
+  assert.match(shown.position_size, /Governed by OP2 account limits/);
+  assert.equal(policy.max_investment_per_candidate, '750', 'the source response is not mutated');
 });

@@ -93,12 +93,13 @@ func (oc *OrderController) HandleGetDailyFeatures(c *gin.Context) {
 		go func(i int, symbol string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			bars, fetchErr := oc.dataService.GetHistoricalBars(ctx, symbol, now.Add(-featureLookback), now, "1Day")
+			bars, feed, fetchErr := historicalBarsWithFeed(ctx, oc.dataService, symbol, now.Add(-featureLookback), now, "1Day")
 			if fetchErr != nil {
-				features[i] = services.DailyFeatures{Symbol: symbol, Feed: "iex", Error: "daily bars unavailable for this symbol"}
+				features[i] = services.DailyFeatures{Symbol: symbol, Feed: feed, Error: "daily bars unavailable for this symbol"}
 				return
 			}
 			features[i] = services.ComputeDailyFeatures(symbol, services.CompletedDailyBars(bars, now, loc), loc)
+			features[i].Feed = feed
 		}(i, symbol)
 	}
 	wg.Wait()
@@ -106,8 +107,7 @@ func (oc *OrderController) HandleGetDailyFeatures(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"status":   "available",
 		"as_of":    now.UTC().Format(time.RFC3339),
-		"basis":    "completed daily bars only; the session still forming is excluded; arithmetic facts, not signals",
-		"feed":     "iex",
+		"basis":    "completed daily bars only; the session still forming is excluded; arithmetic facts, not signals. Each symbol states its feed (sip = consolidated market, iex = IEX only, whose highs, lows and volume can differ).",
 		"count":    len(features),
 		"features": features,
 	})

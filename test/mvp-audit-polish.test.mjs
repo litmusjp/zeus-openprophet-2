@@ -54,6 +54,9 @@ test('shared instructions leave exits with assigned strategy and make assessment
   assert.match(prompt, /never above the max-position limit/);
   assert.match(prompt, /Account limits, not AlphaDesk, govern size/);
   assert.match(prompt, /action "WATCHLIST"/);
+  assert.match(prompt, /prophet_get_daily_features.*up to 25 symbols in one call/);
+  assert.match(prompt, /prophet_get_option_expirations.*max_cost/);
+  assert.match(prompt, /status unknown is not none/);
   assert.match(prompt, /INCOMPLETE_RESEARCH, not NO_SETUP/);
   assert.match(prompt, /Issue these independent reads in one parallel batch/);
   assert.doesNotMatch(prompt, /Don't over-research|analysis paralysis|preserve exactly this order/);

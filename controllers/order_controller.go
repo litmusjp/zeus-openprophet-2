@@ -2188,11 +2188,12 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 	deltaMinStr := c.Query("delta_min")
 	deltaMaxStr := c.Query("delta_max")
 	minBidStr := c.Query("min_bid")
+	maxCostStr := c.Query("max_cost")
 	optionType := c.Query("type")
 
 	// Parse filter values
-	var deltaMin, deltaMax, minBid float64
-	var hasMin, hasMax, hasMinBid bool
+	var deltaMin, deltaMax, minBid, maxCost float64
+	var hasMin, hasMax, hasMinBid, hasMaxCost bool
 
 	if deltaMinStr != "" {
 		if val, err := strconv.ParseFloat(deltaMinStr, 64); err == nil {
@@ -2211,6 +2212,16 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 			minBid = val
 			hasMinBid = true
 		}
+	}
+
+	if maxCostStr != "" {
+		val, err := strconv.ParseFloat(maxCostStr, 64)
+		if err != nil || val <= 0 {
+			c.JSON(400, gin.H{"error": "max_cost must be a positive number (dollars per contract, ask x 100)"})
+			return
+		}
+		maxCost = val
+		hasMaxCost = true
 	}
 
 	// Apply all filters in one pass
@@ -2232,6 +2243,11 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 
 		// Apply bid filter
 		if hasMinBid && contract.Bid <= minBid {
+			continue
+		}
+
+		// Apply per-contract cost filter (ask x 100)
+		if hasMaxCost && contract.Ask*100 > maxCost {
 			continue
 		}
 

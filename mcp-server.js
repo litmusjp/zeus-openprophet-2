@@ -1073,6 +1073,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Minimum bid price to filter out illiquid options (e.g., 0.1)',
             },
+            max_cost: {
+              type: 'number',
+              description: 'Maximum cost of one contract in dollars (ask x 100); omit to apply no cost filter. Use it to keep only contracts that fit your intended position size.',
+            },
             type: {
               type: 'string',
               description: 'Filter by option type: "call" or "put"',
@@ -1080,6 +1084,50 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ['symbol'],
+        },
+      },
+      {
+        name: 'get_daily_features',
+        description: 'Arithmetic facts about COMPLETED daily bars for up to 25 symbols in one call: last and prior-session OHLCV, SMA20 and its 5-session slope, last close vs SMA20, prior 10/20-session high and low (excluding the last bar), prior 20-session average volume and the last-volume ratio, and the last five completed bars. The session still forming is excluded. Facts only, not signals; volume is IEX volume. A symbol that fails carries its own error without failing the batch.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbols: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Up to 25 ticker symbols, e.g. ["SPY","QQQ","XLK"]',
+            },
+          },
+          required: ['symbols'],
+        },
+      },
+      {
+        name: 'get_option_expirations',
+        description: 'List the expiration dates that actually have listed call contracts for an underlying within a days-to-expiry window (default 1-60, maximum span 90). Use it to choose an expiry, then pass that date as expiration to get_options_chain. An error means the list could not be completed; it never returns a partial list.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Underlying symbol (e.g., SPY)' },
+            min_dte: { type: 'number', description: 'Minimum calendar days to expiry (default 1)' },
+            max_dte: { type: 'number', description: 'Maximum calendar days to expiry (default 60)' },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
+        name: 'get_earnings_dates',
+        description: 'Scheduled earnings dates from a public calendar (not broker-verified) for up to 30 symbols over the next 1-30 days (default 21). Status scheduled gives the date and timing; none_found_in_window means the whole window was read and no report was listed; unknown means part of the window could not be read, so no date proves nothing. ETFs normally have none.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbols: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Up to 30 ticker symbols',
+            },
+            days: { type: 'number', description: 'Days ahead to check, 1-30 (default 21)' },
+          },
+          required: ['symbols'],
         },
       },
       {
@@ -2104,6 +2152,7 @@ ${allNews.map((article, i) =>
         if (args.delta_min !== undefined) params.append('delta_min', args.delta_min);
         if (args.delta_max !== undefined) params.append('delta_max', args.delta_max);
         if (args.min_bid !== undefined) params.append('min_bid', args.min_bid);
+        if (args.max_cost !== undefined) params.append('max_cost', args.max_cost);
         if (args.type) params.append('type', args.type);
 
         if (params.toString()) endpoint += `?${params.toString()}`;
@@ -2117,6 +2166,29 @@ ${allNews.map((article, i) =>
             },
           ],
         };
+      }
+
+      case 'get_daily_features': {
+        const symbols = Array.isArray(args.symbols) ? args.symbols : [];
+        const data = await callTradingBot(`/market/daily-features?symbols=${encodeURIComponent(symbols.join(','))}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_option_expirations': {
+        const params = new URLSearchParams();
+        if (args.min_dte !== undefined) params.append('min_dte', args.min_dte);
+        if (args.max_dte !== undefined) params.append('max_dte', args.max_dte);
+        const query = params.toString();
+        const data = await callTradingBot(`/options/expirations/${encodeURIComponent(args.symbol)}${query ? `?${query}` : ''}`, 'GET', null, { returnAvailability: true });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_earnings_dates': {
+        const symbols = Array.isArray(args.symbols) ? args.symbols : [];
+        const params = new URLSearchParams({ symbols: symbols.join(',') });
+        if (args.days !== undefined) params.append('days', args.days);
+        const data = await callTradingBot(`/market/earnings?${params.toString()}`);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'wait': {

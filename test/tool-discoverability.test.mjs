@@ -95,3 +95,17 @@ test('Settings tool reference includes the assessment-only AlphaDesk description
   assert.match(optionsBlock, /signal score/);
   assert.match(optionsBlock, /Assessment-only; not broker authorization/);
 });
+
+test('trader menu lists the phase 2 research tools and the registered MCP tools match', async () => {
+  const menu = renderPrefixedToolMenu();
+  for (const tool of ['get_daily_features', 'get_earnings_dates', 'get_option_expirations']) {
+    assert.match(menu, new RegExp(`prophet_${tool}`));
+  }
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../mcp-server.js', import.meta.url), 'utf8');
+  for (const tool of ['get_daily_features', 'get_earnings_dates', 'get_option_expirations']) {
+    assert.match(source, new RegExp(`name: '${tool}'`));
+    assert.match(source, new RegExp(`case '${tool}':`));
+  }
+  assert.match(source, /max_cost: \{\s*type: 'number'/);
+});

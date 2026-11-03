@@ -1552,14 +1552,20 @@ func (oc *OrderController) HandleGetBars(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, gin.H{
+	resp := gin.H{
 		"symbol":    symbol,
 		"start":     start,
 		"end":       end,
 		"timeframe": timeframe,
 		"count":     len(bars),
 		"bars":      bars,
-	})
+		"feed":      "iex",
+	}
+	if annotated, ok := services.AnnotateBarCompleteness(bars, timeframe, now, loc); ok {
+		resp["bars"] = annotated
+		resp["completeness_note"] = "complete=false marks a bar still forming at response time; a daily bar completes at the 16:00 New York close. Volume is IEX-feed volume, not consolidated."
+	}
+	c.JSON(200, resp)
 }
 
 // OptionsOrderRequest represents an options order request

@@ -579,7 +579,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_latest_bar',
-        description: 'Get the latest price bar (OHLCV data) for a stock symbol',
+        description: 'Get the single most recent bar (a recent minute bar from the IEX feed, still forming) for a stock symbol. It is not a completed daily bar; use get_historical_bars with timeframe 1Day for completed-bar strategy evidence.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -593,7 +593,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_historical_bars',
-        description: 'Get historical price bars. Date-only start/end use America/New_York trading dates; end includes that date. You may also pass RFC3339 timestamps for exact bounds. Timestamp offsets are honored exactly: use UTC Z for UTC clock values (for example 2026-10-28T13:30:00Z), not 2026-10-28T13:30:00-04:00. Today is capped at now; malformed or inverted ranges are rejected.',
+        description: 'Get historical price bars. Date-only start/end use America/New_York trading dates; end includes that date. You may also pass RFC3339 timestamps for exact bounds. Timestamp offsets are honored exactly: use UTC Z for UTC clock values (for example 2026-10-28T13:30:00Z), not 2026-10-28T13:30:00-04:00. Today is capped at now; malformed or inverted ranges are rejected. Each bar carries complete (false while still forming; a daily bar completes at the 16:00 New York close). Feed is IEX, so volume is IEX volume, not consolidated.',
         inputSchema: {
           type: 'object',
           properties: {

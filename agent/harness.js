@@ -7,6 +7,7 @@ import path from 'path';
 import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelVerified } from './chatgpt-oauth.js';
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
+import { compactHistoricalBars } from './audit-capture.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
 import { nextMarketReview, marketSession, marketSessionPhase, validateMarketCalendar } from './market-aware-scheduler.js';
@@ -412,7 +413,7 @@ ${alphaDeskBudgetGuidance}
 ## Phase Context (ET)
 - Broker-authoritative session times define pre-market, regular-session, after-hours and closed phases; research and planning remain available outside the regular session.
 - During the regular session, evaluate entries and manage positions under assigned strategies, recorded plans, permissions and existing controls. The phase does not add a trade, target or stop rule.
-- Completed qualifying prior bars remain usable. Do not assume or add a strategy bar timeframe. The assigned strategy and recorded plan control exit conditions and timing.
+- Completed qualifying prior bars remain usable. Do not assume or add a strategy bar timeframe. A bar marked complete=false, or the minute bar returned by prophet_get_latest_bar, is still forming and is not a completed daily bar. After the close the session's daily bar is complete: refresh completed history for candidates relevant to your assigned strategy and record any next-session candidates as research only, not orders. The assigned strategy and recorded plan control exit conditions and timing.
 ${heartbeatIntervalsForced
     ? '- HEARTBEAT GUARDRAIL: The operator has forced the configured heartbeat intervals. Heartbeat mutation tools are operator-controlled and forbidden; Do not call apply_heartbeat_profile or set_heartbeat (or update_heartbeat_phase).'
     : 'Tune cadence with apply_heartbeat_profile or set_heartbeat (seconds). Settings are the required baseline. Do not change them just for preference: after two completed market sessions, only call set_heartbeat if the configured interval is materially impairing your work, and include a specific explanation of the problem and evidence. Use force=true only for an urgent, strongly justified market condition.'}
@@ -1792,10 +1793,12 @@ ${userBlock}`;
         const safeErrorValue = state.error == null ? undefined : safeAuditValue(typeof state.error === 'string' ? state.error : JSON.stringify(state.error));
         const safeError = safeErrorValue == null ? undefined : String(safeErrorValue).substring(0, 1200);
         const resultLength = safeResult?.length || 0;
-        const resultTruncated = resultLength > captureLimit;
+        const compactBars = toolName === 'get_historical_bars' && resultLength > captureLimit
+          ? compactHistoricalBars(safeResult) : null;
+        const resultTruncated = !compactBars && resultLength > captureLimit;
         ctx.recordToolEvent?.({
           eventType: 'tool_call', kind: 'tool_call', role: 'assistant', tool: toolName,
-          args: safeAuditValue(toolInput), result: safeResult?.substring(0, captureLimit), beat: beatNum,
+          args: safeAuditValue(toolInput), result: compactBars ?? safeResult?.substring(0, captureLimit), beat: beatNum,
           ...(ctx.actorSnapshot ? { actorSnapshot: ctx.actorSnapshot } : {}),
           callId: event.callID || event.callId || part.callID || part.id || undefined,
           completedAt: new Date().toISOString(), status: state.status || (safeError ? 'error' : 'completed'),

@@ -48,6 +48,8 @@ test('shared instructions leave exits with assigned strategy and make assessment
   assert.match(prompt, /Completed qualifying prior bars remain usable/);
   assert.match(prompt, /steps.*limits model steps, not individual tool calls.*heartbeat wall-clock timeout is a separate limit/i);
   assert.match(prompt, /Do not assume or add a strategy bar timeframe/);
+  assert.match(prompt, /complete=false.*still forming and is not a completed daily bar/);
+  assert.match(prompt, /next-session candidates as research only, not orders/);
   assert.match(prompt, /strategy and recorded plan control exit conditions and timing/);
   assert.doesNotMatch(prompt, /confirm daily-close conditions only at daily close/i);
   assert.match(prompt, /Standalone `prophet_assess_options_trade` is optional research, not a prerequisite/);

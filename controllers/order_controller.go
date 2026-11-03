@@ -1923,6 +1923,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		if services.IsBrokerRejection(err) {
 			intent.Status = "rejected"
 			intent.SubmissionAttempted = true
+			intent.Metadata = withFailureReason(intent.Metadata, intent.Status, err)
 			if saveErr := oc.storageService.SaveOrder(intent); saveErr != nil {
 				oc.logger.WithError(saveErr).Warn("Failed to record terminal options broker rejection")
 				intent.Status = "submission_uncertain"
@@ -1935,6 +1936,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		}
 		if services.IsPreSubmissionRejection(err) {
 			intent.Status = "rejected_before_submission"
+			intent.Metadata = withFailureReason(intent.Metadata, intent.Status, err)
 			if saveErr := oc.storageService.SaveOrder(intent); saveErr != nil {
 				oc.logger.WithError(saveErr).Warn("Failed to record pre-submission options rejection")
 				c.JSON(http.StatusBadGateway, oc.optionsResponseWithIdentity(intent, nil, "submission_uncertain", "pre-submission rejection was not durably recorded"))
@@ -1949,6 +1951,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		if services.IsSubmissionUncertain(err) {
 			intent.Status = "submission_uncertain"
 		}
+		intent.Metadata = withFailureReason(intent.Metadata, intent.Status, err)
 		if saveErr := oc.storageService.SaveOrder(intent); saveErr != nil {
 			oc.logger.WithError(saveErr).Warn("Failed to record options order submission failure")
 		}

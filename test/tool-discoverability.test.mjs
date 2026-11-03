@@ -35,9 +35,9 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   assert.match(prompt, /prophet_assess_options_trade/);
   assert.match(prompt, /prophet_get_options_assessment_policy/);
   assert.match(prompt, /max_investment_per_candidate/);
-  assert.match(prompt, /maximum affordable premium as max_investment_per_candidate divided by \(quantity \* standard contract multiplier\)/);
-  assert.match(prompt, /quantity within maximum_contracts_per_candidate/);
-  assert.match(prompt, /POLICY_ONLY response/);
+  assert.match(prompt, /informational: OP2 account limits \(max position, max deployed, open positions, daily loss\) govern size/);
+  assert.doesNotMatch(prompt, /maximum affordable premium as max_investment_per_candidate divided by/);
+  assert.match(prompt, /POLICY_ONLY metadata/);
   assert.match(prompt, /either OP2 confirmation or the freshly read managed review lock ON or unknown blocks new options entries/i);
   assert.match(prompt, /for the exact proposal/);
   assert.match(prompt, /Decision is PASS, FAIL or UNAVAILABLE/);

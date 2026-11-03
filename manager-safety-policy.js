@@ -17,6 +17,23 @@ export const MANAGER_ALLOWED_MCP_TOOLS = new Set([
   'assign_agent_to_sandbox',
 ]);
 
+// Configuration-mutating tools are for the operator and the Manager. Trading agents must not
+// rewrite their own prompt/strategy, create agents or strategies, or reassign sandboxes.
+export const AGENT_DENIED_MCP_TOOLS = new Set([
+  'update_agent_prompt', 'update_strategy_rules', 'create_agent', 'create_strategy',
+  'assign_agent_to_sandbox', 'set_session_mode',
+]);
+
+export function isAgentToolAllowed(role, toolName) {
+  return role !== 'agent' || !AGENT_DENIED_MCP_TOOLS.has(toolName);
+}
+
+export function assertAgentToolAllowed(role, toolName) {
+  if (!isAgentToolAllowed(role, toolName)) {
+    throw new Error(`Tool "${toolName}" is unavailable to trading agents`);
+  }
+}
+
 export function isManagerToolAllowed(role, toolName) {
   return role !== 'manager' || MANAGER_ALLOWED_MCP_TOOLS.has(toolName);
 }

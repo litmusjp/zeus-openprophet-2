@@ -50,6 +50,14 @@ test('shared instructions leave exits with assigned strategy and make assessment
   assert.match(prompt, /Do not assume or add a strategy bar timeframe/);
   assert.match(prompt, /complete=false.*still forming and is not a completed daily bar/);
   assert.match(prompt, /next-session candidates as research only, not orders/);
+  assert.match(prompt, /no less than 5% of current account equity in option premium/);
+  assert.match(prompt, /never above the max-position limit/);
+  assert.match(prompt, /Account limits, not AlphaDesk, govern size/);
+  assert.match(prompt, /action "WATCHLIST"/);
+  assert.match(prompt, /INCOMPLETE_RESEARCH, not NO_SETUP/);
+  assert.match(prompt, /Issue these independent reads in one parallel batch/);
+  assert.doesNotMatch(prompt, /Don't over-research|analysis paralysis|preserve exactly this order/);
+  assert.doesNotMatch(prompt, /prophet_(update_agent_prompt|update_strategy_rules|create_agent|create_strategy|assign_agent_to_sandbox|set_session_mode)/);
   assert.match(prompt, /strategy and recorded plan control exit conditions and timing/);
   assert.doesNotMatch(prompt, /confirm daily-close conditions only at daily close/i);
   assert.match(prompt, /Standalone `prophet_assess_options_trade` is optional research, not a prerequisite/);

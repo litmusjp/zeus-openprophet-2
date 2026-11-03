@@ -334,8 +334,12 @@ export class ChatStore {
     const context = [];
     let chars = 0;
     for (const session of sessions) {
-      const messages = await this.getSessionMessages(accountId, session.id, { limit: messagesPerSession });
-      const useful = messages.filter(m => m && (m.content || m.eventType || m.kind === 'tool_call'));
+      // Continuity needs the END of a session (latest summary, WATCHLIST/decision records), not its
+      // opening orientation reads. Keep prose and decision/activity records; skip bulk read-tool output.
+      const messages = await this.getSessionMessages(accountId, session.id, { limit: Number.MAX_SAFE_INTEGER });
+      const continuity = m => m && (m.content || m.eventType
+        || (m.kind === 'tool_call' && (m.tool === 'log_decision' || m.tool === 'log_activity')));
+      const useful = messages.filter(continuity).slice(-messagesPerSession);
       if (!useful.length) continue;
       const block = {
         sessionId: session.id,

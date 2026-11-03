@@ -73,3 +73,15 @@ test('Manager profile selection applies to native/non-native and resumed run arg
     'run', '--format', 'json', '--model', 'anthropic/model-b', '--agent', 'manager', '--session', 'session-123',
   ]);
 });
+
+test('trading agents cannot call configuration-mutating tools; operator and manager policy unchanged', async () => {
+  const { AGENT_DENIED_MCP_TOOLS, isAgentToolAllowed, assertAgentToolAllowed } = await import('../manager-safety-policy.js');
+  for (const tool of ['update_agent_prompt', 'update_strategy_rules', 'create_agent', 'create_strategy', 'assign_agent_to_sandbox', 'set_session_mode']) {
+    assert.ok(AGENT_DENIED_MCP_TOOLS.has(tool));
+    assert.equal(isAgentToolAllowed('agent', tool), false);
+    assert.throws(() => assertAgentToolAllowed('agent', tool), /unavailable to trading agents/);
+    assert.equal(isAgentToolAllowed('operator', tool), true);
+    assert.equal(isAgentToolAllowed('manager', tool), true);
+  }
+  assert.equal(isAgentToolAllowed('agent', 'get_positions'), true);
+});

@@ -11,7 +11,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { checkPermissions } from './permissions.js';
 import { enforcePermissions as verifyPermissions } from './mcp-permission-guard.js';
-import { assertManagerToolAllowed, filterManagerTools } from './manager-safety-policy.js';
+import { assertManagerToolAllowed, assertAgentToolAllowed, isAgentToolAllowed, filterManagerTools } from './manager-safety-policy.js';
 import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
 import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
@@ -37,6 +37,7 @@ function filterToolsForCurrentAuthority(tools) {
   const cadenceMutations = new Set(['set_heartbeat', 'apply_heartbeat_profile', 'update_heartbeat_phase']);
   return tools.filter(({ name }) => {
     if (name === 'update_permissions' && OPENPROPHET_ROLE !== 'operator') return false;
+    if (!isAgentToolAllowed(OPENPROPHET_ROLE, name)) return false;
     if (HEARTBEAT_INTERVALS_FORCED && OPENPROPHET_ROLE !== 'operator' && cadenceMutations.has(name)) return false;
     return true;
   });
@@ -1431,6 +1432,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     // Enforce the role boundary before permission lookup or any backend/action side effect.
     assertManagerToolAllowed(OPENPROPHET_ROLE, name);
+    assertAgentToolAllowed(OPENPROPHET_ROLE, name);
     // Enforce permissions before executing any tool
     await enforcePermissions(name, args);
 

@@ -21,32 +21,32 @@ type DailyBarFacts struct {
 // the caller's strategy decides what, if anything, they mean. Prior-window values exclude the
 // last completed bar so they can be compared against it.
 type DailyFeatures struct {
-	Symbol           string          `json:"symbol"`
-	Feed             string          `json:"feed"`
-	CompleteBars     int             `json:"complete_bars"`
-	LastCompleteDate string          `json:"last_complete_date,omitempty"`
-	Last             *DailyBarFacts  `json:"last,omitempty"`
-	Prior            *DailyBarFacts  `json:"prior_session,omitempty"`
-	SMA20            *float64        `json:"sma20,omitempty"`
-	SMA20Slope5Pct   *float64        `json:"sma20_slope_5_sessions_pct,omitempty"`
-	CloseVsSMA20Pct  *float64        `json:"last_close_vs_sma20_pct,omitempty"`
-	High10Prior      *float64        `json:"high_prior_10_sessions,omitempty"`
-	Low10Prior       *float64        `json:"low_prior_10_sessions,omitempty"`
-	High20Prior      *float64        `json:"high_prior_20_sessions,omitempty"`
-	Low20Prior       *float64        `json:"low_prior_20_sessions,omitempty"`
-	AvgVolume20Prior *float64        `json:"avg_volume_prior_20_sessions,omitempty"`
-	LastVolumeRatio  *float64        `json:"last_volume_to_avg_ratio,omitempty"`
+	Symbol           string         `json:"symbol"`
+	Feed             string         `json:"feed"`
+	CompleteBars     int            `json:"complete_bars"`
+	LastCompleteDate string         `json:"last_complete_date,omitempty"`
+	Last             *DailyBarFacts `json:"last,omitempty"`
+	Prior            *DailyBarFacts `json:"prior_session,omitempty"`
+	SMA20            *float64       `json:"sma20,omitempty"`
+	SMA20Slope5Pct   *float64       `json:"sma20_slope_5_sessions_pct,omitempty"`
+	CloseVsSMA20Pct  *float64       `json:"last_close_vs_sma20_pct,omitempty"`
+	High10Prior      *float64       `json:"high_prior_10_sessions,omitempty"`
+	Low10Prior       *float64       `json:"low_prior_10_sessions,omitempty"`
+	High20Prior      *float64       `json:"high_prior_20_sessions,omitempty"`
+	Low20Prior       *float64       `json:"low_prior_20_sessions,omitempty"`
+	AvgVolume20Prior *float64       `json:"avg_volume_prior_20_sessions,omitempty"`
+	LastVolumeRatio  *float64       `json:"last_volume_to_avg_ratio,omitempty"`
 	// Signed distances so callers read the number instead of doing the arithmetic. Each is
 	// (last value - reference level) / reference level x 100 and is omitted when the history
 	// needed for the reference window is missing.
-	LowVsLow20PriorPct    *float64 `json:"low_vs_low_prior_20_sessions_pct,omitempty"`
-	CloseVsHigh10PriorPct *float64 `json:"close_vs_high_prior_10_sessions_pct,omitempty"`
-	CloseVsHigh20PriorPct *float64 `json:"close_vs_high_prior_20_sessions_pct,omitempty"`
-	UndercutPriorLow      *bool    `json:"undercut_prior_session_low,omitempty"`
-	CloseAboveOpen        *bool    `json:"close_above_open,omitempty"`
-	Recent           []DailyBarFacts `json:"recent_completed_bars,omitempty"`
-	Notes            []string        `json:"notes,omitempty"`
-	Error            string          `json:"error,omitempty"`
+	LowVsLow20PriorPct    *float64        `json:"low_vs_low_prior_20_sessions_pct,omitempty"`
+	CloseVsHigh10PriorPct *float64        `json:"close_vs_high_prior_10_sessions_pct,omitempty"`
+	CloseVsHigh20PriorPct *float64        `json:"close_vs_high_prior_20_sessions_pct,omitempty"`
+	UndercutPriorLow      *bool           `json:"undercut_prior_session_low,omitempty"`
+	CloseAboveOpen        *bool           `json:"close_above_open,omitempty"`
+	Recent                []DailyBarFacts `json:"recent_completed_bars,omitempty"`
+	Notes                 []string        `json:"notes,omitempty"`
+	Error                 string          `json:"error,omitempty"`
 }
 
 func roundTo(value float64, places int) float64 {

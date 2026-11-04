@@ -21,11 +21,20 @@ export function compactDailyFeatures(resultText) {
     f.high_prior_20_sessions ?? null, f.low_prior_20_sessions ?? null,
     f.avg_volume_prior_20_sessions ?? null, f.last_volume_to_avg_ratio ?? null,
     f.error ?? null,
+    // appended after the original columns so earlier indexes stay stable; per-symbol feed lets a
+    // review verify sip vs iex for every symbol, and the computed distances/flags let it check the
+    // agent's reading of each rule.
+    f.feed ?? null,
+    f.low_vs_low_prior_20_sessions_pct ?? null,
+    f.close_vs_high_prior_10_sessions_pct ?? null, f.close_vs_high_prior_20_sessions_pct ?? null,
+    f.undercut_prior_session_low ?? null, f.close_above_open ?? null,
   ]);
   return JSON.stringify({
     compact: 'daily_features', as_of: parsed.as_of, feed: parsed.feed, count: parsed.count ?? features.length,
     columns: ['symbol', 'last_date', 'last_ohlcv', 'prior_low_close', 'sma20', 'sma20_slope5_pct', 'close_vs_sma20_pct',
-      'high10_prior', 'low10_prior', 'high20_prior', 'low20_prior', 'avg_vol20_prior', 'last_vol_ratio', 'error'],
+      'high10_prior', 'low10_prior', 'high20_prior', 'low20_prior', 'avg_vol20_prior', 'last_vol_ratio', 'error',
+      'feed', 'low_vs_low20_prior_pct', 'close_vs_high10_prior_pct', 'close_vs_high20_prior_pct',
+      'undercut_prior_low', 'close_above_open'],
     rows,
   });
 }

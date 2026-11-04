@@ -29,6 +29,38 @@ function hasStructuredFailure(record) {
   return inspect(record.result);
 }
 
+// Optional research tools (news and summaries). A provider outage here is shown as a warning on the
+// activity; it must not mark the whole activity Failed/Error. Every other failure (broker, orders,
+// account, risk, data, chain, assessment, heartbeat) keeps the Failed/Error treatment.
+const OPTIONAL_RESEARCH_TOOLS = new Set([
+  'get_news', 'get_news_by_topic', 'search_news', 'get_market_news', 'get_cleaned_news',
+  'get_quick_market_intelligence', 'aggregate_and_summarize_news', 'list_news_summaries', 'get_news_summary',
+  'get_marketwatch_topstories', 'get_marketwatch_realtime', 'get_marketwatch_bulletins',
+]);
+function optionalResearchToolName(record) {
+  if (!record || (record.kind !== 'tool_call' && record.eventType !== 'tool_call')) return null;
+  const name = String(record.tool || '').replace(/^prophet_/, '');
+  return OPTIONAL_RESEARCH_TOOLS.has(name) ? name : null;
+}
+/** Split an activity's failing records into essential failures and optional-research warnings. */
+function classifyFailures(records) {
+  const essential = [];
+  const warnings = [];
+  for (const record of records) {
+    if (!hasStructuredFailure(record)) continue;
+    const optional = optionalResearchToolName(record);
+    if (optional) warnings.push(optional); else essential.push(record);
+  }
+  return { essential, warnings: [...new Set(warnings)] };
+}
+function activityOutcome({ recovery, status, essential, warnings }) {
+  if (recovery) return 'Recovered';
+  if (status) return `Recorded: ${status}`;
+  if (essential.length) return 'Failed';
+  if (warnings.length) return `Recorded (warning: ${warnings.join(', ')} unavailable)`;
+  return 'Recorded';
+}
+
 function recordedToolStatus(record) {
   const accepted = new Set(['accepted', 'rejected', 'uncertain', 'filled', 'partially_filled', 'canceled', 'cancelled', 'expired', 'pending', 'submitted']);
   let result = record.result;
@@ -261,8 +293,7 @@ export class ChatStore {
         else if (record.origin === 'User' || kind === 'message' || kind === 'message_partial' || kind === 'message_failure') group.labels.add('User');
         const tradeTools = new Set(['place_buy_order','place_sell_order','place_options_order','place_managed_position','close_managed_position','cancel_order','withdraw_planned_intent']);
         if (tradeTools.has(record.tool)) group.labels.add('Trade');
-        const failure = hasStructuredFailure(record);
-        if (failure) group.labels.add('Error');
+        if (hasStructuredFailure(record) && !optionalResearchToolName(record)) group.labels.add('Error');
       }
     }
     let result = [...groups.values()].map(g => {
@@ -270,10 +301,10 @@ export class ChatStore {
       const last = [...g.records].reverse().find(r => r.content);
       const toolRecords = g.records.filter(r => r.kind === 'tool_call' || r.eventType === 'tool_call');
       const recovery = g.records.some(r => r.kind === 'heartbeat_recovery');
-      const failure = g.records.some(hasStructuredFailure);
+      const { essential, warnings } = classifyFailures(g.records);
       const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
-      const outcome = recovery ? 'Recovered' : status ? `Recorded: ${status}` : failure ? 'Failed' : 'Recorded';
-      return { activityId: g.activityId, accountId, sessionId: g.sessionId, timestamp: g.timestamp, origin: g.origin, labels, title: last?.content?.slice(0, 140) || `${g.origin} activity`, outcome, agentName: g.session.metadata?.agentName || g.session.metadata?.agentId || '--', sandboxName: g.session.metadata?.sandboxName || '--', recordCount: g.records.length, toolCount: toolRecords.length, _session: g.session, _records: g.records };
+      const outcome = activityOutcome({ recovery, status, essential, warnings });
+      return { activityId: g.activityId, accountId, sessionId: g.sessionId, timestamp: g.timestamp, origin: g.origin, labels, title: last?.content?.slice(0, 140) || `${g.origin} activity`, outcome, warnings, agentName: g.session.metadata?.agentName || g.session.metadata?.agentId || '--', sandboxName: g.session.metadata?.sandboxName || '--', recordCount: g.records.length, toolCount: toolRecords.length, _session: g.session, _records: g.records };
     });
     result = result.filter(a => (!account || a.accountId === account || a.sandboxName === account) && (!labels.length || labels.some(l => a.labels.includes(l))));
     if (query) {
@@ -303,14 +334,14 @@ export class ChatStore {
         if (record.origin === 'Heartbeat' || String(record.kind || '').startsWith('heartbeat')) labels.add('Heartbeat');
         else if (record.origin === 'User' || ['message','message_partial','message_failure','manager_message'].includes(record.kind)) labels.add('User');
         if (trades.has(record.tool)) labels.add('Trade');
-        if (hasStructuredFailure(record)) labels.add('Error');
+        if (hasStructuredFailure(record) && !optionalResearchToolName(record)) labels.add('Error');
       }
       const toolRecords = activityRecords.filter(record => record.kind === 'tool_call' || record.eventType === 'tool_call');
       const recovery = activityRecords.some(record => record.kind === 'heartbeat_recovery');
-      const failed = activityRecords.some(hasStructuredFailure);
+      const { essential, warnings } = classifyFailures(activityRecords);
       const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
       const last = [...activityRecords].reverse().find(record => record.content);
-      const summary = { activityId, accountId, sessionId: session.id, origin: activityRecords.find(record => record.origin)?.origin || 'User', timestamp: activityRecords[0].timestamp, labels: [...labels], title: last?.content?.slice(0, 140) || 'Activity', outcome: recovery ? 'Recovered' : status ? `Recorded: ${status}` : failed ? 'Failed' : 'Recorded', agentName: session.metadata?.agentName || session.metadata?.agentId || '--', sandboxName: session.metadata?.sandboxName || '--', recordCount: activityRecords.length, toolCount: toolRecords.length };
+      const summary = { activityId, accountId, sessionId: session.id, origin: activityRecords.find(record => record.origin)?.origin || 'User', timestamp: activityRecords[0].timestamp, labels: [...labels], title: last?.content?.slice(0, 140) || 'Activity', outcome: activityOutcome({ recovery, status, essential, warnings }), warnings, agentName: session.metadata?.agentName || session.metadata?.agentId || '--', sandboxName: session.metadata?.sandboxName || '--', recordCount: activityRecords.length, toolCount: toolRecords.length };
       return { ...summary, totalRecords: activityRecords.length, records: activityRecords.slice(offset, offset + limit), offset, hasMore: offset + limit < activityRecords.length };
     }
     return null;

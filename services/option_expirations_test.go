@@ -69,6 +69,48 @@ func TestGetOptionExpirationsListsOnlyDatesWithContracts(t *testing.T) {
 	}
 }
 
+func TestListOptionExpirationsReturnsPartialListWhenSomeProbesFail(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	today := time.Now().In(loc)
+	var weekdays []string
+	for dte := 1; len(weekdays) < 3 && dte < 30; dte++ {
+		day := today.AddDate(0, 0, dte)
+		if day.Weekday() != time.Saturday && day.Weekday() != time.Sunday {
+			weekdays = append(weekdays, day.Format("2006-01-02"))
+		}
+	}
+	failing, listed := weekdays[1], weekdays[2]
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("expiration_date") {
+		case failing:
+			http.Error(w, "boom", http.StatusBadRequest)
+		case listed:
+			_, _ = w.Write([]byte(`{"snapshots":{"SPY261231C00700000":{}}}`))
+		default:
+			_, _ = w.Write([]byte(`{"snapshots":{}}`))
+		}
+	}))
+	defer server.Close()
+	s := &AlpacaTradingService{apiKey: "key", apiSecret: "secret", logger: logrus.New(), optionsSnapshotBaseURL: server.URL, optionsSnapshotHTTP: server.Client()}
+	result, err := s.ListOptionExpirations(context.Background(), "SPY", 1, 12)
+	if err != nil {
+		t.Fatalf("a partial failure must not fail the call: %v", err)
+	}
+	if len(result.Expirations) != 1 || result.Expirations[0].Date != listed {
+		t.Fatalf("confirmed dates = %+v, want only %s", result.Expirations, listed)
+	}
+	if len(result.Unchecked) != 1 || result.Unchecked[0].Date != failing || result.Unchecked[0].Reason == "" {
+		t.Fatalf("unchecked = %+v, want only %s", result.Unchecked, failing)
+	}
+	// the strict form still refuses a list with unchecked dates
+	if _, strictErr := s.GetOptionExpirations(context.Background(), "SPY", 1, 12); strictErr == nil || !strings.Contains(strictErr.Error(), "incomplete") {
+		t.Fatalf("strict form must fail on an unchecked date, got %v", strictErr)
+	}
+}
+
 func TestGetOptionExpirationsFailsClosedOnProbeErrorAndBadWindow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusBadRequest)

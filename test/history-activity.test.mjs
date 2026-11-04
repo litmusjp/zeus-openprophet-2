@@ -71,6 +71,54 @@ test('classifies real structured errors and recovery without promoting assessmen
   assert.match(rejected.outcome, /rejected/);
 });
 
+test('an optional news tool error is a warning, not a failed activity; essential failures still fail', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'op2-activity-warn-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new ChatStore(root);
+  await store.startSession('acct-w', 'session-w', { agentName: 'Pendulum' });
+  const file = path.join(root, 'sandboxes', 'acct-w', 'chat-history', 'session-session-w.jsonl');
+  const records = [];
+  const add = (activityId, props) => records.push({ timestamp: new Date(Date.UTC(2026, 10, 4, 14, 0, records.length)).toISOString(), activityId, origin: 'Heartbeat', ...props });
+  const newsError = JSON.stringify({ error: 'Trading bot request failed: provider_unavailable' });
+  // the Nov 4 pre-market pattern: optional news tools fail, everything else completes
+  add('news-only', { kind: 'heartbeat', content: 'Pre-market review complete' });
+  add('news-only', { kind: 'tool_call', tool: 'get_account', result: '{"Equity":100578.78}', status: 'completed' });
+  add('news-only', { kind: 'tool_call', tool: 'get_cleaned_news', result: '', status: 'error', error: newsError });
+  add('news-only', { kind: 'tool_call', tool: 'get_market_news', result: '', status: 'error', error: newsError });
+  // an optional failure alongside a broker/data failure is still Failed
+  add('mixed', { kind: 'tool_call', tool: 'get_market_news', result: '', status: 'error', error: newsError });
+  add('mixed', { kind: 'tool_call', tool: 'get_account', result: '', status: 'error', error: '{"error":"broker unavailable"}' });
+  // an order tool error is essential
+  add('order-error', { kind: 'tool_call', tool: 'place_options_order', result: { content: [{ text: JSON.stringify({ isError: true, error: { message: 'uncertain' } }) }] } });
+  // data features failure is essential
+  add('data-error', { kind: 'tool_call', tool: 'get_daily_features', result: '', status: 'error', error: '{"error":"bars unavailable"}' });
+  // a heartbeat-level failure is essential even if the only failing tool was optional news
+  add('heartbeat-failed', { kind: 'tool_call', tool: 'get_cleaned_news', result: '', status: 'error', error: newsError });
+  add('heartbeat-failed', { kind: 'heartbeat_failure', content: 'crashed' });
+  await fs.appendFile(file, records.map(r => JSON.stringify(r)).join('\n') + '\n');
+
+  const listed = new Map((await store.listActivities('acct-w', { limit: 50 })).activities.map(a => [a.activityId, a]));
+  const newsOnly = listed.get('news-only');
+  assert.match(newsOnly.outcome, /^Recorded \(warning: get_cleaned_news, get_market_news unavailable\)$/);
+  assert.deepEqual(newsOnly.warnings, ['get_cleaned_news', 'get_market_news']);
+  assert.equal(newsOnly.labels.includes('Error'), false, 'optional news errors do not add the Error label');
+  assert.equal(listed.get('mixed').outcome, 'Failed');
+  assert.equal(listed.get('mixed').labels.includes('Error'), true);
+  assert.equal(listed.get('order-error').outcome, 'Failed');
+  assert.equal(listed.get('data-error').outcome, 'Failed');
+  assert.equal(listed.get('heartbeat-failed').outcome, 'Failed');
+  assert.equal(listed.get('heartbeat-failed').labels.includes('Error'), true);
+  // the detail view agrees with the list view
+  const detail = await store.getActivity('acct-w', 'news-only');
+  assert.equal(detail.outcome, newsOnly.outcome);
+  assert.deepEqual(detail.warnings, newsOnly.warnings);
+  assert.equal(detail.labels.includes('Error'), false);
+  assert.equal((await store.getActivity('acct-w', 'mixed')).outcome, 'Failed');
+  // default History filter (Error) no longer surfaces the news-only beat
+  const errors = (await store.listActivities('acct-w', { labels: ['Error'] })).activities.map(a => a.activityId).sort();
+  assert.deepEqual(errors, ['data-error', 'heartbeat-failed', 'mixed', 'order-error']);
+});
+
 test('history account identifiers reject traversal and separators before lookup', () => {
   for (const value of ['', '../acct', 'acct/child', 'acct\\child', 'C:account', '..']) assert.equal(isValidHistoryAccountId(value), false, value);
   assert.equal(isValidHistoryAccountId('__manager__'), true);

@@ -3,8 +3,8 @@ import fs from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const inputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-near-support', 'tg-slope', 'tg-extra-symbols', 'tg-daily-check'];
-const guidance = { contractDeltaMin: 0.45, contractDeltaMax: 0.65, expiryMinDays: 30, expiryMaxDays: 60, minEntryPct: 5, extendedPct: 3, marketSymbol: 'SPY', nearSupportPct: 1.5, avgSlopeMinPct: -0.15, extraSymbolsPerScan: 25, dailyAlphaDeskCheck: true };
+const inputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-market-tolerance', 'tg-market-slope', 'tg-near-support', 'tg-slope', 'tg-extra-symbols'];
+const guidance = { contractDeltaMin: 0.40, contractDeltaMax: 0.70, expiryMinDays: 21, expiryMaxDays: 60, minEntryPct: 5, extendedPct: 4, marketSymbol: 'SPY', marketTolerancePct: 0.5, marketSlopeMinPct: -0.15, nearSupportPct: 2.5, avgSlopeMinPct: -0.30, extraSymbolsPerScan: 25 };
 
 async function makeUi() {
   const html = await fs.readFile(new URL('../agent/public/index.html', import.meta.url), 'utf8');

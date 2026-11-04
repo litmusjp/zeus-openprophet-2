@@ -80,21 +80,30 @@ func TestDailyFeaturesValidationAndPartialFailure(t *testing.T) {
 
 type expirationTradingService struct {
 	*reconciliationTradingService
-	err error
+	err       error
+	unchecked []services.UncheckedExpiration
 }
 
-func (s *expirationTradingService) GetOptionExpirations(_ context.Context, underlying string, minDTE, maxDTE int) ([]services.OptionExpiration, error) {
+func (s *expirationTradingService) ListOptionExpirations(_ context.Context, underlying string, minDTE, maxDTE int) (services.OptionExpirationsResult, error) {
 	if s.err != nil {
-		return nil, s.err
+		return services.OptionExpirationsResult{}, s.err
 	}
-	return []services.OptionExpiration{{Date: "2026-12-18", DTE: minDTE + 10}}, nil
+	return services.OptionExpirationsResult{Expirations: []services.OptionExpiration{{Date: "2026-12-18", DTE: minDTE + 10}}, Unchecked: s.unchecked}, nil
 }
 
 func TestOptionExpirationsEndpoint(t *testing.T) {
 	controller := NewOrderController(&expirationTradingService{reconciliationTradingService: &reconciliationTradingService{}}, nil, nil)
 	recorder, body := getJSON(t, controller.GetOptionExpirations, "/x?min_dte=14&max_dte=60", gin.Params{{Key: "symbol", Value: "spy"}})
-	if recorder.Code != 200 || body["symbol"] != "SPY" || body["count"].(float64) != 1 {
+	if recorder.Code != 200 || body["symbol"] != "SPY" || body["count"].(float64) != 1 || body["complete"] != true {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if _, present := body["unchecked"]; present {
+		t.Fatalf("a complete list must not carry unchecked dates: %s", recorder.Body.String())
+	}
+	partial := NewOrderController(&expirationTradingService{reconciliationTradingService: &reconciliationTradingService{}, unchecked: []services.UncheckedExpiration{{Date: "2026-12-11", DTE: 36, Reason: "provider request failed"}}}, nil, nil)
+	precorder, pbody := getJSON(t, partial.GetOptionExpirations, "/x?min_dte=14&max_dte=60", gin.Params{{Key: "symbol", Value: "SPY"}})
+	if precorder.Code != 200 || pbody["complete"] != false || len(pbody["unchecked"].([]interface{})) != 1 || pbody["count"].(float64) != 1 {
+		t.Fatalf("partial list should be 200 with unchecked dates: status=%d body=%s", precorder.Code, precorder.Body.String())
 	}
 	if recorder, _ := getJSON(t, controller.GetOptionExpirations, "/x?min_dte=abc", gin.Params{{Key: "symbol", Value: "SPY"}}); recorder.Code != 400 {
 		t.Fatalf("bad min_dte should be 400, got %d", recorder.Code)

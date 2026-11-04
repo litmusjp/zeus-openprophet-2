@@ -1067,14 +1067,15 @@
             <div class="section-title" style="font-size:12px;margin:16px 0 12px">How to read the strategy wording</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <div class="form-group"><label>"Extended" = close more than (% above level)</label><input type="number" id="tg-extended" min="0.5" max="25" step="0.5" disabled onchange="saveTradingGuidance()"></div>
-              <div class="form-group"><label>"Market supportive" benchmark</label><input type="text" id="tg-market-symbol" maxlength="6" disabled onchange="saveTradingGuidance()"><div class="form-hint">Closed above its 20-day average, or that average rising.</div></div>
+              <div class="form-group"><label>"Market supportive" benchmark</label><input type="text" id="tg-market-symbol" maxlength="6" disabled onchange="saveTradingGuidance()"><div class="form-hint">Supportive if any one holds: close within the tolerance below its 20-day average, latest price above it, or the average's 5-session change at least the minimum below.</div></div>
+              <div class="form-group"><label>"Market supportive" tolerance (% below the 20-day average)</label><input type="number" id="tg-market-tolerance" min="0" max="5" step="0.1" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>"Market supportive" average 5-session change at least (%)</label><input type="number" id="tg-market-slope" min="-5" max="5" step="0.05" disabled onchange="saveTradingGuidance()"></div>
               <div class="form-group"><label>"Near support" = within (% of 20-session low)</label><input type="number" id="tg-near-support" min="0.1" max="10" step="0.1" disabled onchange="saveTradingGuidance()"></div>
               <div class="form-group"><label>"Flat or rising average" = 5-session change at least (%)</label><input type="number" id="tg-slope" min="-5" max="5" step="0.05" disabled onchange="saveTradingGuidance()"></div>
             </div>
             <div class="section-title" style="font-size:12px;margin:16px 0 12px">Scanning</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <div class="form-group"><label>Extra symbols per scan (beyond the start list)</label><input type="number" id="tg-extra-symbols" min="0" max="100" step="1" disabled onchange="saveTradingGuidance()"></div>
-              <label style="text-transform:none;font-weight:400;font-size:13px;align-self:end"><input type="checkbox" id="tg-daily-check" disabled onchange="saveTradingGuidance()"> Daily AlphaDesk research check (no order)</label>
             </div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:16px">
               <button class="btn sm" id="tg-reset" disabled onclick="resetTradingGuidance()">Reset to defaults</button>
@@ -4306,13 +4307,13 @@ let _tgDefaults = null;
 let _tgLoadedSandboxId = null;
 let _tgRequestSandboxId = null;
 let _tgLoadRequest = 0;
-const _tgInputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-near-support', 'tg-slope', 'tg-extra-symbols', 'tg-daily-check'];
+const _tgInputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-market-tolerance', 'tg-market-slope', 'tg-near-support', 'tg-slope', 'tg-extra-symbols'];
 function setTradingGuidanceEnabled(enabled) {
   for (const id of _tgInputIds) { const el = document.getElementById(id); if (el) el.disabled = !enabled; }
   const reset = document.getElementById('tg-reset'); if (reset) reset.disabled = !enabled;
 }
 function clearTradingGuidanceInputs() {
-  for (const id of _tgInputIds) { const el = document.getElementById(id); if (el) { if (id === 'tg-daily-check') el.checked = false; else el.value = ''; } }
+  for (const id of _tgInputIds) { const el = document.getElementById(id); if (el) el.value = ''; }
 }
 function ensureTradingGuidanceScope() {
   const sid = getEffectiveSandboxId();
@@ -4324,8 +4325,8 @@ function setTradingGuidanceInputs(g) {
   set('tg-expiry-min', g.expiryMinDays); set('tg-expiry-max', g.expiryMaxDays);
   set('tg-min-entry', g.minEntryPct); set('tg-extended', g.extendedPct);
   set('tg-market-symbol', g.marketSymbol); set('tg-near-support', g.nearSupportPct);
+  set('tg-market-tolerance', g.marketTolerancePct); set('tg-market-slope', g.marketSlopeMinPct);
   set('tg-slope', g.avgSlopeMinPct); set('tg-extra-symbols', g.extraSymbolsPerScan);
-  const check = document.getElementById('tg-daily-check'); if (check) check.checked = g.dailyAlphaDeskCheck === true;
 }
 async function loadTradingGuidanceUI() {
   const card = document.getElementById('trading-guidance-card');
@@ -4374,8 +4375,9 @@ function saveTradingGuidance(overrideBody) {
     expiryMinDays: num('tg-expiry-min'), expiryMaxDays: num('tg-expiry-max'),
     minEntryPct: num('tg-min-entry'), extendedPct: num('tg-extended'),
     marketSymbol: document.getElementById('tg-market-symbol').value.trim().toUpperCase(),
+    marketTolerancePct: num('tg-market-tolerance'), marketSlopeMinPct: num('tg-market-slope'),
     nearSupportPct: num('tg-near-support'), avgSlopeMinPct: num('tg-slope'),
-    extraSymbolsPerScan: num('tg-extra-symbols'), dailyAlphaDeskCheck: document.getElementById('tg-daily-check').checked,
+    extraSymbolsPerScan: num('tg-extra-symbols'),
   };
   body.sandboxId = sid;
   _tgTimer = setTimeout(async () => {

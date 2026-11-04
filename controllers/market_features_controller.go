@@ -24,7 +24,7 @@ const (
 var symbolPattern = regexp.MustCompile(`^[A-Z][A-Z0-9.\-]{0,5}$`)
 
 type optionExpirationService interface {
-	GetOptionExpirations(ctx context.Context, underlying string, minDTE, maxDTE int) ([]services.OptionExpiration, error)
+	ListOptionExpirations(ctx context.Context, underlying string, minDTE, maxDTE int) (services.OptionExpirationsResult, error)
 }
 
 var (
@@ -145,7 +145,7 @@ func (oc *OrderController) GetOptionExpirations(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
-	expirations, err := provider.GetOptionExpirations(ctx, symbol, minDTE, maxDTE)
+	result, err := provider.ListOptionExpirations(ctx, symbol, minDTE, maxDTE)
 	if err != nil {
 		if strings.Contains(err.Error(), "invalid DTE window") {
 			c.JSON(400, gin.H{"error": err.Error()})
@@ -155,11 +155,17 @@ func (oc *OrderController) GetOptionExpirations(c *gin.Context) {
 		c.JSON(503, gin.H{"status": "unavailable", "category": "provider_unavailable", "endpoint": "options_expirations", "error": "option expirations are unavailable"})
 		return
 	}
-	c.JSON(200, gin.H{
+	body := gin.H{
 		"status": "available", "symbol": symbol, "min_dte": minDTE, "max_dte": maxDTE,
-		"count": len(expirations), "expirations": expirations,
-		"note": "Dates with listed call contracts. Pass one as `expiration` to the options chain.",
-	})
+		"count": len(result.Expirations), "expirations": result.Expirations,
+		"complete": len(result.Unchecked) == 0,
+		"note":     "Dates with listed call contracts. Pass one as `expiration` to the options chain.",
+	}
+	if len(result.Unchecked) > 0 {
+		body["unchecked"] = result.Unchecked
+		body["note"] = "Confirmed dates with listed call contracts. The unchecked dates could not be verified: they are unknown, not absent. Choose only a confirmed date and pass it as `expiration` to the options chain."
+	}
+	c.JSON(200, body)
 }
 
 // HandleGetEarnings reports scheduled earnings dates from a public calendar.

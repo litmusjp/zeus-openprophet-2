@@ -1088,7 +1088,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_daily_features',
-        description: 'Arithmetic facts about COMPLETED daily bars for up to 25 symbols in one call: last and prior-session OHLCV, SMA20 and its 5-session slope, last close vs SMA20, prior 10/20-session high and low (excluding the last bar), prior 20-session average volume and the last-volume ratio, and the last five completed bars. The session still forming is excluded. Facts only, not signals. Each symbol states its feed (sip = consolidated, preferred; iex = IEX-only, whose highs, lows and volume can differ). A symbol that fails carries its own error without failing the batch.',
+        description: 'Arithmetic facts about COMPLETED daily bars for up to 25 symbols in one call: last and prior-session OHLCV, SMA20 and its 5-session slope, last close vs SMA20, prior 10/20-session high and low (excluding the last bar), prior 20-session average volume and the last-volume ratio, and the last five completed bars. It also returns ready-made signed distances so you do not compute them by hand: low_vs_low_prior_20_sessions_pct (last low vs the prior 20-session low; negative means it undercut), close_vs_high_prior_10_sessions_pct and close_vs_high_prior_20_sessions_pct (last close vs those prior highs; positive means above), and the flags undercut_prior_session_low and close_above_open (strictly greater). A field is omitted when its history is missing. The session still forming is excluded. Facts only, not signals. Each symbol states its feed (sip = consolidated, preferred; iex = IEX-only, whose highs, lows and volume can differ). A symbol that fails carries its own error without failing the batch.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1103,7 +1103,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_option_expirations',
-        description: 'List the expiration dates that actually have listed call contracts for an underlying within a days-to-expiry window (default 1-60, maximum span 90). Use it to choose an expiry, then pass that date as expiration to get_options_chain. An error means the list could not be completed; it never returns a partial list.',
+        description: 'List the expiration dates that actually have listed call contracts for an underlying within a days-to-expiry window (default 1-60, maximum span 90). Use it to choose an expiry, then pass that date as expiration to get_options_chain. If some dates could not be verified the list is still returned with complete=false and an unchecked list: those dates are unknown, not absent, so choose only a confirmed date. An error means no date could be verified.',
         inputSchema: {
           type: 'object',
           properties: {

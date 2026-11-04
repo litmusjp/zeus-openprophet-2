@@ -36,6 +36,14 @@ type DailyFeatures struct {
 	Low20Prior       *float64        `json:"low_prior_20_sessions,omitempty"`
 	AvgVolume20Prior *float64        `json:"avg_volume_prior_20_sessions,omitempty"`
 	LastVolumeRatio  *float64        `json:"last_volume_to_avg_ratio,omitempty"`
+	// Signed distances so callers read the number instead of doing the arithmetic. Each is
+	// (last value - reference level) / reference level x 100 and is omitted when the history
+	// needed for the reference window is missing.
+	LowVsLow20PriorPct    *float64 `json:"low_vs_low_prior_20_sessions_pct,omitempty"`
+	CloseVsHigh10PriorPct *float64 `json:"close_vs_high_prior_10_sessions_pct,omitempty"`
+	CloseVsHigh20PriorPct *float64 `json:"close_vs_high_prior_20_sessions_pct,omitempty"`
+	UndercutPriorLow      *bool    `json:"undercut_prior_session_low,omitempty"`
+	CloseAboveOpen        *bool    `json:"close_above_open,omitempty"`
 	Recent           []DailyBarFacts `json:"recent_completed_bars,omitempty"`
 	Notes            []string        `json:"notes,omitempty"`
 	Error            string          `json:"error,omitempty"`
@@ -88,9 +96,13 @@ func ComputeDailyFeatures(symbol string, completed []*interfaces.Bar, loc *time.
 	lastFacts := barFacts(last, loc)
 	out.Last = &lastFacts
 	out.LastCompleteDate = lastFacts.Date
+	closeAboveOpen := last.Close > last.Open
+	out.CloseAboveOpen = &closeAboveOpen
 	if n >= 2 {
 		prior := barFacts(completed[n-2], loc)
 		out.Prior = &prior
+		undercut := last.Low < completed[n-2].Low
+		out.UndercutPriorLow = &undercut
 	}
 	if n >= 20 {
 		sma := meanClose(completed[n-20:])
@@ -105,11 +117,20 @@ func ComputeDailyFeatures(symbol string, completed []*interfaces.Bar, loc *time.
 	if n >= 11 {
 		high, low := highLow(completed[n-11 : n-1])
 		out.High10Prior, out.Low10Prior = roundedPtr(high), roundedPtr(low)
+		if high > 0 {
+			out.CloseVsHigh10PriorPct = roundedPtr((last.Close/high - 1) * 100)
+		}
 	}
 	if n >= 21 {
 		window := completed[n-21 : n-1]
 		high, low := highLow(window)
 		out.High20Prior, out.Low20Prior = roundedPtr(high), roundedPtr(low)
+		if high > 0 {
+			out.CloseVsHigh20PriorPct = roundedPtr((last.Close/high - 1) * 100)
+		}
+		if low > 0 {
+			out.LowVsLow20PriorPct = roundedPtr((last.Low/low - 1) * 100)
+		}
 		total := 0.0
 		for _, bar := range window {
 			total += float64(bar.Volume)

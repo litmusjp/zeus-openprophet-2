@@ -23,21 +23,48 @@ type OptionExpiration struct {
 	DTE  int    `json:"dte"`
 }
 
-// GetOptionExpirations lists listed expiries between minDTE and maxDTE calendar days from today
+// UncheckedExpiration is a weekday whose probe failed, so whether it lists contracts is unknown.
+type UncheckedExpiration struct {
+	Date   string `json:"date"`
+	DTE    int    `json:"dte"`
+	Reason string `json:"reason"`
+}
+
+// OptionExpirationsResult is a possibly partial expiry list: Expirations are confirmed dates and
+// Unchecked are dates that could not be verified (unknown, not absent).
+type OptionExpirationsResult struct {
+	Expirations []OptionExpiration    `json:"expirations"`
+	Unchecked   []UncheckedExpiration `json:"unchecked,omitempty"`
+}
+
+// GetOptionExpirations is the strict form: any unchecked date fails the whole call.
+func (s *AlpacaTradingService) GetOptionExpirations(ctx context.Context, underlying string, minDTE, maxDTE int) ([]OptionExpiration, error) {
+	result, err := s.ListOptionExpirations(ctx, underlying, minDTE, maxDTE)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Unchecked) > 0 {
+		return nil, fmt.Errorf("expiration lookup incomplete for %s", result.Unchecked[0].Date)
+	}
+	return result.Expirations, nil
+}
+
+// ListOptionExpirations lists listed expiries between minDTE and maxDTE calendar days from today
 // (New York date). It probes each weekday with a one-contract snapshot request on the same data
 // endpoint and credentials the chain uses, so a date appears only when contracts actually exist.
-// Any probe failure fails the whole call: a partial list could hide the expiry the caller needs.
-func (s *AlpacaTradingService) GetOptionExpirations(ctx context.Context, underlying string, minDTE, maxDTE int) ([]OptionExpiration, error) {
+// A probe that fails is reported under Unchecked instead of hiding the dates that were confirmed;
+// the call fails only when every probe fails (or the request is invalid).
+func (s *AlpacaTradingService) ListOptionExpirations(ctx context.Context, underlying string, minDTE, maxDTE int) (OptionExpirationsResult, error) {
 	underlying = strings.ToUpper(strings.TrimSpace(underlying))
 	if underlying == "" {
-		return nil, fmt.Errorf("underlying is required")
+		return OptionExpirationsResult{}, fmt.Errorf("underlying is required")
 	}
 	if minDTE < 0 || maxDTE < minDTE || maxDTE-minDTE > maxExpirationWindowDays {
-		return nil, fmt.Errorf("invalid DTE window: need 0 <= min_dte <= max_dte and a span of at most %d days", maxExpirationWindowDays)
+		return OptionExpirationsResult{}, fmt.Errorf("invalid DTE window: need 0 <= min_dte <= max_dte and a span of at most %d days", maxExpirationWindowDays)
 	}
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
-		return nil, fmt.Errorf("trading timezone is unavailable")
+		return OptionExpirationsResult{}, fmt.Errorf("trading timezone is unavailable")
 	}
 	now := time.Now().In(loc)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
@@ -74,17 +101,26 @@ func (s *AlpacaTradingService) GetOptionExpirations(ctx context.Context, underly
 	}
 	wg.Wait()
 
-	out := []OptionExpiration{}
+	result := OptionExpirationsResult{Expirations: []OptionExpiration{}}
+	var firstErr error
 	for i, p := range probes {
 		if p.err != nil {
-			return nil, fmt.Errorf("expiration lookup incomplete for %s: %w", candidates[i].date, p.err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("expiration lookup incomplete for %s: %w", candidates[i].date, p.err)
+			}
+			result.Unchecked = append(result.Unchecked, UncheckedExpiration{Date: candidates[i].date, DTE: candidates[i].dte, Reason: "provider request failed"})
+			continue
 		}
 		if p.exists {
-			out = append(out, OptionExpiration{Date: candidates[i].date, DTE: candidates[i].dte})
+			result.Expirations = append(result.Expirations, OptionExpiration{Date: candidates[i].date, DTE: candidates[i].dte})
 		}
 	}
-	sort.Slice(out, func(a, b int) bool { return out[a].Date < out[b].Date })
-	return out, nil
+	if firstErr != nil && len(result.Unchecked) == len(candidates) {
+		// every probe failed: nothing was confirmed, so there is no usable list at all
+		return OptionExpirationsResult{}, firstErr
+	}
+	sort.Slice(result.Expirations, func(a, b int) bool { return result.Expirations[a].Date < result.Expirations[b].Date })
+	return result, nil
 }
 
 func (s *AlpacaTradingService) expirationExists(ctx context.Context, underlying, date string) (bool, error) {

@@ -131,7 +131,7 @@ export async function setTradingGuidanceForSandbox(sandboxId, patch) {
   if (unknown.length) throw new Error(`Unknown trading guidance field: ${unknown[0]}`);
   const next = normalizeTradingGuidance(patch, { strict: true, base: getTradingGuidanceForSandbox(id) });
   const snapshot = { version: 1, sandboxes: { ...store.sandboxes, [id]: { ...next, updatedAt: new Date().toISOString() } } };
-  writeChain = writeChain.then(async () => {
+  writeChain = writeChain.catch(() => {}).then(async () => {
     await fs.mkdir(dataDir(), { recursive: true });
     const tmp = `${filePath()}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(snapshot, null, 2));

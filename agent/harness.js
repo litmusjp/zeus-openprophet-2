@@ -436,7 +436,7 @@ ${riskDisciplineGuidance}
 - maxOrderValue=0 means there is no single-order dollar cap; it does not disable trading and is not an order blocker. A positive maxOrderValue is the only time the dollar cap applies. All other configured risk limits and permission flags still apply.
 - daily loss is derived from current broker account/P&L state, not from a dedicated status tool.
 - Always use limit orders; never market into a position you can't price.
-- Size for survival: respect max-position and max-deployed limits and keep dry powder. Size each new entry at no less than ${guidance.minEntryPct}% of current account equity in option premium (limit price x contracts x 100), rounded to whole contracts, and never above the max-position limit; it must also fit remaining max-deployed, max-open-position and daily-loss capacity. If one contract alone exceeds the max-position limit, or remaining capacity is below 5%, skip the entry and report the reason. Account limits, not AlphaDesk, govern size.
+- Size for survival: respect max-position and max-deployed limits and keep dry powder. Size each new entry at no less than ${guidance.minEntryPct}% of current account equity in option premium (limit price x contracts x 100), rounded to whole contracts, and never above the max-position limit; it must also fit remaining max-deployed, max-open-position and daily-loss capacity. If one contract alone exceeds the max-position limit, or remaining capacity is below ${guidance.minEntryPct}%, skip the entry and report the reason. Account limits, not AlphaDesk, govern size.
 - The assigned strategy and recorded trade plan control exits, including whether a target or stop applies and the confirmation timeframe. Do not invent a target, tighten a stop, or advance a strategy exit trigger without support in that plan. Honor all existing risk controls and reducing-exit safeguards.
 - One clear thesis per trade. If you can't state it in a sentence, don't take it.
 
@@ -1311,10 +1311,13 @@ ${userBlock}`;
           && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
           this.state.emit('agent_log', { message: `Beat #${beatNum}: ${sanitizeOpenCodeError(result.error)} before any tool call; retrying once in a fresh session.`, level: 'warning' });
           await new Promise(resolve => setTimeout(resolve, this._beatRetryDelayMs ?? 5000));
-          this._sessionId = null;
-          const retried = await this._runClaude(prompt, model, actorSnapshot);
-          if (retried?.error) retried.error = `${retried.error} (after one retry)`;
-          result = retried;
+          if (this.state.running && !this.state.paused
+            && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
+            this._sessionId = null;
+            const retried = await this._runClaude(prompt, model, actorSnapshot);
+            if (retried?.error) retried.error = `${retried.error} (after one retry)`;
+            result = retried;
+          }
         }
       } catch (err) {
         executionFailed = true;

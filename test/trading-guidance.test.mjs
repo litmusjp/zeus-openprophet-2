@@ -68,6 +68,38 @@ test('saved guidance persists per sandbox and reaches the system prompt', async 
   assert.ok(prompt.indexOf('## Trading Guidance') > prompt.indexOf('## Strategy Rules'));
 });
 
+test('minimum-entry sizing and remaining-capacity prompt use the configured minimum', async () => {
+  const prompt = await buildSystemPrompt(
+    { id: 'momentum', sandboxId: 'sbx_custom', name: 'Surge', systemPromptTemplate: 'custom', strategyId: 's', customSystemPrompt: 'Surge identity.' },
+    { getStrategyById: () => ({ customRules: 'Rules.' }), tradingGuidance: { ...DEFAULT_TRADING_GUIDANCE, minEntryPct: 3.5 } });
+  assert.match(prompt, /no less than 3\.5% of current account equity/);
+  assert.match(prompt, /remaining capacity is below 3\.5%/);
+  assert.doesNotMatch(prompt, /remaining capacity is below 5%/);
+});
+
+test('a failed durable write does not poison the next guidance save or update memory', async t => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'op2-guidance-write-'));
+  const dir = path.join(parent, 'not-a-directory');
+  await fs.writeFile(dir, 'block mkdir');
+  const previous = process.env.OPENPROPHET_DATA_DIR;
+  process.env.OPENPROPHET_DATA_DIR = dir;
+  resetTradingGuidanceStoreForTests();
+  t.after(async () => {
+    process.env.OPENPROPHET_DATA_DIR = previous;
+    if (previous === undefined) delete process.env.OPENPROPHET_DATA_DIR;
+    resetTradingGuidanceStoreForTests();
+    await fs.rm(parent, { recursive: true, force: true });
+  });
+  await assert.rejects(() => setTradingGuidanceForSandbox('sbx_a', { extendedPct: 4 }), /ENOTDIR|EEXIST|not a directory/i);
+  assert.equal(getTradingGuidanceForSandbox('sbx_a').extendedPct, DEFAULT_TRADING_GUIDANCE.extendedPct);
+  await fs.unlink(dir);
+  await fs.mkdir(dir);
+  const saved = await setTradingGuidanceForSandbox('sbx_a', { extendedPct: 4 });
+  assert.equal(saved.extendedPct, 4);
+  assert.equal(getTradingGuidanceForSandbox('sbx_a').extendedPct, 4);
+  assert.equal(JSON.parse(await fs.readFile(path.join(dir, 'trading-guidance.json'), 'utf8')).sandboxes.sbx_a.extendedPct, 4);
+});
+
 test('the Settings page exposes the guidance fields and calls the API', async () => {
   const html = await fs.readFile(new URL('../agent/public/index.html', import.meta.url), 'utf8');
   for (const id of ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-near-support', 'tg-slope', 'tg-extra-symbols', 'tg-daily-check']) {

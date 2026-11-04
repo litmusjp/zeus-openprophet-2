@@ -1058,26 +1058,26 @@
           <div class="config-card">
             <div class="section-title" style="font-size:12px;margin-bottom:12px">Contract choice</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-              <div class="form-group"><label>Delta from</label><input type="number" id="tg-delta-min" min="0.05" max="0.95" step="0.05" onchange="saveTradingGuidance()"></div>
-              <div class="form-group"><label>Delta to</label><input type="number" id="tg-delta-max" min="0.05" max="0.95" step="0.05" onchange="saveTradingGuidance()"></div>
-              <div class="form-group"><label>Expiry from (days)</label><input type="number" id="tg-expiry-min" min="1" max="365" step="1" onchange="saveTradingGuidance()"></div>
-              <div class="form-group"><label>Expiry to (days)</label><input type="number" id="tg-expiry-max" min="1" max="365" step="1" onchange="saveTradingGuidance()"></div>
-              <div class="form-group"><label>Minimum new-entry size (% of equity)</label><input type="number" id="tg-min-entry" min="0.5" max="25" step="0.5" onchange="saveTradingGuidance()"><div class="form-hint">The Max Position Size above is still the cap.</div></div>
+              <div class="form-group"><label>Delta from</label><input type="number" id="tg-delta-min" min="0.05" max="0.95" step="0.05" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>Delta to</label><input type="number" id="tg-delta-max" min="0.05" max="0.95" step="0.05" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>Expiry from (days)</label><input type="number" id="tg-expiry-min" min="1" max="365" step="1" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>Expiry to (days)</label><input type="number" id="tg-expiry-max" min="1" max="365" step="1" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>Minimum new-entry size (% of equity)</label><input type="number" id="tg-min-entry" min="0.5" max="25" step="0.5" disabled onchange="saveTradingGuidance()"><div class="form-hint">The Max Position Size above is still the cap.</div></div>
             </div>
             <div class="section-title" style="font-size:12px;margin:16px 0 12px">How to read the strategy wording</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-              <div class="form-group"><label>"Extended" = close more than (% above level)</label><input type="number" id="tg-extended" min="0.5" max="25" step="0.5" onchange="saveTradingGuidance()"></div>
-              <div class="form-group"><label>"Market supportive" benchmark</label><input type="text" id="tg-market-symbol" maxlength="6" onchange="saveTradingGuidance()"><div class="form-hint">Closed above its 20-day average, or that average rising.</div></div>
-              <div class="form-group"><label>"Near support" = within (% of 20-session low)</label><input type="number" id="tg-near-support" min="0.1" max="10" step="0.1" onchange="saveTradingGuidance()"></div>
-              <div class="form-group"><label>"Flat or rising average" = 5-session change at least (%)</label><input type="number" id="tg-slope" min="-5" max="5" step="0.05" onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>"Extended" = close more than (% above level)</label><input type="number" id="tg-extended" min="0.5" max="25" step="0.5" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>"Market supportive" benchmark</label><input type="text" id="tg-market-symbol" maxlength="6" disabled onchange="saveTradingGuidance()"><div class="form-hint">Closed above its 20-day average, or that average rising.</div></div>
+              <div class="form-group"><label>"Near support" = within (% of 20-session low)</label><input type="number" id="tg-near-support" min="0.1" max="10" step="0.1" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>"Flat or rising average" = 5-session change at least (%)</label><input type="number" id="tg-slope" min="-5" max="5" step="0.05" disabled onchange="saveTradingGuidance()"></div>
             </div>
             <div class="section-title" style="font-size:12px;margin:16px 0 12px">Scanning</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-              <div class="form-group"><label>Extra symbols per scan (beyond the start list)</label><input type="number" id="tg-extra-symbols" min="0" max="100" step="1" onchange="saveTradingGuidance()"></div>
-              <label style="text-transform:none;font-weight:400;font-size:13px;align-self:end"><input type="checkbox" id="tg-daily-check" onchange="saveTradingGuidance()"> Daily AlphaDesk research check (no order)</label>
+              <div class="form-group"><label>Extra symbols per scan (beyond the start list)</label><input type="number" id="tg-extra-symbols" min="0" max="100" step="1" disabled onchange="saveTradingGuidance()"></div>
+              <label style="text-transform:none;font-weight:400;font-size:13px;align-self:end"><input type="checkbox" id="tg-daily-check" disabled onchange="saveTradingGuidance()"> Daily AlphaDesk research check (no order)</label>
             </div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:16px">
-              <button class="btn sm" onclick="resetTradingGuidance()">Reset to defaults</button>
+              <button class="btn sm" id="tg-reset" disabled onclick="resetTradingGuidance()">Reset to defaults</button>
               <span class="form-hint" id="tg-status"></span>
             </div>
           </div>
@@ -1218,6 +1218,7 @@ async function refreshSelectedSandboxView() {
 }
 
 async function refreshSelectedSandboxConfig() {
+  ensureTradingGuidanceScope();
   const sid = getEffectiveSandboxId();
   if (!sid || sid === '_manager') return;
   try {
@@ -2844,6 +2845,7 @@ async function sendManagerMessage() {
 async function switchSandboxTab(sandboxId) {
   // 1. Set selection immediately for UI
   selectedSandboxId = sandboxId || null;
+  ensureTradingGuidanceScope();
   showSelectedSandboxRuntime();
   renderSandboxTabs();
   
@@ -3507,6 +3509,7 @@ async function deleteAgent(id) { if(confirm('Delete this agent?')) await fetch('
 async function activateAccount(id) {
   await fetch('/api/accounts/'+id+'/activate',{method:'POST'});
   selectedSandboxId = null;
+  ensureTradingGuidanceScope();
 }
 async function deleteAccount(id) { if(confirm('Delete this account?')) await fetch('/api/accounts/'+id,{method:'DELETE'}); }
 async function deleteStrategy(id) { if(confirm('Delete this strategy?')) await fetch('/api/strategies/'+id,{method:'DELETE'}); }
@@ -4300,6 +4303,21 @@ function savePermissions() {
 // ── Trading Guidance ─────────────────────
 let _tgTimer = null;
 let _tgDefaults = null;
+let _tgLoadedSandboxId = null;
+let _tgRequestSandboxId = null;
+let _tgLoadRequest = 0;
+const _tgInputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-near-support', 'tg-slope', 'tg-extra-symbols', 'tg-daily-check'];
+function setTradingGuidanceEnabled(enabled) {
+  for (const id of _tgInputIds) { const el = document.getElementById(id); if (el) el.disabled = !enabled; }
+  const reset = document.getElementById('tg-reset'); if (reset) reset.disabled = !enabled;
+}
+function clearTradingGuidanceInputs() {
+  for (const id of _tgInputIds) { const el = document.getElementById(id); if (el) { if (id === 'tg-daily-check') el.checked = false; else el.value = ''; } }
+}
+function ensureTradingGuidanceScope() {
+  const sid = getEffectiveSandboxId();
+  if (_tgLoadedSandboxId !== sid && _tgRequestSandboxId !== sid) return loadTradingGuidanceUI();
+}
 function setTradingGuidanceInputs(g) {
   const set = (id, value) => { const el = document.getElementById(id); if (el) el.value = value; };
   set('tg-delta-min', g.contractDeltaMin); set('tg-delta-max', g.contractDeltaMax);
@@ -4313,23 +4331,43 @@ async function loadTradingGuidanceUI() {
   const card = document.getElementById('trading-guidance-card');
   if (!card) return;
   const sid = getEffectiveSandboxId();
-  if (!sid || sid === '_manager') { card.style.display = 'none'; return; }
-  card.style.display = '';
+  const request = ++_tgLoadRequest;
+  if (_tgTimer) clearTimeout(_tgTimer);
+  _tgTimer = null;
+  _tgLoadedSandboxId = null;
+  _tgDefaults = null;
+  _tgRequestSandboxId = sid && sid !== '_manager' ? sid : null;
+  setTradingGuidanceEnabled(false);
+  clearTradingGuidanceInputs();
   const status = document.getElementById('tg-status');
+  if (!sid || sid === '_manager') { _tgLoadedSandboxId = sid; card.style.display = 'none'; return; }
+  card.style.display = '';
+  if (status) status.textContent = 'Loading trading guidance…';
   try {
     const response = await fetch('/api/trading-guidance?sandboxId=' + encodeURIComponent(sid));
     if (!response.ok) throw new Error('unavailable');
     const data = await response.json();
-    if (getEffectiveSandboxId() !== sid) return;
+    if (request !== _tgLoadRequest || getEffectiveSandboxId() !== sid) return;
     _tgDefaults = data.defaults;
     setTradingGuidanceInputs(data.guidance);
+    _tgLoadedSandboxId = sid;
+    _tgRequestSandboxId = null;
+    setTradingGuidanceEnabled(true);
     if (status) status.textContent = '';
-  } catch { if (status) status.textContent = 'Trading guidance unavailable'; }
+  } catch {
+    if (request !== _tgLoadRequest || getEffectiveSandboxId() !== sid) return;
+    _tgDefaults = null;
+    _tgLoadedSandboxId = null;
+    _tgRequestSandboxId = null;
+    clearTradingGuidanceInputs();
+    setTradingGuidanceEnabled(false);
+    if (status) status.textContent = 'Trading guidance unavailable';
+  }
 }
 function saveTradingGuidance(overrideBody) {
   clearTimeout(_tgTimer);
   const sid = getEffectiveSandboxId();
-  if (!sid || sid === '_manager') return;
+  if (!sid || sid === '_manager' || _tgLoadedSandboxId !== sid) return;
   const num = id => Number(document.getElementById(id).value);
   const body = overrideBody || {
     contractDeltaMin: num('tg-delta-min'), contractDeltaMax: num('tg-delta-max'),
@@ -4341,6 +4379,7 @@ function saveTradingGuidance(overrideBody) {
   };
   body.sandboxId = sid;
   _tgTimer = setTimeout(async () => {
+    if (getEffectiveSandboxId() !== sid || _tgLoadedSandboxId !== sid) return;
     const status = document.getElementById('tg-status');
     try {
       const response = await fetch('/api/trading-guidance', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -4354,7 +4393,7 @@ function saveTradingGuidance(overrideBody) {
   }, 600);
 }
 function resetTradingGuidance() {
-  if (!_tgDefaults) return;
+  if (!_tgDefaults || _tgLoadedSandboxId !== getEffectiveSandboxId()) return;
   saveTradingGuidance({ ..._tgDefaults });
 }
 

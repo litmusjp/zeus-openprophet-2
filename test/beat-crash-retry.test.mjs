@@ -60,6 +60,33 @@ test('a beat that crashes before any tool call is retried once and succeeds', as
   assert.equal(harness.state.stats.errors, 0);
 });
 
+test('a stop, pause, epoch change, or account switch during retry delay prevents the retry', async t => {
+  for (const change of ['stop', 'pause', 'epoch', 'account']) {
+    await t.test(change, async () => {
+      const writes = [];
+      let spawns = 0;
+      const harness = makeHarness([[[], 1], [[], 0]], writes);
+      const original = harness.spawnFn;
+      harness.spawnFn = (...args) => { spawns++; return original(...args); };
+      const nativeTimeout = globalThis.setTimeout;
+      globalThis.setTimeout = callback => nativeTimeout(() => {
+        if (change === 'stop') { harness.state.running = false; harness._sessionEpoch++; }
+        if (change === 'pause') harness.state.paused = true;
+        if (change === 'epoch') harness._sessionEpoch++;
+        if (change === 'account') harness.state.activeAccountId = 'other';
+        callback();
+      }, 0);
+      const previousError = console.error;
+      console.error = () => {};
+      try { await harness._beat(); } finally { globalThis.setTimeout = nativeTimeout; console.error = previousError; }
+      assert.equal(spawns, 1, 'the failed beat must not relaunch after its lifecycle changes');
+      assert.equal(writes.filter(w => w.message?.kind === 'heartbeat_failure').length, change === 'pause' ? 1 : 0);
+      assert.equal(writes.filter(w => w.message?.kind === 'heartbeat').length, 0);
+      assert.equal(harness.state.stats.errors, 1, 'the original failed attempt remains a beat error');
+    });
+  }
+});
+
 test('a second early crash is recorded as a failure that mentions the retry, with no third attempt', async () => {
   const writes = [];
   let spawns = 0;

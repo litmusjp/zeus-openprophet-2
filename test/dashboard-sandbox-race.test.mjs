@@ -39,10 +39,12 @@ test('late dashboard and portfolio responses cannot repaint another selected san
   const accounts = { l1: deferred(), l2: deferred() };
   const positions = { l1: deferred(), l2: deferred() };
   const dom = new Map();
+  let guidanceScopeEnsures = 0;
   const element = id => dom.get(id) || (dom.set(id, { textContent: '', innerHTML: '', className: '', style: {} }), dom.get(id));
   const statElement = key => element('stat:' + key);
   const ctx = {
     selectedSandboxId: 'l1', sandboxScoped: {}, config: { sandboxes: { l1: {}, l2: {} } },
+    ensureTradingGuidanceScope() { guidanceScopeEnsures++; },
     document: { getElementById: element, querySelector: selector => statElement(selector.match(/data-stat="([^"]+)"/)?.[1] || '') },
     fetch: url => {
       if (url.includes('/dashboard')) return dashboards[url.includes('l1') ? 'l1' : 'l2'].promise;
@@ -73,6 +75,7 @@ test('late dashboard and portfolio responses cannot repaint another selected san
   assert.equal(ctx.state.sandboxId, 'l2');
   assert.equal(statElement('l2-portfolio').textContent, '$200.00');
   assert.equal(statElement('l1-portfolio').textContent, '');
+  assert.equal(guidanceScopeEnsures, 2);
 });
 
 test('late failed positions response cannot clear a newly selected portfolio', async () => {
@@ -160,12 +163,14 @@ test('state and health null schedules clear the selected countdown', async () =>
 test('uncached tab switch shows selected identity and hides mutation buttons while loading', async () => {
   const pending = deferred();
   const dom = new Map();
+  let guidanceScopeEnsures = 0;
   const element = id => dom.get(id) || (dom.set(id, { textContent: '', style: {}, className: '', classList: { add() {}, toggle() {} } }), dom.get(id));
   const ctx = {
     selectedSandboxId: 'l1', sandboxSchedule: {}, sandboxRuntime: { l1: { sandboxId: 'l1' } },
     config: { sandboxes: { l1: { name: 'Old' }, l2: { name: 'New', accountId: 'a2', agent: { activeAgentId: 'g2', model: 'opencode/new-model' } } }, accounts: [{ id: 'a2', name: 'New account', paper: false }], agents: [{ id: 'g2', name: 'New agent' }] },
     document: { getElementById: element },
     fetch: () => pending.promise, refreshSelectedSandboxConfig: () => pending.promise, refreshPortfolio: () => pending.promise,
+    ensureTradingGuidanceScope() { guidanceScopeEnsures++; },
     renderSandboxTabs() {}, renderAccounts() {}, _set: (id, value) => { element(id).textContent = value; },
     startProgress() {}, fmtInt: String, getEffectiveSandboxId: () => ctx.selectedSandboxId,
   };
@@ -174,6 +179,7 @@ test('uncached tab switch shows selected identity and hides mutation buttons whi
   element('operator-account-name').textContent = 'Old account';
   element('btn-stop').style.display = '';
   const switching = ctx.switchSandboxTab('l2');
+  assert.equal(guidanceScopeEnsures, 1);
   assert.equal(element('operator-account-name').textContent, 'New account');
   assert.equal(element('operator-agent-name').textContent, 'New agent');
   assert.equal(element('operator-model-name').textContent, 'new-model');

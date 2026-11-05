@@ -119,6 +119,48 @@ test('an optional news tool error is a warning, not a failed activity; essential
   assert.deepEqual(errors, ['data-error', 'heartbeat-failed', 'mixed', 'order-error']);
 });
 
+test('an optional-research warning is kept next to a recorded order status or a recovery', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'op2-activity-warn-status-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new ChatStore(root);
+  await store.startSession('acct-s', 'session-s', { agentName: 'Surge' });
+  const file = path.join(root, 'sandboxes', 'acct-s', 'chat-history', 'session-session-s.jsonl');
+  const records = [];
+  const add = (activityId, props) => records.push({ timestamp: new Date(Date.UTC(2026, 10, 5, 14, 0, records.length)).toISOString(), activityId, origin: 'Heartbeat', ...props });
+  const newsError = JSON.stringify({ error: 'provider_unavailable' });
+  // optional news failure + a recognised order status
+  add('news-and-accepted', { kind: 'tool_call', tool: 'get_cleaned_news', result: '', status: 'error', error: newsError });
+  add('news-and-accepted', { kind: 'tool_call', tool: 'place_options_order', result: '{"status":"accepted"}', status: 'completed' });
+  add('news-and-rejected', { kind: 'tool_call', tool: 'get_market_news', result: '', status: 'error', error: newsError });
+  add('news-and-rejected', { kind: 'tool_call', tool: 'place_options_order', result: '{"status":"rejected"}', status: 'completed' });
+  // optional news failure + a heartbeat recovery
+  add('news-and-recovery', { kind: 'tool_call', tool: 'get_cleaned_news', result: '', status: 'error', error: newsError });
+  add('news-and-recovery', { kind: 'heartbeat_recovery', content: 'recovered' });
+  // a recorded status without any warning stays exactly as before
+  add('status-only', { kind: 'tool_call', tool: 'place_options_order', result: '{"status":"accepted"}', status: 'completed' });
+  // an essential failure alongside a warning is still plain Failed
+  add('essential-and-news', { kind: 'tool_call', tool: 'get_cleaned_news', result: '', status: 'error', error: newsError });
+  add('essential-and-news', { kind: 'tool_call', tool: 'get_account', result: '', status: 'error', error: '{"error":"broker unavailable"}' });
+  await fs.appendFile(file, records.map(r => JSON.stringify(r)).join('\n') + '\n');
+
+  const listed = new Map((await store.listActivities('acct-s', { limit: 50 })).activities.map(a => [a.activityId, a]));
+  const expected = new Map([
+    ['news-and-accepted', 'Recorded: accepted (warning: get_cleaned_news unavailable)'],
+    ['news-and-rejected', 'Recorded: rejected (warning: get_market_news unavailable)'],
+    ['news-and-recovery', 'Recovered (warning: get_cleaned_news unavailable)'],
+    ['status-only', 'Recorded: accepted'],
+    ['essential-and-news', 'Failed'],
+  ]);
+  for (const [id, outcome] of expected) {
+    assert.equal(listed.get(id).outcome, outcome, `list outcome for ${id}`);
+    assert.equal((await store.getActivity('acct-s', id)).outcome, outcome, `detail outcome for ${id}`);
+  }
+  assert.deepEqual(listed.get('news-and-accepted').warnings, ['get_cleaned_news']);
+  assert.equal(listed.get('news-and-accepted').labels.includes('Error'), false, 'a warning never adds the Error label');
+  assert.equal(listed.get('news-and-accepted').labels.includes('Trade'), true, 'the order tool still labels the activity as a trade');
+  assert.deepEqual(listed.get('status-only').warnings, []);
+});
+
 test('history account identifiers reject traversal and separators before lookup', () => {
   for (const value of ['', '../acct', 'acct/child', 'acct\\child', 'C:account', '..']) assert.equal(isValidHistoryAccountId(value), false, value);
   assert.equal(isValidHistoryAccountId('__manager__'), true);

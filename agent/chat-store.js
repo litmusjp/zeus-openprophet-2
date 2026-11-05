@@ -54,11 +54,13 @@ function classifyFailures(records) {
   return { essential, warnings: [...new Set(warnings)] };
 }
 function activityOutcome({ recovery, status, essential, warnings }) {
-  if (recovery) return 'Recovered';
-  if (status) return `Recorded: ${status}`;
+  // An optional-research warning is appended to whichever outcome applies, so it is never hidden by a
+  // recorded order status or a recovery. An essential failure keeps the plain Failed outcome.
+  const warning = warnings.length ? ` (warning: ${warnings.join(', ')} unavailable)` : '';
+  if (recovery) return `Recovered${warning}`;
+  if (status) return `Recorded: ${status}${warning}`;
   if (essential.length) return 'Failed';
-  if (warnings.length) return `Recorded (warning: ${warnings.join(', ')} unavailable)`;
-  return 'Recorded';
+  return `Recorded${warning}`;
 }
 
 function recordedToolStatus(record) {

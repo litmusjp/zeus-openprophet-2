@@ -321,7 +321,8 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   const withoutLegacyOverride = scopedPrompt ? stripLegacyMvpOverride(storedCustomPrompt) : storedCustomPrompt;
   const customPrompt = normalizeLegacyWorkflowSize(withoutLegacyOverride,
     (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'mean-reversion')
-    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'momentum'));
+    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'momentum')
+    || (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'catalyst'));
   const workflowStart = customPrompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW');
   const workflowEnd = customPrompt.indexOf('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
   const scopedWorkflowPresent = scopedPrompt && workflowStart >= 0 && workflowEnd > workflowStart;

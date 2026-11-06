@@ -53,7 +53,7 @@ func (s *AlpacaDataService) GetHistoricalBarsWithFeed(ctx context.Context, symbo
 	// Convert timeframe string to Alpaca TimeFrame
 	tf := s.parseTimeframe(timeframe)
 
-	barsResp, feed, err := fetchBarsPreferSIP(func(feed marketdata.Feed, from, to time.Time) ([]marketdata.Bar, error) {
+	barsResp, feed, err := fetchBarsForTimeframe(func(feed marketdata.Feed, from, to time.Time) ([]marketdata.Bar, error) {
 		return s.client.GetBars(symbol, marketdata.GetBarsRequest{
 			TimeFrame:  tf,
 			Start:      from,
@@ -62,7 +62,7 @@ func (s *AlpacaDataService) GetHistoricalBarsWithFeed(ctx context.Context, symbo
 			PageLimit:  10000, // Max allowed
 			Adjustment: marketdata.All,
 		})
-	}, start, end, time.Now())
+	}, start, end, time.Now(), timeframe)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to fetch historical bars")
 		return nil, feed, fmt.Errorf("failed to get historical bars: %w", err)

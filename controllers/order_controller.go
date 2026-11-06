@@ -1466,16 +1466,37 @@ func (oc *OrderController) quoteSessionContext(ctx context.Context, symbol strin
 	if err != nil {
 		return nil
 	}
-	barCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	barCtx, cancel := context.WithTimeout(ctx, quoteSessionTimeout)
 	defer cancel()
-	bars, feed, barErr := historicalBarsWithFeed(barCtx, oc.dataService, symbol, now.AddDate(0, 0, -10), now, "1Day")
-	if barErr != nil {
-		out := buildSessionContext(nil, feed, trade, now, loc)
-		out.Note = "Session facts are unavailable right now (daily bars could not be read). The quote itself is unaffected."
+	// The data service does not pass this context to the provider SDK, so the deadline is enforced here:
+	// the read runs in its own goroutine and the quote does not wait past the deadline.
+	type barsResult struct {
+		bars []*interfaces.Bar
+		feed string
+		err  error
+	}
+	results := make(chan barsResult, 1)
+	go func() {
+		bars, feed, barErr := historicalBarsWithFeed(barCtx, oc.dataService, symbol, now.AddDate(0, 0, -10), now, "1Day")
+		results <- barsResult{bars: bars, feed: feed, err: barErr}
+	}()
+	select {
+	case result := <-results:
+		if result.err != nil {
+			out := buildSessionContext(nil, result.feed, trade, now, loc)
+			out.Note = "Session facts are unavailable right now (daily bars could not be read). The quote itself is unaffected."
+			return out
+		}
+		return buildSessionContext(result.bars, result.feed, trade, now, loc)
+	case <-barCtx.Done():
+		out := buildSessionContext(nil, "", trade, now, loc)
+		out.Note = "Session facts are unavailable right now (the daily bars request timed out). The quote itself is unaffected."
 		return out
 	}
-	return buildSessionContext(bars, feed, trade, now, loc)
 }
+
+// quoteSessionTimeout bounds the optional session enrichment of a quote.
+var quoteSessionTimeout = 6 * time.Second
 
 // HandleGetBar handles HTTP get latest bar requests
 // GET /api/v1/market/bar/:symbol

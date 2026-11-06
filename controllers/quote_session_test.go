@@ -143,3 +143,40 @@ func TestQuoteEndpointKeepsOriginalFieldsAndNeverFailsOnSessionErrors(t *testing
 		t.Fatalf("original quote fields must be preserved: %s", recorder.Body.String())
 	}
 }
+
+type blockingBarsData struct {
+	*sessionQuoteData
+	release chan struct{}
+}
+
+func (d *blockingBarsData) GetHistoricalBars(context.Context, string, time.Time, time.Time, string) ([]*interfaces.Bar, error) {
+	<-d.release // a provider that ignores the context and answers far too slowly
+	return nil, nil
+}
+
+func TestSlowSessionEnrichmentDoesNotDelayTheQuote(t *testing.T) {
+	previous := quoteSessionTimeout
+	quoteSessionTimeout = 80 * time.Millisecond
+	defer func() { quoteSessionTimeout = previous }()
+	release := make(chan struct{})
+	defer close(release)
+	quote := &interfaces.Quote{Symbol: "SPY", BidPrice: 100, AskPrice: 100.02, Timestamp: time.Now()}
+	trade := &interfaces.Trade{Price: 100.01, Size: 10, Timestamp: time.Now()}
+	controller := NewOrderController(nil, &blockingBarsData{sessionQuoteData: &sessionQuoteData{quote: quote, trade: trade}, release: release}, nil)
+	started := time.Now()
+	recorder, body := getJSON(t, controller.HandleGetQuote, "/x", gin.Params{{Key: "symbol", Value: "SPY"}})
+	elapsed := time.Since(started)
+	if elapsed > 2*time.Second {
+		t.Fatalf("the quote waited %v for a slow provider; the enrichment deadline must be enforced", elapsed)
+	}
+	session, _ := body["session"].(map[string]interface{})
+	if recorder.Code != 200 || body["quote_flag"] != "ok" || body["Symbol"] != "SPY" || body["last_trade"] == nil {
+		t.Fatalf("the original quote must be intact: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if session == nil || session["status"] != "unavailable" {
+		t.Fatalf("session should be unavailable after the timeout: %s", recorder.Body.String())
+	}
+	if _, has := session["daily_open"]; has {
+		t.Fatalf("a timed-out session must not invent an open: %v", session)
+	}
+}

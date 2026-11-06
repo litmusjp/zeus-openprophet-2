@@ -466,6 +466,7 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		api.GET("/news", newsController.HandleGetNews)
 		api.GET("/news/topic/:topic", newsController.HandleGetNewsByTopic)
 		api.GET("/news/search", newsController.HandleSearchNews)
+		api.GET("/news/alpaca", orderController.HandleGetAlpacaNews)
 		api.GET("/news/market", newsController.HandleGetMarketNews)
 
 		// MarketWatch endpoints

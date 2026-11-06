@@ -33,7 +33,7 @@ function hasStructuredFailure(record) {
 // activity; it must not mark the whole activity Failed/Error. Every other failure (broker, orders,
 // account, risk, data, chain, assessment, heartbeat) keeps the Failed/Error treatment.
 const OPTIONAL_RESEARCH_TOOLS = new Set([
-  'get_news', 'get_news_by_topic', 'search_news', 'get_market_news', 'get_cleaned_news',
+  'get_alpaca_news', 'get_news', 'get_news_by_topic', 'search_news', 'get_market_news', 'get_cleaned_news',
   'get_quick_market_intelligence', 'aggregate_and_summarize_news', 'list_news_summaries', 'get_news_summary',
   'get_marketwatch_topstories', 'get_marketwatch_realtime', 'get_marketwatch_bulletins',
 ]);

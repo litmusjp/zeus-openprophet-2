@@ -2,7 +2,7 @@
 // verified without starting the trading backend or OpenCode sessions.
 export const MANAGER_ALLOWED_MCP_TOOLS = new Set([
   'get_account', 'get_positions', 'get_orders', 'get_managed_positions', 'get_managed_position',
-  'get_quote', 'get_latest_bar', 'get_historical_bars', 'get_news', 'get_news_by_topic',
+  'get_quote', 'get_latest_bar', 'get_historical_bars', 'get_alpaca_news', 'get_news', 'get_news_by_topic',
   'search_news', 'get_market_news', 'aggregate_and_summarize_news', 'list_news_summaries',
   'get_news_summary', 'get_marketwatch_topstories', 'get_marketwatch_realtime',
   'get_marketwatch_bulletins', 'get_marketwatch_marketpulse', 'get_marketwatch_all',

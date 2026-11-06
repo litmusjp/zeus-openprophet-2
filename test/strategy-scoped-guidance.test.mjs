@@ -45,7 +45,11 @@ test('catalyst guidance is direction-aware, intraday, and drops the daily defini
   // discovery uses the news tools; earnings are never entry evidence
   assert.match(text, /prophet_get_news, prophet_search_news, prophet_get_market_news/);
   assert.match(text, /prophet_get_earnings_dates only warns you off positions ahead of a scheduled release; it is never entry evidence/);
-  assert.match(text, /AlphaDesk reads its own Alpaca symbol-tagged news from the last 36 hours/);
+  assert.match(text, /call prophet_get_alpaca_news first for your watch-list names/);
+  assert.match(text, /follow has_more with page_token/);
+  assert.match(text, /a successful Alpaca result does not stop you checking them/);
+  assert.match(text, /an updated_at or fetched_at never resets the clock/);
+  assert.match(text, /a story found only on Google or MarketWatch may not appear in its evidence/);
   // the range is anchored to the news, with completed 5-minute bars only
   assert.match(text, /news published before the open .* the first 30 minutes of regular-session completed 5-minute bars/);
   assert.match(text, /news published during the session, the high and low of the first 30 minutes of completed 5-minute bars after the publication time/);

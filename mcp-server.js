@@ -621,7 +621,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_news',
-        description: 'Get latest news from Google News RSS feed',
+        description: 'Get latest headlines from the Google News RSS feed (broad, not symbol-specific). For company news use get_alpaca_news first; keep this for wider discovery and verification.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -630,6 +630,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Number of news items to return (default: 20)',
             },
           },
+        },
+      },
+      {
+        name: 'get_alpaca_news',
+        description: 'Company news from Alpaca (Benzinga and other providers), symbol-tagged, for up to 30 symbols over the last 1-72 hours (default 36, the window AlphaDesk reads). Use this FIRST when you research company news; the Google/MarketWatch tools stay available for verification, the original announcement, wider discovery, or when this is empty or unavailable. Results are sorted by updated_at: created_at is the article time, and updated_at or fetched_at never marks a new event. Each article keeps id, source, symbols, url, created_at and updated_at. Check has_more and pass next_page_token as page_token for the next page; a capped page is not the whole window. status is available, empty (a real empty result) or unavailable (a failure, with a category). A symbol tag does not make an article a company-specific event.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbols: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Up to 30 ticker symbols, e.g. ["AAPL","NVDA"]',
+            },
+            hours: {
+              type: 'number',
+              description: 'Look-back window in hours, 1-72 (default 36)',
+            },
+            limit: {
+              type: 'number',
+              description: 'Articles per page, 1-50 (default 20)',
+            },
+            page_token: {
+              type: 'string',
+              description: 'next_page_token from a previous result, to fetch the next page',
+            },
+          },
+          required: ['symbols'],
         },
       },
       {
@@ -649,7 +676,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'search_news',
-        description: 'Search for news by keyword or stock symbol',
+        description: 'Search Google News by keyword or stock symbol. For company news use get_alpaca_news first; keep this for wider discovery, verification and original-announcement checks.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1706,6 +1733,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case 'get_alpaca_news': {
+        const symbols = Array.isArray(args.symbols) ? args.symbols : [];
+        const params = new URLSearchParams({ symbols: symbols.join(',') });
+        if (args.hours !== undefined) params.append('hours', args.hours);
+        if (args.limit !== undefined) params.append('limit', args.limit);
+        if (args.page_token) params.append('page_token', args.page_token);
+        const data = await callTradingBot(`/news/alpaca?${params.toString()}`, 'GET', null, { returnAvailability: true });
+        // compact JSON on purpose: keep a full page well under the runtime's inline output cap
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       }
 
       case 'get_news_by_topic': {

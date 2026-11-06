@@ -6,7 +6,7 @@ export const TOOL_CATALOG = {
   'Trading': ['get_account', 'get_positions', 'get_orders', 'place_buy_order', 'place_sell_order', 'place_managed_position', 'get_managed_positions', 'close_managed_position', 'cancel_order', 'withdraw_planned_intent'],
   'Options': ['get_options_assessment_policy', 'assess_options_trade', 'place_options_order', 'get_options_positions', 'get_options_position', 'get_option_expirations', 'get_options_chain'],
   'Market Data': ['get_quote', 'get_latest_bar', 'get_historical_bars', 'get_daily_features', 'get_earnings_dates', 'get_market_snapshot', 'analyze_stocks'],
-  'News': ['get_news', 'search_news', 'get_market_news', 'get_quick_market_intelligence', 'get_cleaned_news', 'get_marketwatch_topstories', 'get_marketwatch_realtime'],
+  'News': ['get_alpaca_news', 'get_news', 'search_news', 'get_market_news', 'get_quick_market_intelligence', 'get_cleaned_news', 'get_marketwatch_topstories', 'get_marketwatch_realtime'],
   'Intelligence': ['aggregate_and_summarize_news', 'list_news_summaries', 'get_news_summary'],
   'Agent Config': ['list_sandboxes', 'get_agent_config', 'set_heartbeat', 'update_permissions'],
   'Heartbeat': ['get_heartbeat_profiles', 'apply_heartbeat_profile', 'get_heartbeat_phases', 'update_heartbeat_phase'],

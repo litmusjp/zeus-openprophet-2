@@ -19,6 +19,8 @@ export const DEFAULT_TRADING_GUIDANCE = Object.freeze({
   nearSupportPct: 2.5,
   avgSlopeMinPct: -0.30,
   extraSymbolsPerScan: 25,
+  catalystRangeMinutes: 30,
+  catalystMaxGapPct: 12,
 });
 
 // Settings that no longer exist. A stored value is ignored and a save that still carries one (for
@@ -38,6 +40,8 @@ const NUMERIC = Object.freeze({
   nearSupportPct: [0.1, 10, false],
   avgSlopeMinPct: [-5, 5, false],
   extraSymbolsPerScan: [0, 100, true],
+  catalystRangeMinutes: [5, 120, true],
+  catalystMaxGapPct: [1, 25, false],
 });
 const SYMBOL = /^[A-Z][A-Z0-9.\-]{0,5}$/;
 
@@ -84,27 +88,90 @@ export function normalizeTradingGuidance(input = {}, { strict = false, base = DE
   return out;
 }
 
+/**
+ * Which kind of strategy an assigned strategy id is, so the guidance only states definitions that
+ * strategy actually uses. Unknown strategies get every definition, each labelled with its owner.
+ */
+export function strategyFamilyOf(strategyId) {
+  switch (String(strategyId || '')) {
+    case 'etf-mean-reversion': return 'mean-reversion';
+    case 'equity-momentum': return 'breakout';
+    case 'catalyst-news': return 'catalyst';
+    default: return 'unknown';
+  }
+}
+
+const CALLS_ONLY_CONTRACT = g => `- Contract choice: buy calls with delta about ${g.contractDeltaMin} to ${g.contractDeltaMax}, expiring ${g.expiryMinDays} to ${g.expiryMaxDays} calendar days out and also beyond your intended hold. Pick the expiry first with prophet_get_option_expirations (choose only a confirmed date; dates it lists as unchecked are unknown, not absent), then call prophet_get_options_chain with that expiration and type call. Use max_cost only as a ceiling on ONE contract, never as a position budget. Go further from the money only if your strategy says so.`;
+
+const CATALYST_CONTRACT = g => `- Contract choice: buy a call for a qualified bullish reaction or a put for a qualified bearish one. Use a delta magnitude of about ${g.contractDeltaMin} to ${g.contractDeltaMax} (a put's delta is negative, so compare its absolute value), expiring ${g.expiryMinDays} to ${g.expiryMaxDays} calendar days out and also beyond your intended hold. Pick the expiry first with prophet_get_option_expirations (choose only a confirmed date; dates it lists as unchecked are unknown, not absent), then call prophet_get_options_chain with that expiration and the type that matches your direction (call or put). Use max_cost only as a ceiling on ONE contract, never as a position budget. Go further from the money only if your strategy says so.`;
+
+const marketSupportiveLine = g => `- "Market supportive" means ${g.marketSymbol} meets any one of: (a) its last completed close is no more than ${g.marketTolerancePct}% below its 20-day average; (b) its latest price now (last trade, or the bid/ask midpoint when quote_flag is ok) is above that 20-day average; (c) the 5-session change of that average is ${g.marketSlopeMinPct}% or higher. get_daily_features gives the average, the close versus the average and the 5-session change. Name the figures you used.`;
+const extendedLine = g => `- "Extended" means a completed close more than ${g.extendedPct}% above the broken level (close_vs_high_prior_10_sessions_pct or close_vs_high_prior_20_sessions_pct, whichever matches the range you broke).`;
+const sectorLine = () => `- "Sector supportive" (single stocks only) means the same test applied to the stock's sector ETF: XLK technology, XLF financials, XLY consumer discretionary, XLP consumer staples, XLE energy, XLV health care, XLI industrials, XLU utilities, XLB materials, XLC communication services, XLRE real estate, SMH semiconductors. Fetch the sector ETF in the same get_daily_features call and name it. ETFs use the market test only.`;
+const nearSupportLine = g => `- "Near support" means the session low is within ${g.nearSupportPct}% (either side) of the lowest low of the prior 20 sessions (low_vs_low_prior_20_sessions_pct; negative means the low undercut it).`;
+const flatRisingLine = g => `- "Flat or rising average" means the 5-session change of the 20-day average is ${g.avgSlopeMinPct}% or higher.`;
+const dailyVolumeLine = () => '- "Volume above average" means the last completed volume is above the prior 20-session average volume (last_volume_to_avg_ratio above 1). Volume is IEX volume unless the response says otherwise.';
+const computedFieldsLine = () => '- Use the ready-made fields from get_daily_features instead of calculating by hand: the signed distances above, undercut_prior_session_low, and close_above_open (strictly greater than the open; equal does not count).';
+
+function catalystLines(g) {
+  return [
+    '- Catalyst discovery: on every regular-session heartbeat, use prophet_get_news, prophet_search_news, prophet_get_market_news and the MarketWatch tools to find already-public, company-specific events (earnings results, guidance, major confirmed headlines) for liquid large-cap optionable stocks, including news from after the previous close and overnight. Verify that the item is a real published company event from a reliable source and note its publication time. These tools read Google and MarketWatch; AlphaDesk reads its own Alpaca symbol-tagged news from the last 36 hours, so a story you found may not appear in its evidence. prophet_get_earnings_dates only warns you off positions ahead of a scheduled release; it is never entry evidence, and you never position ahead of a scheduled release.',
+    '- Direction: a bullish reaction is a call and a bearish reaction is a put; judge the economic meaning yourself. AlphaDesk reads direction from a short list of words in the headlines and requires price to be on the matching side of today\'s open, so it can disagree with you. If it does, record the result and move to the next qualified opportunity. Never switch call and put, or change the setup, to obtain a PASS, and never manufacture news evidence.',
+    `- Initial post-news range: for news published before the open (including overnight and after the prior close), the high and low of the first ${g.catalystRangeMinutes} minutes of regular-session completed 5-minute bars. For news published during the session, the high and low of the first ${g.catalystRangeMinutes} minutes of completed 5-minute bars after the publication time. Request bars with prophet_get_historical_bars (timeframe 5Min) with explicit regular-session start and end timestamps (09:30 to 16:00 ET, given in UTC), use only bars marked complete=true, and state the feed.`,
+    '- Confirmation: a completed 5-minute bar closes above the range high (call) or below the range low (put), and that bar\'s volume is above the average volume of the range\'s completed bars (the baseline excludes the breakout bar and any bar still forming). Enter at a subsequent permitted evaluation, not inside the range window.',
+    `- Exhausted gap: skip a setup when the gap from the previous close is more than ${g.catalystMaxGapPct}%, or when the option already trades beyond a plausible remaining move.`,
+    '- Missing or incomplete data (no completed bars yet, unknown publication time, unverified source) is INCOMPLETE_RESEARCH, never confirmation.',
+    '- Use get_daily_features for the previous close, gap context and average volume only; the range and the confirmation come from completed 5-minute bars.',
+  ];
+}
+
 /** The Trading Guidance section added to the system prompt. */
-export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE) {
+export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, options = {}) {
   const g = normalizeTradingGuidance(guidance);
+  const family = strategyFamilyOf(options.strategyId);
   const lines = [
     '## Trading Guidance',
     'This is how to read your strategy rules in practice. The user can change these settings. They never override your Strategy Rules, permissions or risk limits, and never create a trade or a reason to skip a rule.',
-    `- Contract choice: buy calls with delta about ${g.contractDeltaMin} to ${g.contractDeltaMax}, expiring ${g.expiryMinDays} to ${g.expiryMaxDays} calendar days out and also beyond your intended hold. Pick the expiry first with prophet_get_option_expirations (choose only a confirmed date; dates it lists as unchecked are unknown, not absent), then call prophet_get_options_chain with that expiration and type call. Use max_cost only as a ceiling on ONE contract, never as a position budget. Go further from the money only if your strategy says so.`,
-    `- "Extended" means a completed close more than ${g.extendedPct}% above the broken level (close_vs_high_prior_10_sessions_pct or close_vs_high_prior_20_sessions_pct, whichever matches the range you broke).`,
-    `- "Market supportive" means ${g.marketSymbol} meets any one of: (a) its last completed close is no more than ${g.marketTolerancePct}% below its 20-day average; (b) its latest price now (last trade, or the bid/ask midpoint when quote_flag is ok) is above that 20-day average; (c) the 5-session change of that average is ${g.marketSlopeMinPct}% or higher. get_daily_features gives the average, the close versus the average and the 5-session change. Name the figures you used.`,
-    `- "Sector supportive" (single stocks only) means the same test applied to the stock's sector ETF: XLK technology, XLF financials, XLY consumer discretionary, XLP consumer staples, XLE energy, XLV health care, XLI industrials, XLU utilities, XLB materials, XLC communication services, XLRE real estate, SMH semiconductors. Fetch the sector ETF in the same get_daily_features call and name it. ETFs use the market test only.`,
-    `- "Near support" means the session low is within ${g.nearSupportPct}% (either side) of the lowest low of the prior 20 sessions (low_vs_low_prior_20_sessions_pct; negative means the low undercut it).`,
-    `- "Flat or rising average" means the 5-session change of the 20-day average is ${g.avgSlopeMinPct}% or higher.`,
-    '- "Volume above average" means the last completed volume is above the prior 20-session average volume (last_volume_to_avg_ratio above 1). Volume is IEX volume unless the response says otherwise.',
-    '- Use the ready-made fields from get_daily_features instead of calculating by hand: the signed distances above, undercut_prior_session_low, and close_above_open (strictly greater than the open; equal does not count).',
-    g.extraSymbolsPerScan > 0
-      ? `- Scan coverage: your SCAN UNIVERSE is a start list, not a limit. Complete every listed symbol first; a listed symbol you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP. Then extend the search to up to ${g.extraSymbolsPerScan} more symbols that fit your strategy's universe. Count as extras only symbols that are not on the start list, and name them. If you checked no extras, say why.`
-      : '- Scan coverage: check only the symbols in your SCAN UNIVERSE start list; a listed symbol you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP.',
-    '- Order of checks: apply the mandatory tests first. When one fails, stop researching that symbol and record the remaining checks as "not evaluated", never as passed. Check sector support and earnings only before you treat a setup as entry-ready.',
-    '- Wording in your own logs: mark a rejected candidate REJECT or NO_SETUP, never PASS. PASS means a genuine AlphaDesk receipt only, and a log entry or research note is not one.',
-    '- prophet_analyze_stocks includes a bar that is still forming. Do not use it as completed-bar evidence; use get_daily_features.',
+    family === 'catalyst' ? CATALYST_CONTRACT(g) : CALLS_ONLY_CONTRACT(g),
   ];
+  if (family === 'mean-reversion') {
+    lines.push(marketSupportiveLine(g), nearSupportLine(g), flatRisingLine(g), dailyVolumeLine(), computedFieldsLine());
+  } else if (family === 'breakout') {
+    lines.push(extendedLine(g), marketSupportiveLine(g), sectorLine(), dailyVolumeLine(), computedFieldsLine());
+  } else if (family === 'catalyst') {
+    lines.push(...catalystLines(g));
+  } else {
+    // unknown strategy: every definition, each labelled with the kind of strategy that uses it
+    lines.push(
+      `${extendedLine(g)} (Used by breakout strategies; apply only if your Strategy Rules use it.)`,
+      `${marketSupportiveLine(g)} (Used by breakout and mean-reversion strategies; apply only if your Strategy Rules use it.)`,
+      `${sectorLine()} (Used by breakout strategies.)`,
+      `${nearSupportLine(g)} (Used by mean-reversion strategies.)`,
+      `${flatRisingLine(g)} (Used by mean-reversion strategies.)`,
+      dailyVolumeLine(),
+      computedFieldsLine(),
+    );
+  }
+  if (family === 'catalyst') {
+    lines.push(g.extraSymbolsPerScan > 0
+      ? `- Catalyst coverage: the CATALYST UNIVERSE in your prompt is a start list, not a limit. Check each listed name for fresh company news, and also any other liquid large-cap optionable stock that appears in today's company news (up to ${g.extraSymbolsPerScan} more). A listed name you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP. Name what you checked.`
+      : '- Catalyst coverage: check only the names in your CATALYST UNIVERSE; a listed name you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP.');
+  } else {
+    lines.push(g.extraSymbolsPerScan > 0
+      ? `- Scan coverage: your SCAN UNIVERSE is a start list, not a limit. Complete every listed symbol first; a listed symbol you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP. Then extend the search to up to ${g.extraSymbolsPerScan} more symbols that fit your strategy's universe. Count as extras only symbols that are not on the start list, and name them. If you checked no extras, say why.`
+      : '- Scan coverage: check only the symbols in your SCAN UNIVERSE start list; a listed symbol you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP.');
+  }
+  lines.push(
+    '- Order of checks: apply the mandatory tests first. When one fails, stop researching that symbol and record the remaining checks as "not evaluated", never as passed. Check earnings and any other entry-readiness items (and, for breakout strategies, sector support) only before you treat a setup as entry-ready.',
+    '- Wording in your own logs: mark a rejected candidate REJECT or NO_SETUP, never PASS. PASS means a genuine AlphaDesk receipt only, and a log entry or research note is not one.',
+    'Apply only the definitions above that your Strategy Rules use; a field that is returned to you is information, not a rule.',
+    '- prophet_get_quote also returns a session block (today\'s open, the previous close and the change from the open, with timestamps and feed). AlphaDesk measures price action against today\'s open, so use it as context for where the stock stands. It is information, not a gate and not a prediction of a PASS.',
+    '- Preference (advisory only): among setups that already qualify under your own rules, prefer ones with recent company-specific news and strong current volume. This never adds or removes a rule.',
+    '- AlphaDesk outcomes: on FAIL or UNAVAILABLE, record the decision and its reasons and move to the next qualified opportunity, or re-evaluate on a later heartbeat under the workflow rule. Never change price, quantity or direction merely to obtain a PASS, and never manufacture evidence.',
+  );
+  if (family !== 'catalyst') {
+    lines.push('- prophet_analyze_stocks includes a bar that is still forming. Do not use it as completed-bar evidence; use get_daily_features.');
+  }
   return lines.join('\n');
 }
 

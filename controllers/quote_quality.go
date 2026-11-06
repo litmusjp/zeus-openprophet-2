@@ -28,6 +28,8 @@ type quoteResponse struct {
 	SpreadPct *float64       `json:"spread_pct,omitempty"`
 	QuoteFlag string         `json:"quote_flag"`
 	Note      string         `json:"note"`
+	// Session is additive context (today's open, previous close, change from the open); omitted when not attached.
+	Session *sessionContext `json:"session,omitempty"`
 }
 
 // buildQuoteResponse classifies a quote as ok, wide, stale or one_sided and attaches the last trade.

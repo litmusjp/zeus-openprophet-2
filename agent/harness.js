@@ -8,7 +8,7 @@ import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelV
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
-import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, getTradingGuidanceForSandbox } from './trading-guidance.js';
+import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, getTradingGuidanceForSandbox, strategyFamilyOf } from './trading-guidance.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
 import { nextMarketReview, marketSession, marketSessionPhase, validateMarketCalendar } from './market-aware-scheduler.js';
@@ -307,6 +307,10 @@ export function isEarlyOpenCodeCrash(result) {
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
   const guidance = normalizeTradingGuidance(options.tradingGuidance || DEFAULT_TRADING_GUIDANCE);
+  const isCatalystStrategy = strategyFamilyOf(agentConfig.strategyId) === 'catalyst';
+  // Catalyst setups are intraday, so the daily-bar operating rule (scan after the close, do not poll
+  // forming bars) would contradict them. They read live catalysts and completed 5-minute bars every beat.
+  const CATALYST_OPERATING_RULE = '- Catalyst setups are intraday. On every regular-session heartbeat: reconcile, scan for new public company catalysts, and for each live catalyst read completed 5-minute bars (complete=true only; a forming bar never counts) and act when the range break is confirmed. After the close, record next-session ideas with prophet_log_decision action WATCHLIST (symbol, catalyst, trigger level, invalidation, expiry window). For every candidate that you rejected, record the single number that failed (for example the gap percent, the range break or the volume versus the range baseline) in the decision log.';
   const scopedPromptOwner = {
     sbx_723be98b: ['catalyst', 'mean-reversion'],
     sbx_956ff9e4: ['mean-reversion', 'momentum'],
@@ -443,11 +447,11 @@ ${riskDisciplineGuidance}
 ## Operating Rules
 - You are autonomous for permitted actions. If requireConfirmation blocks an order, stop and report that operator approval is required; do not retry or work around the guardrail.
 - Be decisive. When nothing qualifies, report NO_SETUP, DATA_BLOCK or INCOMPLETE_RESEARCH per symbol group in a line or two; a scan that skipped candidates is INCOMPLETE_RESEARCH, not NO_SETUP.
-- Daily-bar facts only change after each close. Scan the strategy universe on completed daily bars after the close or before the open (record next-session candidates with \`prophet_log_decision\`, action "WATCHLIST": symbol, trigger level, invalidation, expiry window), then during the session act on WATCHLIST triggers, refresh exact option evidence, and manage positions; do not re-fetch unchanged daily history every beat. When you are flat, nothing is pending and you hold no WATCHLIST candidate, do not poll bars that are still forming (they cannot satisfy a completed-bar rule): reconcile, record the outcome and end the beat. For every symbol that cleared a recent high or looked like a candidate but was rejected, record the single number that failed (for example its volume ratio, extension or average slope) in the decision log.
+${isCatalystStrategy ? CATALYST_OPERATING_RULE : '- Daily-bar facts only change after each close. Scan the strategy universe on completed daily bars after the close or before the open (record next-session candidates with \`prophet_log_decision\`, action "WATCHLIST": symbol, trigger level, invalidation, expiry window), then during the session act on WATCHLIST triggers, refresh exact option evidence, and manage positions; do not re-fetch unchanged daily history every beat. When you are flat, nothing is pending and you hold no WATCHLIST candidate, do not poll bars that are still forming (they cannot satisfy a completed-bar rule): reconcile, record the outcome and end the beat. For every symbol that cleared a recent high or looked like a candidate but was rejected, record the single number that failed (for example its volume ratio, extension or average slope) in the decision log.'}
 - Re-establish live state (positions, orders, prices, quotes) from tools every beat. Prior-session context and your WATCHLIST records are for continuity only; verify them against live data before acting.
 - Report what you did (or deliberately didn't) and why, concisely.`;
 
-  return `${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance)}\n\n${systemInstructions}`;
+  return `${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId })}\n\n${systemInstructions}`;
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
@@ -1519,9 +1523,11 @@ ${userBlock}`;
       // Keep the strongest inherited cap across both aliases and leave other agents alone.
       primaryAgent.steps = Math.min(nativeStepBudget, ...inheritedStepCaps);
       // The native to-do tool only adds calls to every beat; trading agents keep their plan in decisions.
+      // The native task (helper agent) tool is denied too: on Nov 5 agents handed screening to a helper that
+      // invented thresholds; trading agents apply their own rules directly.
       primaryAgent.permission = {
         ...(primaryAgent.permission && typeof primaryAgent.permission === 'object' && !Array.isArray(primaryAgent.permission) ? primaryAgent.permission : {}),
-        todowrite: 'deny', todoread: 'deny',
+        todowrite: 'deny', todoread: 'deny', task: 'deny',
       };
       delete primaryAgent.maxSteps;
       invocationEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inherited, model: ocModel, small_model: ocModel, agent: agents });

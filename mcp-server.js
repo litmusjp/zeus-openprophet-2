@@ -566,7 +566,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_quote',
-        description: 'Get quote data for a stock symbol: IEX bid/ask (can be sparse or very wide for single stocks), the last trade price, spread %, and a quote_flag (ok, wide, stale, one_sided). When quote_flag is not ok, judge price from last_trade or the latest completed bar, not the bid/ask midpoint.',
+        description: 'Get quote data for a stock symbol: IEX bid/ask (can be sparse or very wide for single stocks), the last trade price, spread %, and a quote_flag (ok, wide, stale, one_sided). When quote_flag is not ok, judge price from last_trade or the latest completed bar, not the bid/ask midpoint. It also returns a session block: today\'s daily_open (once today\'s bar exists), the previous_close with its date, the last trade price, and change_from_open_pct and change_from_previous_close_pct, with the bars feed. Unknown values are omitted, never estimated. It is context for where the stock stands (AlphaDesk measures price action against today\'s open), not a gate and not a prediction of an AlphaDesk result.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2179,7 +2179,9 @@ ${allNews.map((article, i) =>
       case 'get_daily_features': {
         const symbols = Array.isArray(args.symbols) ? args.symbols : [];
         const data = await callTradingBot(`/market/daily-features?symbols=${encodeURIComponent(symbols.join(','))}`);
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+        // Compact JSON on purpose: a 25-symbol reply with indentation can exceed the runtime's inline
+        // output cap (about 50 KB), which sends the agent to a helper to read a spilled file.
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       }
 
       case 'get_option_expirations': {

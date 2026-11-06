@@ -1072,6 +1072,8 @@
               <div class="form-group"><label>"Market supportive" average 5-session change at least (%)</label><input type="number" id="tg-market-slope" min="-5" max="5" step="0.05" disabled onchange="saveTradingGuidance()"></div>
               <div class="form-group"><label>"Near support" = within (% of 20-session low)</label><input type="number" id="tg-near-support" min="0.1" max="10" step="0.1" disabled onchange="saveTradingGuidance()"></div>
               <div class="form-group"><label>"Flat or rising average" = 5-session change at least (%)</label><input type="number" id="tg-slope" min="-5" max="5" step="0.05" disabled onchange="saveTradingGuidance()"></div>
+              <div class="form-group"><label>Catalyst: post-news range length (minutes of completed 5-minute bars)</label><input type="number" id="tg-catalyst-range" min="5" max="120" step="5" disabled onchange="saveTradingGuidance()"><div class="form-hint">Used by the catalyst strategy only.</div></div>
+              <div class="form-group"><label>Catalyst: skip when the gap from the previous close is more than (%)</label><input type="number" id="tg-catalyst-gap" min="1" max="25" step="0.5" disabled onchange="saveTradingGuidance()"><div class="form-hint">Used by the catalyst strategy only.</div></div>
             </div>
             <div class="section-title" style="font-size:12px;margin:16px 0 12px">Scanning</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
@@ -4307,7 +4309,7 @@ let _tgDefaults = null;
 let _tgLoadedSandboxId = null;
 let _tgRequestSandboxId = null;
 let _tgLoadRequest = 0;
-const _tgInputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-market-tolerance', 'tg-market-slope', 'tg-near-support', 'tg-slope', 'tg-extra-symbols'];
+const _tgInputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-market-tolerance', 'tg-market-slope', 'tg-near-support', 'tg-slope', 'tg-extra-symbols', 'tg-catalyst-range', 'tg-catalyst-gap'];
 function setTradingGuidanceEnabled(enabled) {
   for (const id of _tgInputIds) { const el = document.getElementById(id); if (el) el.disabled = !enabled; }
   const reset = document.getElementById('tg-reset'); if (reset) reset.disabled = !enabled;
@@ -4327,6 +4329,7 @@ function setTradingGuidanceInputs(g) {
   set('tg-market-symbol', g.marketSymbol); set('tg-near-support', g.nearSupportPct);
   set('tg-market-tolerance', g.marketTolerancePct); set('tg-market-slope', g.marketSlopeMinPct);
   set('tg-slope', g.avgSlopeMinPct); set('tg-extra-symbols', g.extraSymbolsPerScan);
+  set('tg-catalyst-range', g.catalystRangeMinutes); set('tg-catalyst-gap', g.catalystMaxGapPct);
 }
 async function loadTradingGuidanceUI() {
   const card = document.getElementById('trading-guidance-card');
@@ -4378,6 +4381,7 @@ function saveTradingGuidance(overrideBody) {
     marketTolerancePct: num('tg-market-tolerance'), marketSlopeMinPct: num('tg-market-slope'),
     nearSupportPct: num('tg-near-support'), avgSlopeMinPct: num('tg-slope'),
     extraSymbolsPerScan: num('tg-extra-symbols'),
+    catalystRangeMinutes: num('tg-catalyst-range'), catalystMaxGapPct: num('tg-catalyst-gap'),
   };
   body.sandboxId = sid;
   _tgTimer = setTimeout(async () => {

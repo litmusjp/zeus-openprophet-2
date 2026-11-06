@@ -1453,7 +1453,28 @@ func (oc *OrderController) HandleGetQuote(c *gin.Context) {
 		trade = nil
 	}
 
-	c.JSON(200, buildQuoteResponse(quote, trade, time.Now()))
+	now := time.Now()
+	response := buildQuoteResponse(quote, trade, now)
+	response.Session = oc.quoteSessionContext(ctx, symbol, trade, now)
+	c.JSON(200, response)
+}
+
+// quoteSessionContext adds today's open and the previous close from daily bars. It never fails the quote:
+// when the bars cannot be read the session block says so and the rest of the quote is unchanged.
+func (oc *OrderController) quoteSessionContext(ctx context.Context, symbol string, trade *interfaces.Trade, now time.Time) *sessionContext {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return nil
+	}
+	barCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	bars, feed, barErr := historicalBarsWithFeed(barCtx, oc.dataService, symbol, now.AddDate(0, 0, -10), now, "1Day")
+	if barErr != nil {
+		out := buildSessionContext(nil, feed, trade, now, loc)
+		out.Note = "Session facts are unavailable right now (daily bars could not be read). The quote itself is unaffected."
+		return out
+	}
+	return buildSessionContext(bars, feed, trade, now, loc)
 }
 
 // HandleGetBar handles HTTP get latest bar requests

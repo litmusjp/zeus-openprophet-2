@@ -3,8 +3,8 @@ import fs from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const inputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-market-tolerance', 'tg-market-slope', 'tg-near-support', 'tg-slope', 'tg-extra-symbols'];
-const guidance = { contractDeltaMin: 0.40, contractDeltaMax: 0.70, expiryMinDays: 21, expiryMaxDays: 60, minEntryPct: 5, extendedPct: 4, marketSymbol: 'SPY', marketTolerancePct: 0.5, marketSlopeMinPct: -0.15, nearSupportPct: 2.5, avgSlopeMinPct: -0.30, extraSymbolsPerScan: 25 };
+const inputIds = ['tg-delta-min', 'tg-delta-max', 'tg-expiry-min', 'tg-expiry-max', 'tg-min-entry', 'tg-extended', 'tg-market-symbol', 'tg-market-tolerance', 'tg-market-slope', 'tg-near-support', 'tg-slope', 'tg-extra-symbols', 'tg-catalyst-range', 'tg-catalyst-gap'];
+const guidance = { contractDeltaMin: 0.40, contractDeltaMax: 0.70, expiryMinDays: 21, expiryMaxDays: 60, minEntryPct: 5, extendedPct: 4, marketSymbol: 'SPY', marketTolerancePct: 0.5, marketSlopeMinPct: -0.15, nearSupportPct: 2.5, avgSlopeMinPct: -0.30, extraSymbolsPerScan: 25, catalystRangeMinutes: 30, catalystMaxGapPct: 12 };
 
 async function makeUi() {
   const html = await fs.readFile(new URL('../agent/public/index.html', import.meta.url), 'utf8');

@@ -129,5 +129,6 @@ test('the trading agent cannot use the native to-do tool', async () => {
   const primary = config.agent[config.default_agent || 'build'];
   assert.equal(primary.permission.todowrite, 'deny');
   assert.equal(primary.permission.todoread, 'deny');
+  assert.equal(primary.permission.task, 'deny', 'the native helper-agent tool is denied for the trading agent');
   assert.ok(Number.isInteger(primary.steps) && primary.steps > 0, 'the native step budget is still applied');
 });

@@ -163,3 +163,19 @@ func TestAlpacaNewsTextIsBounded(t *testing.T) {
 		t.Fatalf("text must be bounded: err=%v", err)
 	}
 }
+
+func TestGetAlpacaNewsRejectsResponsesWithoutANewsArray(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"news":null}`, `{"next_page_token":null}`, `[]`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+		start, end := newsWindow()
+		_, err := newsService(server.URL, server.Client()).GetAlpacaNews(context.Background(), AlpacaNewsRequest{Symbols: []string{"AAPL"}, Start: start, End: end})
+		server.Close()
+		var newsErr *AlpacaNewsError
+		if !errors.As(err, &newsErr) || newsErr.Category != "provider_unavailable" {
+			t.Fatalf("body %s must be provider_unavailable, got %v", body, err)
+		}
+		if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), body) {
+			t.Fatalf("error must be sanitized: %v", err)
+		}
+	}
+}

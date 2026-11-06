@@ -141,6 +141,13 @@ func (s *AlpacaTradingService) GetAlpacaNews(ctx context.Context, req AlpacaNews
 		} `json:"news"`
 		NextPageToken *string `json:"next_page_token"`
 	}
+	// RawMessage tells a missing or null "news" field (invalid response) from a genuine empty array.
+	var probe struct {
+		News json.RawMessage `json:"news"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil || len(probe.News) == 0 || string(probe.News) == "null" {
+		return AlpacaNewsResult{}, &AlpacaNewsError{Category: "provider_unavailable", Status: status}
+	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return AlpacaNewsResult{}, &AlpacaNewsError{Category: "provider_unavailable", Status: status}
 	}

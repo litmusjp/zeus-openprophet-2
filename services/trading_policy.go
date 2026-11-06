@@ -383,7 +383,7 @@ func (p TradingPolicy) ValidateOptionsOrder(order *interfaces.OptionsOrder, snap
 	}
 	if !p.Allow0DTE {
 		_, expiry, _, _, ok := parseOCCOptionSymbol(order.Symbol)
-		if ok && sameUTCDay(expiry, time.Now().UTC()) {
+		if ok && sameUTCDay(expiry, PolicyNow()) {
 			return 0, fmt.Errorf("0DTE options are disabled by broker policy")
 		}
 	}
@@ -397,6 +397,10 @@ func (p TradingPolicy) ValidateOptionsOrder(order *interfaces.OptionsOrder, snap
 	}
 	return notional, nil
 }
+
+// PolicyNow is the clock the 0DTE rule reads. Production leaves it on the real clock; tests that use
+// fixed-date option contracts set it so a fixture expiry cannot become "today" and fail the suite on that date.
+var PolicyNow = func() time.Time { return time.Now().UTC() }
 
 func sameUTCDay(a, b time.Time) bool {
 	y1, m1, d1 := a.UTC().Date()

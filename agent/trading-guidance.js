@@ -124,25 +124,25 @@ const CATALYST_CONTRACT = g => `- Contract choice: buy a call for a qualified bu
 
 const DIRECTIONAL_CONTRACT = g => `- Contract choice: buy a call for a bullish thesis or a put for a bearish thesis. Use a delta magnitude of about ${g.contractDeltaMin} to ${g.contractDeltaMax} (a put's delta is negative, so compare its absolute value), expiring ${g.expiryMinDays} to ${g.expiryMaxDays} calendar days out and also beyond your intended hold. Pick the expiry first with prophet_get_option_expirations (choose only a confirmed date; dates it lists as unchecked are unknown, not absent; it lists dates that have listed call contracts, so confirm the put chain exists before proposing a put), then call prophet_get_options_chain with that expiration and the type that matches your direction (call or put). Use max_cost only as a ceiling on ONE contract, never as a position budget. Go further from the money only if your strategy says so.`;
 
-// Prophet's own rules use two styles (scalps and swings). AlphaDesk only accepts expiries inside its own
-// window, so the text states the overlap instead of letting the agent pick a contract that cannot pass.
+// Prophet labels each position a scalp (exit in the same session) or a swing. AlphaDesk only accepts expiries
+// inside its own window, so the text states the overlap instead of letting the agent pick a contract that cannot pass.
 function prophetExpiryWindow(g) {
   const lo = g.assessmentDteMin, hi = g.assessmentDteMax;
-  const scalp = [Math.max(2, lo), Math.min(5, hi)];
+  const scalp = [Math.max(2, lo), Math.min(10, hi)];
   const scalpOk = scalp[0] <= scalp[1];
-  let swing = [Math.max(50, lo), Math.min(120, hi)];
+  let swing = [Math.max(g.expiryMinDays, lo), Math.min(g.expiryMaxDays, hi)];
   let swingShortened = false;
   if (swing[0] > swing[1]) { swing = [lo, hi]; swingShortened = true; }
   const parts = [];
-  parts.push(scalpOk ? `scalps (SPY and QQQ): ${scalp[0]} to ${scalp[1]} calendar days to expiry` : 'scalps: not available, because their 2 to 5 day range is outside the AlphaDesk window');
+  parts.push(scalpOk ? `scalp (exit in the same session): ${scalp[0]} to ${scalp[1]} calendar days to expiry (OP2 blocks same-day expiry)` : 'scalp: not available, because no expiry that OP2 allows is inside the AlphaDesk window');
   parts.push(swingShortened
-    ? `swings: your 50 to 120 day range does not overlap the AlphaDesk window, so swings are limited to ${swing[0]} to ${swing[1]} calendar days to expiry (prefer the longest liquid expiry in it)`
-    : `swings: ${swing[0]} to ${swing[1]} calendar days to expiry`);
+    ? `swing: the usual ${g.expiryMinDays} to ${g.expiryMaxDays} days does not overlap the AlphaDesk window, so swings are limited to ${swing[0]} to ${swing[1]} calendar days to expiry`
+    : `swing: ${swing[0]} to ${swing[1]} calendar days to expiry`);
   return { text: parts.join('; '), scalpOk, swingOk: true, swing, scalp };
 }
 const PROPHET_CONTRACT = g => {
   const w = prophetExpiryWindow(g);
-  return `- Contract choice: your default is a call (your rules keep a long bias, with an occasional put when your thesis and rules support it). Use the expiry styles in your Strategy Rules, limited to what AlphaDesk accepts: AlphaDesk only passes an option that expires ${g.assessmentDteMin} to ${g.assessmentDteMax} calendar days out, so a contract outside that window cannot pass and is not a candidate. Available styles: ${w.text}. Use the delta your Strategy Rules prefer (about ${g.contractDeltaMin} to ${g.contractDeltaMax} unless they say otherwise; a put's delta is negative, so compare its absolute value). Pick the expiry first with prophet_get_option_expirations using a min_dte and max_dte inside that window (choose only a confirmed date; dates it lists as unchecked are unknown, not absent; it lists dates with listed call contracts, so confirm a put chain exists before proposing a put), then call prophet_get_options_chain with that expiration and the matching type. Use max_cost only as a ceiling on ONE contract, never as a position budget.`;
+  return `- Contract choice: buy mainly calls; buy a put only for a clearly bearish setup, never as a hedge. Label each position a scalp or a swing at entry and keep that horizon. Choose an expiry beyond your intended hold, limited to what AlphaDesk accepts: AlphaDesk only passes an option that expires ${g.assessmentDteMin} to ${g.assessmentDteMax} calendar days out, so a contract outside that window cannot pass and is not a candidate. Available styles: ${w.text}. Use a delta magnitude of about ${g.contractDeltaMin} to ${g.contractDeltaMax} (a put's delta is negative, so compare its absolute value). Pick the expiry first with prophet_get_option_expirations using a min_dte and max_dte inside that window (choose only a confirmed date; dates it lists as unchecked are unknown, not absent; it lists dates with listed call contracts, so confirm a put chain exists before proposing a put), then call prophet_get_options_chain with that expiration and the matching type. Use max_cost only as a ceiling on ONE contract, never as a position budget.`;
 };
 const pricingLine = g => `- Option cost discipline: compute each exact OCC contract's spread as (ask - bid) / mid before you propose it. Skip a contract whose spread is above ${g.maxOptionSpreadPct}% unless your Strategy Rules set a tighter cap, in which case the tighter cap applies; a stricter rule of your strategy always wins. Among qualifying strikes and expiries prefer the tightest spread. Start an entry limit at the mid and never above the ask. To exit after your thesis or stop is invalidated, use a marketable limit at or just below the current bid of the same contract; to take profit, start at the mid and reprice on a later heartbeat. Any repricing follows the existing cancel, reconcile and new exact proposal rules, and a price is never changed to obtain a PASS. Option quotes can be indicative; say so when it matters.`;
 const alphaDeskLogLine = () => '- AlphaDesk outcome record: after every assessment or guarded order call, record the decision, signal_score and the reasons or failed checks in prophet_log_decision. If the score is not returned, write "unavailable"; never invent or estimate one. It is a signal-quality score, not a forecast of profit.';
@@ -183,17 +183,17 @@ export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, optio
           : CALLS_ONLY_CONTRACT(g),
   ];
   if (family === 'long-vol') {
-    // Vega's own rules decide entries (a stated thesis or a confirmed catalyst). No breakout, market-trend
-    // or sector test is added here; the definitions below are information only.
+    // Vega's own Strategy Rules decide entries and exits. No breakout, market-trend or sector test is added here;
+    // the definitions below are information only, and the evidence line only points at the tools that exist.
     lines.push(
-      '- Thesis: your Strategy Rules require a statable directional or volatility-expansion thesis, or a confirmed catalyst; Trading Guidance adds no breakout, market-trend or sector test to them. Verify any catalyst through a tool call and note its publication time.',
+      '- Thesis: your Strategy Rules decide every entry and exit (a dated event inside the hold, a directional view consistent with the prevailing trend, and evidence that the premium is reasonably priced for the anticipated move). Trading Guidance adds no breakout, market-trend or sector test to them. Find dated events with prophet_get_earnings_dates (status unknown means unverified). For the anticipated move, use the at-the-money straddle price and the implied volatility of the event expiry compared with a nearer expiry in prophet_get_options_chain, and the underlying\'s recent realized moves from completed daily bars. Say which evidence you used and which you could not get; no tool returns an implied-volatility history.',
       dailyVolumeLine(),
       computedFieldsLine(),
       '- Market-wide discovery (advised, not required): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface names outside your start list.',
     );
   } else if (family === 'prophet') {
     lines.push(
-      `- Your Strategy Rules already set your spread cap (under 10% of mid), limit orders at mid-price or better, and your scalp and swing limits; keep them. If the Trading Guidance spread cap below is tighter than yours, the tighter one applies.`,
+      '- Your Strategy Rules decide every entry and exit (a breakout aligned with the higher timeframe, a completed-bar retest that holds, momentum resuming). Trading Guidance adds no further gate; use the option cost discipline line below. For scalps use completed intraday bars (complete=true only) and record the bar timeframe; for swings use completed daily bars and the weekly trend.',
       dailyVolumeLine(),
       computedFieldsLine(),
       '- Market-wide discovery (optional): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface names outside your start list. It is never required.',

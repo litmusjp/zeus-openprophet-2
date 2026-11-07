@@ -42,32 +42,37 @@ test('strategy families: Vega and Prophet have their own; the others are unchang
   assert.equal(strategyFamilyOf(undefined), 'unknown');
 });
 
-test('Vega gets calls and puts, no breakout, market-trend or sector gate, and its own thesis wording', () => {
+test('Vega gets calls and puts, no breakout, market-trend or sector gate, and no claim about its rules beyond the live ones', () => {
   const text = guidance('long-premium-volatility');
   assert.match(text, /buy a call for a bullish thesis or a put for a bearish thesis/);
+  assert.match(text, /your Strategy Rules decide every entry and exit \(a dated event inside the hold, a directional view consistent with the prevailing trend/);
   assert.match(text, /Trading Guidance adds no breakout, market-trend or sector test/);
+  assert.match(text, /no tool returns an implied-volatility history/);
+  assert.match(text, /at-the-money straddle price/);
   assert.doesNotMatch(text, /Market supportive|"Extended"|Sector supportive|Near support|Flat or rising average/);
   assert.doesNotMatch(text, /Initial post-news range|Catalyst discovery/);
   assert.match(text, /Market-wide discovery \(advised, not required\)/);
   assert.doesNotMatch(text, /only (buy )?calls|calls only/i);
 });
 
-test('Prophet keeps its long bias and its expiry styles, limited to the AlphaDesk window', () => {
+test('Prophet follows its live rules (mainly calls, scalp or swing) and its expiries are limited to the AlphaDesk window', () => {
   const open = guidance('default');
-  assert.match(open, /your default is a call/);
+  assert.match(open, /buy mainly calls; buy a put only for a clearly bearish setup, never as a hedge/);
+  assert.match(open, /Label each position a scalp or a swing at entry/);
   assert.match(open, /expires 1 to 180 calendar days out/);
-  assert.match(open, /scalps \(SPY and QQQ\): 2 to 5 calendar days to expiry; swings: 50 to 120 calendar days to expiry/);
-  assert.match(open, /spread cap \(under 10% of mid\), limit orders at mid-price or better/);
+  assert.match(open, /scalp \(exit in the same session\): 2 to 10 calendar days to expiry \(OP2 blocks same-day expiry\); swing: 21 to 60 calendar days to expiry/);
+  assert.match(open, /a breakout aligned with the higher timeframe, a completed-bar retest that holds, momentum resuming/);
   assert.match(open, /Market-wide discovery \(optional\)/);
   assert.doesNotMatch(open, /Market supportive|Sector supportive|Initial post-news range/);
+  assert.doesNotMatch(open, /under 10% of mid|50 to 120|2 to 5 calendar/);
 
   const narrow = guidance('default', { assessmentDteMin: 14, assessmentDteMax: 45 });
-  assert.match(narrow, /scalps: not available, because their 2 to 5 day range is outside the AlphaDesk window/);
-  assert.match(narrow, /swings are limited to 14 to 45 calendar days to expiry/);
+  assert.match(narrow, /scalp: not available, because no expiry that OP2 allows is inside the AlphaDesk window; swing: 21 to 45 calendar days to expiry/);
   assert.match(narrow, /expires 14 to 45 calendar days out/);
 
-  const mid = guidance('default', { assessmentDteMin: 3, assessmentDteMax: 90 });
-  assert.match(mid, /scalps \(SPY and QQQ\): 3 to 5 calendar days to expiry; swings: 50 to 90 calendar days to expiry/);
+  const below = guidance('default', { assessmentDteMin: 3, assessmentDteMax: 15 });
+  assert.match(below, /scalp \(exit in the same session\): 3 to 10 calendar days to expiry/);
+  assert.match(below, /swing: the usual 21 to 60 days does not overlap the AlphaDesk window, so swings are limited to 3 to 15 calendar days to expiry/);
 });
 
 test('every family gets the spread cap, pricing and AlphaDesk-record lines; a stricter strategy rule wins', () => {

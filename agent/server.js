@@ -554,6 +554,8 @@ async function refreshAllHarnessConfigs(options = {}) {
   await Promise.allSettled(tasks);
 }
 
+const SSE_KEEPALIVE_MS = 20000;
+
 function broadcast(event, data) {
   if (sseClients.size === 0) return; // skip serialization when no clients connected
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -747,11 +749,16 @@ app.get('/api/events', (req, res) => {
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'Access-Control-Allow-Origin': '*',
+    'X-Accel-Buffering': 'no',
   });
   res.write(`event: state\ndata: ${JSON.stringify({ ...harness.state.toJSON(), sandboxId: getActiveSandbox()?.id || null })}\n\n`);
   res.write(`event: config\ndata: ${JSON.stringify(safeConfig())}\n\n`);
   sseClients.add(res);
-  req.on('close', () => sseClients.delete(res));
+  // A comment line every 20 s keeps proxies from closing an idle stream. A dropped stream loses live events
+  // (agent replies) because the browser does not replay what it missed while it reconnects.
+  const keepAlive = setInterval(() => { try { res.write(': keepalive\n\n'); } catch { /* closed */ } }, SSE_KEEPALIVE_MS);
+  if (typeof keepAlive.unref === 'function') keepAlive.unref();
+  req.on('close', () => { clearInterval(keepAlive); sseClients.delete(res); });
 });
 
 // ── Agent Control ──────────────────────────────────────────────────

@@ -1372,7 +1372,10 @@ function connectSSE() {
   const es = new EventSource(withAuthUrl('/api/events'));
   _eventSource = es;
   es.onopen = () => {
+    const wasReconnect = _sseReconnectAttempts > 0;
     _sseReconnectAttempts = 0;
+    // Live events are not replayed after a reconnect, so say so where a reply may have been missed.
+    if (wasReconnect && typeof sandboxTerminals === 'object' && typeof logToSandbox === 'function') Object.keys(sandboxTerminals).forEach(sid => logToSandbox(sid, `<div class="log-entry warning"><span class="time">${fmtTime()}</span>Live connection restored. Anything sent while it was down is not shown here; agent replies are saved in History.</div>`));
     document.getElementById('sse-status').textContent = 'ok'; 
     document.getElementById('sse-status').style.color = 'var(--success)';
     checkHealth(); refreshSelectedSandboxConfig(); refreshPortfolio();

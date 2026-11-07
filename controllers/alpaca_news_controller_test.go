@@ -58,7 +58,7 @@ func TestAlpacaNewsEndpointForwardsHoursLimitAndPageToken(t *testing.T) {
 
 func TestAlpacaNewsEndpointValidatesInput(t *testing.T) {
 	controller := NewOrderController(&fakeNewsService{reconciliationTradingService: &reconciliationTradingService{}}, nil, nil)
-	for _, path := range []string{"/x", "/x?symbols=bad%20symbol", "/x?symbols=AAPL&hours=0", "/x?symbols=AAPL&hours=999", "/x?symbols=AAPL&limit=0", "/x?symbols=AAPL&limit=51", "/x?symbols=AAPL&hours=abc"} {
+	for _, path := range []string{"/x?symbols=bad%20symbol", "/x?symbols=AAPL&hours=0", "/x?symbols=AAPL&hours=999", "/x?symbols=AAPL&limit=0", "/x?symbols=AAPL&limit=51", "/x?symbols=AAPL&hours=abc"} {
 		if recorder, _ := getJSON(t, controller.HandleGetAlpacaNews, path, gin.Params{}); recorder.Code != 400 {
 			t.Fatalf("%s should be 400, got %d", path, recorder.Code)
 		}
@@ -77,5 +77,22 @@ func TestAlpacaNewsEndpointReportsFailuresAsUnavailableWithACategory(t *testing.
 	plain := NewOrderController(&reconciliationTradingService{}, nil, nil)
 	if recorder, body := getJSON(t, plain.HandleGetAlpacaNews, "/x?symbols=AAPL", gin.Params{}); recorder.Code != 503 || body["status"] != "unavailable" {
 		t.Fatalf("a service without news support must be unavailable: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAlpacaNewsEndpointWithoutSymbolsIsMarketWide(t *testing.T) {
+	for _, path := range []string{"/x", "/x?symbols="} {
+		fake := &fakeNewsService{reconciliationTradingService: &reconciliationTradingService{}, result: services.AlpacaNewsResult{Provider: "alpaca", Status: "available", Count: 1, Articles: []services.AlpacaNewsArticle{{ID: 1, Headline: "h", Source: "benzinga", Symbols: []string{"XYZ"}}}}}
+		controller := NewOrderController(fake, nil, nil)
+		recorder, body := getJSON(t, controller.HandleGetAlpacaNews, path, gin.Params{})
+		if recorder.Code != 200 || body["status"] != "available" {
+			t.Fatalf("%s status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+		if len(fake.request.Symbols) != 0 || fake.request.Limit != 20 {
+			t.Fatalf("%s a market-wide read forwards no symbols and keeps the defaults: %+v", path, fake.request)
+		}
+		if hours := fake.request.End.Sub(fake.request.Start).Hours(); hours < 35.99 || hours > 36.01 {
+			t.Fatalf("%s default window must stay 36 hours: %v", path, hours)
+		}
 	}
 }

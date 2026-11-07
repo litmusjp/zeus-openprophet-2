@@ -313,7 +313,8 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   const CATALYST_OPERATING_RULE = '- Catalyst setups are intraday. On every regular-session heartbeat: reconcile, scan for new public company catalysts, and for each live catalyst read completed 5-minute bars (complete=true only; a forming bar never counts) and act when the range break is confirmed. After the close, record next-session ideas with prophet_log_decision action WATCHLIST (symbol, catalyst, trigger level, invalidation, expiry window). For every candidate that you rejected, record the single number that failed (for example the gap percent, the range break or the volume versus the range baseline) in the decision log.';
   const scopedPromptOwner = {
     sbx_723be98b: ['catalyst', 'mean-reversion'],
-    sbx_956ff9e4: ['mean-reversion', 'momentum'],
+    sbx_956ff9e4: ['mean-reversion', 'momentum', 'long-vol'],
+    sbx_0d35471e: ['default'],
   };
   const scopedPrompt = scopedPromptOwner[agentConfig.sandboxId]?.includes(agentConfig.id)
     && agentConfig.systemPromptTemplate === 'custom';
@@ -322,7 +323,9 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   const customPrompt = normalizeLegacyWorkflowSize(withoutLegacyOverride,
     (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'mean-reversion')
     || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'momentum')
-    || (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'catalyst'));
+    || (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'catalyst')
+    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'long-vol')
+    || (agentConfig.sandboxId === 'sbx_0d35471e' && agentConfig.id === 'default'));
   const workflowStart = customPrompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW');
   const workflowEnd = customPrompt.indexOf('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
   const scopedWorkflowPresent = scopedPrompt && workflowStart >= 0 && workflowEnd > workflowStart;
@@ -396,7 +399,7 @@ For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\`
 - Standalone prophet_assess_options_trade is optional on-demand research, not a prerequisite. Prefer one guarded prophet_place_options_order call for the unchanged eligible proposal; the backend independently obtains and enforces a fresh genuine PASS before broker submission. Legacy prophet_assess_options_strategy accepts caller evidence and is not an interchangeable fallback.
 - If standalone assessment is used, generate one stable client_order_id before assessment and use that exact value as client_reference. After PASS, submit the unchanged contract, quantity, and limit (the same proposed limit price) with that same ID. Never blindly retry an uncertain order.
 - Assessment currently supports long calls, long puts, and same-expiry 1:1 directional debit verticals. Agent execution is single-leg only; never claim an unsupported spread was executed.
-- Company news: when you research news about a company, call prophet_get_alpaca_news first (it is the news provider AlphaDesk reads). The other news tools (Google News, MarketWatch, summaries) stay available for verification, the original announcement, wider discovery, or when Alpaca is empty, unavailable or insufficient; a successful Alpaca result does not stop you checking them. State which source each item came from and never present another source's evidence as Alpaca's. created_at is the article time, not necessarily the original announcement; an updated_at, fetched_at or summary time never starts a new catalyst clock. AI summaries are optional. This adds no new news scan or entry rule to your strategy.
+- Company news: when you research news about a company, call prophet_get_alpaca_news first (it is the news provider AlphaDesk reads). The other news tools (Google News, MarketWatch, summaries) stay available for verification, the original announcement, wider discovery, or when Alpaca is empty, unavailable or insufficient; a successful Alpaca result does not stop you checking them. State which source each item came from and never present another source's evidence as Alpaca's. created_at is the article time, not necessarily the original announcement; an updated_at, fetched_at or summary time never starts a new catalyst clock. A result with has_more true is not by itself incomplete research: say which symbols and window you checked and whether newer relevant items may remain. AI summaries are optional. This adds no new news scan or entry rule to your strategy.
 ${noTestGuidance}
 - Do not use native shell or file tools to discover credentials, edit application/configuration files, or bypass broker controls. Use authorized MCP tools for trading.
 
@@ -451,7 +454,7 @@ ${riskDisciplineGuidance}
 - Be decisive. When nothing qualifies, report NO_SETUP, DATA_BLOCK or INCOMPLETE_RESEARCH per symbol group in a line or two; a scan that skipped candidates is INCOMPLETE_RESEARCH, not NO_SETUP.
 ${isCatalystStrategy ? CATALYST_OPERATING_RULE : '- Daily-bar facts only change after each close. Scan the strategy universe on completed daily bars after the close or before the open (record next-session candidates with \`prophet_log_decision\`, action "WATCHLIST": symbol, trigger level, invalidation, expiry window), then during the session act on WATCHLIST triggers, refresh exact option evidence, and manage positions; do not re-fetch unchanged daily history every beat. When you are flat, nothing is pending and you hold no WATCHLIST candidate, do not poll bars that are still forming (they cannot satisfy a completed-bar rule): reconcile, record the outcome and end the beat. For every symbol that cleared a recent high or looked like a candidate but was rejected, record the single number that failed (for example its volume ratio, extension or average slope) in the decision log.'}
 - Re-establish live state (positions, orders, prices, quotes) from tools every beat. Prior-session context and your WATCHLIST records are for continuity only; verify them against live data before acting.
-- Report what you did (or deliberately didn't) and why, concisely.`;
+- Report what you did (or deliberately didn't) and why, concisely. When you are flat, nothing is pending and nothing has changed since your last beat, keep the report to a few lines.`;
 
   return `${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId })}\n\n${systemInstructions}`;
 }

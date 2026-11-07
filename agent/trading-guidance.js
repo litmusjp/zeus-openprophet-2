@@ -21,6 +21,11 @@ export const DEFAULT_TRADING_GUIDANCE = Object.freeze({
   extraSymbolsPerScan: 25,
   catalystRangeMinutes: 30,
   catalystMaxGapPct: 12,
+  maxOptionSpreadPct: 10,
+  catalystStopRangeFraction: 0.5,
+  catalystTargetRangeMultiple: 1,
+  assessmentDteMin: 1,
+  assessmentDteMax: 180,
 });
 
 // Settings that no longer exist. A stored value is ignored and a save that still carries one (for
@@ -42,6 +47,11 @@ const NUMERIC = Object.freeze({
   extraSymbolsPerScan: [0, 100, true],
   catalystRangeMinutes: [5, 120, true],
   catalystMaxGapPct: [1, 25, false],
+  maxOptionSpreadPct: [2, 25, false],
+  catalystStopRangeFraction: [0.1, 1, false],
+  catalystTargetRangeMultiple: [0.25, 5, false],
+  assessmentDteMin: [1, 365, true],
+  assessmentDteMax: [1, 365, true],
 });
 const SYMBOL = /^[A-Z][A-Z0-9.\-]{0,5}$/;
 
@@ -85,6 +95,11 @@ export function normalizeTradingGuidance(input = {}, { strict = false, base = DE
     out.expiryMinDays = DEFAULT_TRADING_GUIDANCE.expiryMinDays;
     out.expiryMaxDays = DEFAULT_TRADING_GUIDANCE.expiryMaxDays;
   }
+  if (out.assessmentDteMin > out.assessmentDteMax) {
+    if (strict) throw new Error('assessmentDteMin must not exceed assessmentDteMax');
+    out.assessmentDteMin = DEFAULT_TRADING_GUIDANCE.assessmentDteMin;
+    out.assessmentDteMax = DEFAULT_TRADING_GUIDANCE.assessmentDteMax;
+  }
   return out;
 }
 
@@ -97,6 +112,8 @@ export function strategyFamilyOf(strategyId) {
     case 'etf-mean-reversion': return 'mean-reversion';
     case 'equity-momentum': return 'breakout';
     case 'catalyst-news': return 'catalyst';
+    case 'long-premium-volatility': return 'long-vol';
+    case 'default': return 'prophet';
     default: return 'unknown';
   }
 }
@@ -104,6 +121,31 @@ export function strategyFamilyOf(strategyId) {
 const CALLS_ONLY_CONTRACT = g => `- Contract choice: buy calls with delta about ${g.contractDeltaMin} to ${g.contractDeltaMax}, expiring ${g.expiryMinDays} to ${g.expiryMaxDays} calendar days out and also beyond your intended hold. Pick the expiry first with prophet_get_option_expirations (choose only a confirmed date; dates it lists as unchecked are unknown, not absent), then call prophet_get_options_chain with that expiration and type call. Use max_cost only as a ceiling on ONE contract, never as a position budget. Go further from the money only if your strategy says so.`;
 
 const CATALYST_CONTRACT = g => `- Contract choice: buy a call for a qualified bullish reaction or a put for a qualified bearish one. Use a delta magnitude of about ${g.contractDeltaMin} to ${g.contractDeltaMax} (a put's delta is negative, so compare its absolute value), expiring ${g.expiryMinDays} to ${g.expiryMaxDays} calendar days out and also beyond your intended hold. Pick the expiry first with prophet_get_option_expirations (choose only a confirmed date; dates it lists as unchecked are unknown, not absent), then call prophet_get_options_chain with that expiration and the type that matches your direction (call or put). Use max_cost only as a ceiling on ONE contract, never as a position budget. Go further from the money only if your strategy says so.`;
+
+const DIRECTIONAL_CONTRACT = g => `- Contract choice: buy a call for a bullish thesis or a put for a bearish thesis. Use a delta magnitude of about ${g.contractDeltaMin} to ${g.contractDeltaMax} (a put's delta is negative, so compare its absolute value), expiring ${g.expiryMinDays} to ${g.expiryMaxDays} calendar days out and also beyond your intended hold. Pick the expiry first with prophet_get_option_expirations (choose only a confirmed date; dates it lists as unchecked are unknown, not absent; it lists dates that have listed call contracts, so confirm the put chain exists before proposing a put), then call prophet_get_options_chain with that expiration and the type that matches your direction (call or put). Use max_cost only as a ceiling on ONE contract, never as a position budget. Go further from the money only if your strategy says so.`;
+
+// Prophet's own rules use two styles (scalps and swings). AlphaDesk only accepts expiries inside its own
+// window, so the text states the overlap instead of letting the agent pick a contract that cannot pass.
+function prophetExpiryWindow(g) {
+  const lo = g.assessmentDteMin, hi = g.assessmentDteMax;
+  const scalp = [Math.max(2, lo), Math.min(5, hi)];
+  const scalpOk = scalp[0] <= scalp[1];
+  let swing = [Math.max(50, lo), Math.min(120, hi)];
+  let swingShortened = false;
+  if (swing[0] > swing[1]) { swing = [lo, hi]; swingShortened = true; }
+  const parts = [];
+  parts.push(scalpOk ? `scalps (SPY and QQQ): ${scalp[0]} to ${scalp[1]} calendar days to expiry` : 'scalps: not available, because their 2 to 5 day range is outside the AlphaDesk window');
+  parts.push(swingShortened
+    ? `swings: your 50 to 120 day range does not overlap the AlphaDesk window, so swings are limited to ${swing[0]} to ${swing[1]} calendar days to expiry (prefer the longest liquid expiry in it)`
+    : `swings: ${swing[0]} to ${swing[1]} calendar days to expiry`);
+  return { text: parts.join('; '), scalpOk, swingOk: true, swing, scalp };
+}
+const PROPHET_CONTRACT = g => {
+  const w = prophetExpiryWindow(g);
+  return `- Contract choice: your default is a call (your rules keep a long bias, with an occasional put when your thesis and rules support it). Use the expiry styles in your Strategy Rules, limited to what AlphaDesk accepts: AlphaDesk only passes an option that expires ${g.assessmentDteMin} to ${g.assessmentDteMax} calendar days out, so a contract outside that window cannot pass and is not a candidate. Available styles: ${w.text}. Use the delta your Strategy Rules prefer (about ${g.contractDeltaMin} to ${g.contractDeltaMax} unless they say otherwise; a put's delta is negative, so compare its absolute value). Pick the expiry first with prophet_get_option_expirations using a min_dte and max_dte inside that window (choose only a confirmed date; dates it lists as unchecked are unknown, not absent; it lists dates with listed call contracts, so confirm a put chain exists before proposing a put), then call prophet_get_options_chain with that expiration and the matching type. Use max_cost only as a ceiling on ONE contract, never as a position budget.`;
+};
+const pricingLine = g => `- Option cost discipline: compute each exact OCC contract's spread as (ask - bid) / mid before you propose it. Skip a contract whose spread is above ${g.maxOptionSpreadPct}% unless your Strategy Rules set a tighter cap, in which case the tighter cap applies; a stricter rule of your strategy always wins. Among qualifying strikes and expiries prefer the tightest spread. Start an entry limit at the mid and never above the ask. To exit after your thesis or stop is invalidated, use a marketable limit at or just below the current bid of the same contract; to take profit, start at the mid and reprice on a later heartbeat. Any repricing follows the existing cancel, reconcile and new exact proposal rules, and a price is never changed to obtain a PASS. Option quotes can be indicative; say so when it matters.`;
+const alphaDeskLogLine = () => '- AlphaDesk outcome record: after every assessment or guarded order call, record the decision, signal_score and the reasons or failed checks in prophet_log_decision. If the score is not returned, write "unavailable"; never invent or estimate one. It is a signal-quality score, not a forecast of profit.';
 
 const marketSupportiveLine = g => `- "Market supportive" means ${g.marketSymbol} meets any one of: (a) its last completed close is no more than ${g.marketTolerancePct}% below its 20-day average; (b) its latest price now (last trade, or the bid/ask midpoint when quote_flag is ok) is above that 20-day average; (c) the 5-session change of that average is ${g.marketSlopeMinPct}% or higher. get_daily_features gives the average, the close versus the average and the 5-session change. Name the figures you used.`;
 const extendedLine = g => `- "Extended" means a completed close more than ${g.extendedPct}% above the broken level (close_vs_high_prior_10_sessions_pct or close_vs_high_prior_20_sessions_pct, whichever matches the range you broke).`;
@@ -120,7 +162,10 @@ function catalystLines(g) {
     `- Initial post-news range: for news published before the open (including overnight and after the prior close), the high and low of the first ${g.catalystRangeMinutes} minutes of regular-session completed 5-minute bars. For news published during the session, the high and low of the first ${g.catalystRangeMinutes} minutes of completed 5-minute bars after the publication time. Request bars with prophet_get_historical_bars (timeframe 5Min) with explicit regular-session start and end timestamps (09:30 to 16:00 ET, given in UTC), use only bars marked complete=true, and state the feed.`,
     '- Confirmation: a completed 5-minute bar closes above the range high (call) or below the range low (put), and that bar\'s volume is above the average volume of the range\'s completed bars (the baseline excludes the breakout bar and any bar still forming). Enter at a subsequent permitted evaluation, not inside the range window.',
     `- Exhausted gap: skip a setup when the gap from the previous close is more than ${g.catalystMaxGapPct}%, or when the option already trades beyond a plausible remaining move.`,
-    '- Missing or incomplete data (no completed bars yet, unknown publication time, unverified source) is INCOMPLETE_RESEARCH, never confirmation.',
+    `- Stop (an exit-rule choice for paper trading, not a proven improvement): the pre-reaction invalidation level in your Strategy Rules is the point ${g.catalystStopRangeFraction} of the way into the initial post-news range, measured from the side that broke. For a call it is range_high - ${g.catalystStopRangeFraction} x (range_high - range_low); for a put it is range_low + ${g.catalystStopRangeFraction} x (range_high - range_low) (the midpoint when the fraction is 0.5). Exit when a completed 5-minute bar closes on the wrong side of it, using the exit pricing rule above. Before you enter, record the stop, the target and the size basis with prophet_log_decision. Size the position so that the loss at the stop, including the spread, fits your smaller-than-standard size within the account limits.`,
+    `- Target (an exit-rule choice for paper trading, not a proven improvement): ${g.catalystTargetRangeMultiple} x the range height (range_high - range_low) beyond the broken level, so range_high + ${g.catalystTargetRangeMultiple} x height for a call and range_low - ${g.catalystTargetRangeMultiple} x height for a put. When price reaches it, close half of the broker-confirmed contracts rounded down to whole contracts (a one-contract position closes in full), and trail the remainder by exiting on a completed 5-minute close back through the broken level. If price has already crossed the target when you would enter, the setup is extended: skip it, with no partial take. Manage only the broker-confirmed remaining quantity. Exit immediately if the reaction thesis is invalidated by new facts. Your Strategy Rules exit by the end of the session if the reaction has not developed; that is not an unconditional close of a working position.`,
+    '- Market-wide discovery: once on every regular-session heartbeat, also call prophet_get_alpaca_news with no symbols (limit up to 50) to see the newest market-wide headlines. A liquid large-cap optionable company that appears there and is not on your start list is an extra name; it counts toward your extra-name limit and must pass every rule above.',
+    '- Missing or incomplete data (no completed bars yet, unknown publication time, unverified source) is INCOMPLETE_RESEARCH, never confirmation. A news result with has_more true is not by itself incomplete research: say which symbols and window you checked and whether newer relevant items may remain.',
     '- Use get_daily_features for the previous close, gap context and average volume only; the range and the confirmation come from completed 5-minute bars.',
   ];
 }
@@ -132,14 +177,36 @@ export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, optio
   const lines = [
     '## Trading Guidance',
     'This is how to read your strategy rules in practice. The user can change these settings. They never override your Strategy Rules, permissions or risk limits, and never create a trade or a reason to skip a rule.',
-    family === 'catalyst' ? CATALYST_CONTRACT(g) : CALLS_ONLY_CONTRACT(g),
+    family === 'catalyst' ? CATALYST_CONTRACT(g)
+      : family === 'long-vol' ? DIRECTIONAL_CONTRACT(g)
+        : family === 'prophet' ? PROPHET_CONTRACT(g)
+          : CALLS_ONLY_CONTRACT(g),
   ];
+  if (family === 'long-vol') {
+    // Vega's own rules decide entries (a stated thesis or a confirmed catalyst). No breakout, market-trend
+    // or sector test is added here; the definitions below are information only.
+    lines.push(
+      '- Thesis: your Strategy Rules require a statable directional or volatility-expansion thesis, or a confirmed catalyst; Trading Guidance adds no breakout, market-trend or sector test to them. Verify any catalyst through a tool call and note its publication time.',
+      dailyVolumeLine(),
+      computedFieldsLine(),
+      '- Market-wide discovery (advised, not required): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface names outside your start list.',
+    );
+  } else if (family === 'prophet') {
+    lines.push(
+      `- Your Strategy Rules already set your spread cap (under 10% of mid), limit orders at mid-price or better, and your scalp and swing limits; keep them. If the Trading Guidance spread cap below is tighter than yours, the tighter one applies.`,
+      dailyVolumeLine(),
+      computedFieldsLine(),
+      '- Market-wide discovery (optional): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface names outside your start list. It is never required.',
+    );
+  }
   if (family === 'mean-reversion') {
     lines.push(marketSupportiveLine(g), nearSupportLine(g), flatRisingLine(g), dailyVolumeLine(), computedFieldsLine());
   } else if (family === 'breakout') {
     lines.push(extendedLine(g), marketSupportiveLine(g), sectorLine(), dailyVolumeLine(), computedFieldsLine());
   } else if (family === 'catalyst') {
     lines.push(...catalystLines(g));
+  } else if (family === 'long-vol' || family === 'prophet') {
+    // handled above: no extra definitions
   } else {
     // unknown strategy: every definition, each labelled with the kind of strategy that uses it
     lines.push(
@@ -162,6 +229,8 @@ export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, optio
       : '- Scan coverage: check only the symbols in your SCAN UNIVERSE start list; a listed symbol you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP.');
   }
   lines.push(
+    pricingLine(g),
+    alphaDeskLogLine(),
     '- Order of checks: apply the mandatory tests first. When one fails, stop researching that symbol and record the remaining checks as "not evaluated", never as passed. Check earnings and any other entry-readiness items (and, for breakout strategies, sector support) only before you treat a setup as entry-ready.',
     '- Wording in your own logs: mark a rejected candidate REJECT or NO_SETUP, never PASS. PASS means a genuine AlphaDesk receipt only, and a log entry or research note is not one.',
     'Apply only the definitions above that your Strategy Rules use; a field that is returned to you is information, not a rule.',

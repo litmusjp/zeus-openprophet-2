@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,12 +23,17 @@ type alpacaNewsService interface {
 }
 
 // HandleGetAlpacaNews returns one bounded page of Alpaca symbol-tagged news for this account.
-// GET /api/v1/news/alpaca?symbols=AAPL,NVDA&hours=36&limit=20&page_token=...
+// GET /api/v1/news/alpaca?symbols=AAPL,NVDA&hours=36&limit=20&page_token=...  (symbols optional: market-wide when omitted)
 func (oc *OrderController) HandleGetAlpacaNews(c *gin.Context) {
-	symbols, problem := parseSymbolList(c.Query("symbols"), maxAlpacaNewsSymbols)
-	if problem != "" {
-		c.JSON(400, gin.H{"error": problem})
-		return
+	// symbols is optional: without it the call returns the newest market-wide headlines.
+	symbols := []string{}
+	if strings.TrimSpace(c.Query("symbols")) != "" {
+		parsed, problem := parseSymbolList(c.Query("symbols"), maxAlpacaNewsSymbols)
+		if problem != "" {
+			c.JSON(400, gin.H{"error": problem})
+			return
+		}
+		symbols = parsed
 	}
 	hours := defaultNewsHours
 	if raw := c.Query("hours"); raw != "" {

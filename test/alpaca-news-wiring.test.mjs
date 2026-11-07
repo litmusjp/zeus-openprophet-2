@@ -32,7 +32,8 @@ test('the MCP tool is defined with the right schema, and the older tools point a
   assert.match(def, /FIRST when you research company news/);
   assert.match(def, /Google\/MarketWatch tools stay available/);
   assert.match(def, /created_at is the article time, and updated_at or fetched_at never marks a new event/);
-  assert.match(def, /required: \['symbols'\]/);
+  assert.match(def, /required: \[\]/);
+  assert.match(def, /omit it for the newest market-wide headlines/);
   for (const key of ['symbols', 'hours', 'limit', 'page_token']) assert.match(def, new RegExp(`${key}: \\{`));
   assert.match(mcp, /For company news use get_alpaca_news first; keep this for wider discovery and verification/);
 });
@@ -54,6 +55,10 @@ test('the handler builds the account route, forwards every argument and returns 
   assert.deepEqual(JSON.parse(text), reply);
   const minimal = await invoke({ symbols: ['SPY'] }, reply);
   assert.equal(minimal.calls[0].endpoint, '/news/alpaca?symbols=SPY');
+  const wide = await invoke({ limit: 50 }, reply);
+  assert.equal(wide.calls[0].endpoint, '/news/alpaca?limit=50', 'no symbols means a market-wide read with no empty symbols parameter');
+  assert.equal((await invoke({}, reply)).calls[0].endpoint, '/news/alpaca?');
+  assert.equal((await invoke({ symbols: [] }, reply)).calls[0].endpoint, '/news/alpaca?');
 });
 
 test('an unavailable result is returned as unavailable, never as an empty list', async () => {

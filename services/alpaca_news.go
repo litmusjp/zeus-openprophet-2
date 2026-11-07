@@ -82,8 +82,9 @@ func truncateRunes(value string, limit int) string {
 
 // GetAlpacaNews reads one page of Alpaca news for the given symbols with this account's own credentials.
 func (s *AlpacaTradingService) GetAlpacaNews(ctx context.Context, req AlpacaNewsRequest) (AlpacaNewsResult, error) {
-	if len(req.Symbols) == 0 {
-		return AlpacaNewsResult{}, fmt.Errorf("at least one symbol is required")
+	// No symbols means a market-wide read of the newest Alpaca headlines (symbol discovery).
+	if req.Symbols == nil {
+		req.Symbols = []string{}
 	}
 	if req.End.IsZero() || req.Start.IsZero() || !req.End.After(req.Start) {
 		return AlpacaNewsResult{}, fmt.Errorf("a valid start and end are required")
@@ -100,7 +101,9 @@ func (s *AlpacaTradingService) GetAlpacaNews(ctx context.Context, req AlpacaNews
 		baseURL = "https://data.alpaca.markets"
 	}
 	query := url.Values{}
-	query.Set("symbols", strings.Join(req.Symbols, ","))
+	if len(req.Symbols) > 0 {
+		query.Set("symbols", strings.Join(req.Symbols, ","))
+	}
 	query.Set("start", req.Start.UTC().Format(time.RFC3339))
 	query.Set("end", req.End.UTC().Format(time.RFC3339))
 	query.Set("limit", fmt.Sprint(limit))

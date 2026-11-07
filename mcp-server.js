@@ -634,14 +634,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_alpaca_news',
-        description: 'Company news from Alpaca (Benzinga and other providers), symbol-tagged, for up to 30 symbols over the last 1-72 hours (default 36, the window AlphaDesk reads). Use this FIRST when you research company news; the Google/MarketWatch tools stay available for verification, the original announcement, wider discovery, or when this is empty or unavailable. Results are sorted by updated_at: created_at is the article time, and updated_at or fetched_at never marks a new event. Each article keeps id, source, symbols, url, created_at and updated_at. Check has_more and pass next_page_token as page_token for the next page; a capped page is not the whole window. status is available, empty (a real empty result) or unavailable (a failure, with a category). A symbol tag does not make an article a company-specific event.',
+        description: 'Company news from Alpaca (Benzinga and other providers), symbol-tagged, for up to 30 symbols over the last 1-72 hours (default 36, the window AlphaDesk reads). Leave symbols out to read the newest market-wide headlines, which can surface companies you were not watching. Use this FIRST when you research company news; the Google/MarketWatch tools stay available for verification, the original announcement, wider discovery, or when this is empty or unavailable. Results are sorted by updated_at: created_at is the article time, and updated_at or fetched_at never marks a new event. Each article keeps id, source, symbols, url, created_at and updated_at. Check has_more and pass next_page_token as page_token for the next page; a capped page is not the whole window. status is available, empty (a real empty result) or unavailable (a failure, with a category). A symbol tag does not make an article a company-specific event.',
         inputSchema: {
           type: 'object',
           properties: {
             symbols: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Up to 30 ticker symbols, e.g. ["AAPL","NVDA"]',
+              description: 'Up to 30 ticker symbols, e.g. ["AAPL","NVDA"]. Optional: omit it for the newest market-wide headlines.',
             },
             hours: {
               type: 'number',
@@ -656,7 +656,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'next_page_token from a previous result, to fetch the next page',
             },
           },
-          required: ['symbols'],
+          required: [],
         },
       },
       {
@@ -1737,7 +1737,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_alpaca_news': {
         const symbols = Array.isArray(args.symbols) ? args.symbols : [];
-        const params = new URLSearchParams({ symbols: symbols.join(',') });
+        const params = new URLSearchParams();
+        if (symbols.length > 0) params.append('symbols', symbols.join(','));
         if (args.hours !== undefined) params.append('hours', args.hours);
         if (args.limit !== undefined) params.append('limit', args.limit);
         if (args.page_token) params.append('page_token', args.page_token);

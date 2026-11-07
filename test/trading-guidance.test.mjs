@@ -15,6 +15,8 @@ test('defaults are the approved values', () => {
     extendedPct: 4, marketSymbol: 'SPY', marketTolerancePct: 0.5, marketSlopeMinPct: -0.15,
     nearSupportPct: 2.5, avgSlopeMinPct: -0.30, extraSymbolsPerScan: 25,
     catalystRangeMinutes: 30, catalystMaxGapPct: 12,
+    maxOptionSpreadPct: 10, catalystStopRangeFraction: 0.5, catalystTargetRangeMultiple: 1,
+    assessmentDteMin: 1, assessmentDteMax: 180,
   });
   assert.ok(!('dailyAlphaDeskCheck' in DEFAULT_TRADING_GUIDANCE), 'the daily AlphaDesk check setting is retired');
 });

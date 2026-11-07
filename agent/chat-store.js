@@ -42,6 +42,36 @@ function optionalResearchToolName(record) {
   const name = String(record.tool || '').replace(/^prophet_/, '');
   return OPTIONAL_RESEARCH_TOOLS.has(name) ? name : null;
 }
+// A single-position lookup returns 404 once a position is closed. That is only a warning when the same
+// activity also reconciled the account: the options-positions list no longer holds the contract and a
+// filled order for it is present. Otherwise the 404 stays an essential failure.
+const POSITION_NOT_FOUND_WARNING = 'get_options_position not found after confirmed close';
+function parseJsonish(value) {
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+function isReconciledPositionNotFound(record, records) {
+  if (!record || (record.kind !== 'tool_call' && record.eventType !== 'tool_call')) return false;
+  if (String(record.tool || '').replace(/^prophet_/, '') !== 'get_options_position') return false;
+  const text = String(record.error || '') + ' ' + (typeof record.result === 'string' ? record.result : JSON.stringify(record.result || ''));
+  if (!/no open position found|options position not found|"status":\s*404|\b404\b/i.test(text)) return false;
+  const symbol = String(record.args?.symbol || record.input?.symbol || '').trim();
+  if (!symbol) return false;
+  const named = name => records.filter(r => (r.kind === 'tool_call' || r.eventType === 'tool_call') && String(r.tool || '').replace(/^prophet_/, '') === name && !hasStructuredFailure(r));
+  const lists = named('get_options_positions');
+  const absent = lists.some(r => {
+    const rows = parseJsonish(r.result);
+    return Array.isArray(rows) && !rows.some(row => String(row?.Symbol || row?.symbol || '') === symbol);
+  });
+  if (!absent) return false;
+  return named('get_orders').some(r => {
+    const body = parseJsonish(r.result);
+    const orders = Array.isArray(body?.orders) ? body.orders : Array.isArray(body) ? body : [];
+    return orders.some(order => String(order?.Symbol || order?.symbol || '') === symbol
+      && String(order?.Status || order?.status || '').toLowerCase() === 'filled'
+      && Number(order?.FilledQty ?? order?.filled_qty ?? 0) > 0);
+  });
+}
 /** Split an activity's failing records into essential failures and optional-research warnings. */
 function classifyFailures(records) {
   const essential = [];
@@ -49,14 +79,20 @@ function classifyFailures(records) {
   for (const record of records) {
     if (!hasStructuredFailure(record)) continue;
     const optional = optionalResearchToolName(record);
-    if (optional) warnings.push(optional); else essential.push(record);
+    if (optional) warnings.push(optional);
+    else if (isReconciledPositionNotFound(record, records)) warnings.push(POSITION_NOT_FOUND_WARNING);
+    else essential.push(record);
   }
   return { essential, warnings: [...new Set(warnings)] };
 }
 function activityOutcome({ recovery, status, essential, warnings }) {
   // An optional-research warning is appended to whichever outcome applies, so it is never hidden by a
   // recorded order status or a recovery. An essential failure keeps the plain Failed outcome.
-  const warning = warnings.length ? ` (warning: ${warnings.join(', ')} unavailable)` : '';
+  const unavailable = warnings.filter(w => w !== POSITION_NOT_FOUND_WARNING);
+  const parts = [];
+  if (unavailable.length) parts.push(`${unavailable.join(', ')} unavailable`);
+  if (warnings.includes(POSITION_NOT_FOUND_WARNING)) parts.push(POSITION_NOT_FOUND_WARNING);
+  const warning = parts.length ? ` (warning: ${parts.join('; ')})` : '';
   if (recovery) return `Recovered${warning}`;
   if (status) return `Recorded: ${status}${warning}`;
   if (essential.length) return 'Failed';
@@ -299,11 +335,12 @@ export class ChatStore {
       }
     }
     let result = [...groups.values()].map(g => {
-      const labels = [...g.labels];
+      const { essential, warnings } = classifyFailures(g.records);
+      // The Error label follows the essential failures, so a reconciled post-close 404 is only a warning.
+      const labels = [...g.labels].filter(label => label !== 'Error' || essential.length > 0);
       const last = [...g.records].reverse().find(r => r.content);
       const toolRecords = g.records.filter(r => r.kind === 'tool_call' || r.eventType === 'tool_call');
       const recovery = g.records.some(r => r.kind === 'heartbeat_recovery');
-      const { essential, warnings } = classifyFailures(g.records);
       const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
       const outcome = activityOutcome({ recovery, status, essential, warnings });
       return { activityId: g.activityId, accountId, sessionId: g.sessionId, timestamp: g.timestamp, origin: g.origin, labels, title: last?.content?.slice(0, 140) || `${g.origin} activity`, outcome, warnings, agentName: g.session.metadata?.agentName || g.session.metadata?.agentId || '--', sandboxName: g.session.metadata?.sandboxName || '--', recordCount: g.records.length, toolCount: toolRecords.length, _session: g.session, _records: g.records };
@@ -341,6 +378,7 @@ export class ChatStore {
       const toolRecords = activityRecords.filter(record => record.kind === 'tool_call' || record.eventType === 'tool_call');
       const recovery = activityRecords.some(record => record.kind === 'heartbeat_recovery');
       const { essential, warnings } = classifyFailures(activityRecords);
+      if (essential.length === 0) labels.delete('Error');
       const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
       const last = [...activityRecords].reverse().find(record => record.content);
       const summary = { activityId, accountId, sessionId: session.id, origin: activityRecords.find(record => record.origin)?.origin || 'User', timestamp: activityRecords[0].timestamp, labels: [...labels], title: last?.content?.slice(0, 140) || 'Activity', outcome: activityOutcome({ recovery, status, essential, warnings }), warnings, agentName: session.metadata?.agentName || session.metadata?.agentId || '--', sandboxName: session.metadata?.sandboxName || '--', recordCount: activityRecords.length, toolCount: toolRecords.length };

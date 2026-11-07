@@ -140,9 +140,6 @@ func TestGetAlpacaNewsTimeoutAndGarbageAreUnavailableNotEmpty(t *testing.T) {
 func TestGetAlpacaNewsValidatesInput(t *testing.T) {
 	s := newsService("http://unused", nil)
 	start, end := newsWindow()
-	if _, err := s.GetAlpacaNews(context.Background(), AlpacaNewsRequest{Start: start, End: end}); err == nil {
-		t.Fatal("symbols are required")
-	}
 	if _, err := s.GetAlpacaNews(context.Background(), AlpacaNewsRequest{Symbols: []string{"AAPL"}, Start: end, End: start}); err == nil {
 		t.Fatal("an inverted window must be rejected")
 	}
@@ -177,5 +174,30 @@ func TestGetAlpacaNewsRejectsResponsesWithoutANewsArray(t *testing.T) {
 		if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), body) {
 			t.Fatalf("error must be sanitized: %v", err)
 		}
+	}
+}
+
+func TestGetAlpacaNewsWithoutSymbolsIsMarketWide(t *testing.T) {
+	var query string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		_, _ = w.Write([]byte(newsPage))
+	}))
+	defer server.Close()
+	start, end := newsWindow()
+	got, err := newsService(server.URL, server.Client()).GetAlpacaNews(context.Background(), AlpacaNewsRequest{Start: start, End: end, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(query, "symbols=") {
+		t.Fatalf("a market-wide read must not send a symbols filter: %s", query)
+	}
+	for _, want := range []string{"limit=50", "sort=desc", "include_content=false"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("query %q is missing %q", query, want)
+		}
+	}
+	if got.Symbols == nil || len(got.Symbols) != 0 || got.Status != "available" || got.Count != 2 || got.DuplicatesRemoved != 1 {
+		t.Fatalf("market-wide result = %+v", got)
 	}
 }

@@ -17,6 +17,7 @@ import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { DEFAULT_TRADING_GUIDANCE, loadTradingGuidance, getTradingGuidanceForSandbox, setTradingGuidanceForSandbox } from './trading-guidance.js';
 import { buildTradeLedger } from './trade-ledger.js';
+import { buildScorecard } from './trade-scorecard.js';
 import { loadOrderActorMap, resolveOrderActor } from './history-attribution.js';
 import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
@@ -2237,7 +2238,7 @@ app.get('/api/trades', async (req, res) => {
       return [sandbox.accountId, { accountId: sandbox.accountId, accountName: account?.name || 'Unknown account', brokerAccountId: account?.brokerAccountId || null, paper: account?.paper === true, sandboxId: sandbox.id }];
     })).values()];
     const accounts = configuredAccounts.map(account => ({ ...account, ...(accountStates.get(account.accountId) || { complete: false, state: 'unavailable' }) }));
-    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, orders, trades });
+    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, orders, trades, ...(req.query.scorecard === '1' ? { scorecard: buildScorecard(trades) } : {}) });
   } catch (err) {
     res.status(500).json({ error: `Could not load verified trades: ${err.message}` });
   }

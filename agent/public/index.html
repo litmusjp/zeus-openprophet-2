@@ -916,6 +916,7 @@
               <span id="chatgpt-result" style="font-size:12px;color:var(--ink-faint)"></span>
             </div>
           </div>
+          <div id="provider-key-cards"></div>
         </div>
 
         <div class="section">
@@ -1101,6 +1102,12 @@
           </div>
           <p style="font-size:11px;color:var(--ink-faint);margin-top:6px">Export agents, strategies, heartbeat settings, and permissions as JSON. Does not include API keys.</p>
         </div>
+
+        <div class="section" id="dashboard-login-section" style="margin-top:24px;padding-top:20px;border-top:1px solid var(--rule)">
+          <div class="section-title">Dashboard login</div>
+          <div id="dashboard-login-card"></div>
+          <div id="railway-managed-line" class="form-hint" style="margin-top:12px"></div>
+        </div>
       </div>
     </div>
 
@@ -1206,7 +1213,8 @@ function switchTab(id) {
   document.querySelectorAll('.panel, .terminal-panel').forEach(p => p.classList.remove('active'));
   const panel = document.getElementById('panel-' + id);
   if (panel) panel.classList.add('active');
-  if (id === 'plugins') loadChatGPTStatus();
+  if (id === 'plugins') { loadChatGPTStatus(); loadSecretsStatus(); }
+  if (id === 'settings') loadSecretsStatus();
   if (id === 'history' && !historyState.loaded) loadHistoryPanel();
   if (id === 'trades') loadVerifiedTrades();
 }
@@ -4415,6 +4423,143 @@ function stopChatGPTFlow(id) {
   if (chatgptFlowTimer) clearInterval(chatgptFlowTimer);
   chatgptFlowTimer = null; window.chatgptFlowId = null; chatgptFlowExpiresAt = 0; clearChatGPTFlowCode(); return true;
 }
+// ── Credentials managed in the app (Gemini, OpenCode, Anthropic keys and the dashboard login) ──
+const PROVIDER_TEXT = {
+  gemini: { title: 'Gemini API key', desc: 'Used for news summaries. Summaries use a new key from the next heartbeat; the trading backend uses it after the agent is restarted.' },
+  opencode: { title: 'OpenCode API key', desc: 'Used for OpenCode-hosted models. A new key applies from the next heartbeat.' },
+  anthropic: { title: 'Anthropic API key (optional)', desc: 'Billed per token through this key, unlike the ChatGPT subscription. Saving it changes no agent’s model; pick models in the agent editor.' },
+};
+let _secretsStatus = null;
+function secretSourceText(item) {
+  if (!item) return 'Unavailable';
+  const tail = item.last4 ? ' · ends ' + item.last4 : '';
+  return item.source === 'saved' ? 'Saved in app' + tail : item.source === 'railway' ? 'Railway variable' + tail : 'Not set';
+}
+function secretChangeLines(status, prefix) {
+  const rows = (status.changeLog || []).filter(row => row.item === prefix).slice(0, 3);
+  return rows.length ? rows.map(row => esc(row.action + ' · ' + new Date(row.at).toLocaleString())).join('<br>') : '';
+}
+async function loadSecretsStatus() {
+  try {
+    const r = await fetch('/api/secrets/status');
+    if (!r.ok) throw new Error('Status unavailable');
+    _secretsStatus = await r.json();
+    renderProviderKeyCards();
+    renderDashboardLoginCard();
+  } catch {
+    const cards = document.getElementById('provider-key-cards');
+    if (cards && !cards.children.length) cards.innerHTML = '<div class="form-hint" style="margin-top:12px">Credential status unavailable.</div>';
+  }
+}
+function renderProviderKeyCards() {
+  const host = document.getElementById('provider-key-cards');
+  if (!host || !_secretsStatus) return;
+  host.innerHTML = ['gemini', 'opencode', 'anthropic'].map(name => {
+    const item = _secretsStatus.providers[name]; const text = PROVIDER_TEXT[name];
+    const log = secretChangeLines(_secretsStatus, 'provider:' + name);
+    return '<div class="config-card" style="margin-top:12px">'
+      + '<div class="config-card-header"><span class="config-card-title">' + esc(text.title) + '</span><span class="badge">' + esc(secretSourceText(item)) + '</span></div>'
+      + '<div class="config-card-desc">' + esc(text.desc) + '</div>'
+      + '<div class="form-group" style="margin-top:10px"><label>New key</label><input type="password" id="provider-input-' + name + '" autocomplete="new-password" placeholder="Paste a key to save it" style="width:100%"></div>'
+      + '<div class="config-card-actions" style="margin-top:8px">'
+      + '<button class="btn primary sm" onclick="saveProviderKey(\'' + name + '\')">Save</button>'
+      + '<button class="btn sm" onclick="checkProviderKey(\'' + name + '\')">Check</button>'
+      + '<button class="btn sm danger" ' + (item && item.source === 'saved' ? '' : 'disabled ') + 'onclick="removeProviderKey(\'' + name + '\')">Remove</button>'
+      + '<span id="provider-result-' + name + '" style="font-size:12px;color:var(--ink-faint)"></span></div>'
+      + (log ? '<div class="form-hint" style="margin-top:8px">' + log + '</div>' : '')
+      + '</div>';
+  }).join('');
+}
+function providerMessage(name, text, isError) {
+  const el = document.getElementById('provider-result-' + name);
+  if (el) { el.textContent = text; el.style.color = isError ? 'var(--error)' : 'var(--ink-faint)'; }
+}
+async function saveProviderKey(name) {
+  const input = document.getElementById('provider-input-' + name);
+  const value = input ? input.value.trim() : '';
+  if (!value) { providerMessage(name, 'Paste a key first', true); return; }
+  try {
+    const r = await fetch('/api/secrets/provider/' + name, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    input.value = '';
+    if (name !== 'gemini') fetch('/api/models?refresh=1').catch(() => {});
+    showToast(PROVIDER_TEXT[name].title + ' saved', 'success');
+    await loadSecretsStatus();
+  } catch (e) { providerMessage(name, e.message, true); }
+}
+async function removeProviderKey(name) {
+  if (!confirm('Remove the saved ' + PROVIDER_TEXT[name].title + '? The Railway value (if any) will be used again.')) return;
+  try {
+    const r = await fetch('/api/secrets/provider/' + name, { method: 'DELETE' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    showToast('Saved key removed', 'success');
+    await loadSecretsStatus();
+  } catch (e) { providerMessage(name, e.message, true); }
+}
+async function checkProviderKey(name) {
+  providerMessage(name, 'Checking…');
+  try {
+    const r = await fetch('/api/secrets/provider/' + name + '/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    const text = { valid: 'Key accepted', rejected: 'Key rejected by the provider', unavailable: 'Provider unavailable, try again', unset: 'No key set', listed: (d.models || 0) + ' models listed. ' + (d.note || '') }[d.result] || 'Unknown result';
+    providerMessage(name, text, d.result === 'rejected');
+  } catch (e) { providerMessage(name, e.message, true); }
+}
+function renderDashboardLoginCard() {
+  const host = document.getElementById('dashboard-login-card');
+  if (!host || !_secretsStatus) return;
+  const login = _secretsStatus.dashboardLogin;
+  const log = secretChangeLines(_secretsStatus, 'dashboard-login');
+  host.innerHTML = '<div class="config-card">'
+    + '<div class="config-card-header"><span class="config-card-title">Sign-in popup</span><span class="badge">' + (login.source === 'saved' ? 'Saved in app · ' + esc(login.username || '') : 'Railway variables') + '</span></div>'
+    + '<div class="config-card-desc">The username and password asked for when you open the dashboard. The Railway login stays valid as a backup' + (login.railwayLoginAlsoValid ? '' : ' (none is set in Railway)') + '. After a change your browser will ask you to sign in again.</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">'
+    + '<div class="form-group"><label>Username</label><input type="text" id="dl-username" autocomplete="off" value="' + esc(login.username || '') + '"></div>'
+    + '<div class="form-group"><label>Current password</label><input type="password" id="dl-current" autocomplete="current-password"></div>'
+    + '<div class="form-group"><label>New password (at least 12 characters)</label><input type="password" id="dl-new" autocomplete="new-password"></div>'
+    + '<div class="form-group"><label>Confirm new password</label><input type="password" id="dl-confirm" autocomplete="new-password"></div>'
+    + '</div>'
+    + '<div class="config-card-actions" style="margin-top:8px"><button class="btn primary sm" onclick="saveDashboardLogin()">Save login</button>'
+    + '<button class="btn sm danger" ' + (login.source === 'saved' ? '' : 'disabled ') + 'onclick="removeDashboardLogin()">Remove saved login</button>'
+    + '<span id="dl-result" style="font-size:12px;color:var(--ink-faint)"></span></div>'
+    + (log ? '<div class="form-hint" style="margin-top:8px">' + log + '</div>' : '')
+    + '</div>';
+  const line = document.getElementById('railway-managed-line');
+  if (line) {
+    const names = (_secretsStatus.railwayManaged || []).map(x => esc(x.name) + (x.set ? ' (set)' : ' (not set)')).join(', ');
+    line.innerHTML = 'Managed in Railway only: ' + (names || 'none') + '.';
+  }
+}
+function loginMessage(text, isError) {
+  const el = document.getElementById('dl-result');
+  if (el) { el.textContent = text; el.style.color = isError ? 'var(--error)' : 'var(--ink-faint)'; }
+}
+async function saveDashboardLogin() {
+  const v = id => (document.getElementById(id) || {}).value || '';
+  try {
+    const r = await fetch('/api/secrets/dashboard-login', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: v('dl-username').trim(), newPassword: v('dl-new'), confirmPassword: v('dl-confirm'), currentPassword: v('dl-current') }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    showToast('Login saved. Sign in again if asked.', 'success');
+    await loadSecretsStatus();
+  } catch (e) { loginMessage(e.message, true); }
+}
+async function removeDashboardLogin() {
+  const current = (document.getElementById('dl-current') || {}).value || '';
+  if (!current) { loginMessage('Enter the current password to remove the saved login', true); return; }
+  if (!confirm('Remove the saved login? Only the Railway login will work afterwards.')) return;
+  try {
+    const r = await fetch('/api/secrets/dashboard-login', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPassword: current }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    showToast('Saved login removed', 'success');
+    await loadSecretsStatus();
+  } catch (e) { loginMessage(e.message, true); }
+}
+
 async function loadChatGPTStatus() {
   try {
     const r = await fetch('/api/providers/chatgpt/status'); if (!r.ok) throw new Error('Status unavailable'); const s = await r.json();

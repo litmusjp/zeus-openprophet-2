@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 // Request-origin helpers kept separate so authentication policy is testable without starting Express.
 export function isTrustedLocalRequest(req) {
   const remoteIp = req?.ip || req?.connection?.remoteAddress || '';
@@ -42,17 +43,35 @@ export function isValidApiBearerRequest({ req, token }) {
   return Boolean(token) && isApiPath && authorization === `Bearer ${token}`;
 }
 
-export function createBasicAuthMiddleware({ username, password, apiToken }) {
-  const configured = Boolean(username && password);
+export function createBasicAuthMiddleware({ username, password, apiToken, verifier = null }) {
+  // With a verifier (the service), the Railway login and a login saved in the app are both checked by one
+  // shared function. Without one (older callers and tests), the single username/password pair is used.
+  const isConfigured = verifier ? () => verifier.isConfigured() : () => Boolean(username && password);
+  const digest = (v) => crypto.createHash('sha256').update(String(v)).digest();
+  const sameText = (a, b) => crypto.timingSafeEqual(digest(a), digest(b));
 
   return function basicAuthMiddleware(req, res, next) {
     if (isValidApiBearerRequest({ req, token: apiToken })) return next();
-    if (!configured) return res.status(503).send('Basic authentication is not configured.');
+    if (!isConfigured()) return res.status(503).send('Basic authentication is not configured.');
 
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Basic ')) {
       res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
       return res.status(401).send('Authentication required.');
+    }
+
+    if (verifier) {
+      const result = verifier.verify(authHeader);
+      if (result.ok) {
+        markBasicAuthContext(req);
+        return next();
+      }
+      if (result.retryAfterSeconds) {
+        res.setHeader('Retry-After', String(result.retryAfterSeconds));
+        return res.status(429).send('Too many attempts. Try again shortly.');
+      }
+      res.setHeader('WWW-Authenticate', 'Basic realm="OpenProphet Dashboard"');
+      return res.status(401).send('Access denied.');
     }
 
     let credentials;
@@ -66,7 +85,7 @@ export function createBasicAuthMiddleware({ username, password, apiToken }) {
     const user = separator >= 0 ? credentials.slice(0, separator) : '';
     const pass = separator >= 0 ? credentials.slice(separator + 1) : '';
 
-    if (user === username && pass === password) {
+    if (sameText(user, username) && sameText(pass, password)) {
       markBasicAuthContext(req);
       return next();
     }

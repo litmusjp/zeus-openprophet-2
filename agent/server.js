@@ -18,6 +18,9 @@ import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeC
 import { DEFAULT_TRADING_GUIDANCE, loadTradingGuidance, getTradingGuidanceForSandbox, setTradingGuidanceForSandbox } from './trading-guidance.js';
 import { buildTradeLedger } from './trade-ledger.js';
 import { buildScorecard } from './trade-scorecard.js';
+import * as secretsStore from './secrets-store.js';
+import { createLoginVerifier } from './dashboard-login.js';
+import { registerSecretsRoutes } from './secrets-routes.js';
 import { loadOrderActorMap, resolveOrderActor } from './history-attribution.js';
 import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
@@ -123,20 +126,15 @@ const app = express();
 const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER || '';
 const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS || '';
 const BASIC_AUTH_CONFIGURED = Boolean(BASIC_AUTH_USER && BASIC_AUTH_PASS);
+// One login check for the whole service: the Railway pair and a login saved in the app are both valid.
+const loginVerifier = createLoginVerifier({
+  railway: { user: BASIC_AUTH_USER, pass: BASIC_AUTH_PASS },
+  saved: () => secretsStore.getDashboardLogin(),
+  verifySaved: (username, password) => secretsStore.verifySavedPassword(username, password),
+});
 
 function hasValidBasicAuth(req) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Basic ')) return false;
-  let credentials;
-  try {
-    credentials = Buffer.from(authHeader.slice(6), 'base64').toString();
-  } catch {
-    return false;
-  }
-  const separator = credentials.indexOf(':');
-  const user = separator >= 0 ? credentials.slice(0, separator) : '';
-  const pass = separator >= 0 ? credentials.slice(separator + 1) : '';
-  return BASIC_AUTH_CONFIGURED && user === BASIC_AUTH_USER && pass === BASIC_AUTH_PASS;
+  return loginVerifier.verify(req.headers.authorization).ok === true;
 }
 
 function operatorAuthMiddleware(req, res, next) {
@@ -144,7 +142,7 @@ function operatorAuthMiddleware(req, res, next) {
   const providedOperatorToken = req.headers['x-openprophet-operator-token'];
   if (configuredOperatorToken && providedOperatorToken === configuredOperatorToken) return next();
   if (hasValidBasicAuth(req)) return next();
-  return res.status(BASIC_AUTH_CONFIGURED || configuredOperatorToken ? 403 : 503).json({ error: 'operator authorization is required' });
+  return res.status(loginVerifier.isConfigured() || configuredOperatorToken ? 403 : 503).json({ error: 'operator authorization is required' });
 }
 
 function sameOriginStateChange(req, res, next) {
@@ -180,6 +178,7 @@ app.use(createBasicAuthMiddleware({
   username: BASIC_AUTH_USER,
   password: BASIC_AUTH_PASS,
   apiToken: AUTH_TOKEN,
+  verifier: loginVerifier,
 }));
 // ------------------------
 
@@ -406,6 +405,9 @@ async function stopGoBackend() {
 if (EXECUTION_START_ENABLED) {
   await import('dotenv/config');
 }
+// Credentials saved in the app: load the private store and put provider keys into the environment before anything reads them.
+secretsStore.initSecrets({ split: EXECUTION_START_ENABLED });
+secretsStore.applyProviderEnv();
 await loadConfig();
 await loadTradingGuidance();
 const initialActiveAccount = getActiveAccount();
@@ -1815,6 +1817,15 @@ app.post('/api/providers/chatgpt/check', operatorAuthMiddleware, sameOriginState
     res.json(result);
   } catch { res.status(502).json({ error: 'Selected ChatGPT model check failed; no alternate model or API-key fallback was used' }); }
   finally { chatgptChecksInFlight = false; }
+});
+
+registerSecretsRoutes(app, {
+  operatorAuth: operatorAuthMiddleware,
+  sameOrigin: sameOriginStateChange,
+  verifier: loginVerifier,
+  railway: { user: BASIC_AUTH_USER, pass: BASIC_AUTH_PASS },
+  notify: text => notifySlack(text, getActiveSandbox()?.id),
+  listModels: opts => getAvailableModels(opts),
 });
 
 app.post('/api/models/refresh', async (req, res) => {

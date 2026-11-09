@@ -321,6 +321,17 @@ export function isEarlyOpenCodeCrash(result) {
     && !(Array.isArray(result.toolEvents) && result.toolEvents.length > 0);
 }
 
+/**
+ * True when the model refused the conversation because it no longer fits the context window and no tool
+ * had run yet, so the beat can be run once more in a fresh conversation without repeating any action.
+ */
+export function isContextOverflow(result) {
+  return Boolean(result?.error)
+    && /context window|ContextOverflow|context_length_exceeded|maximum context length/i.test(String(result.error))
+    && !(Number(result.toolCalls) > 0)
+    && !(Array.isArray(result.toolEvents) && result.toolEvents.length > 0);
+}
+
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
   const guidance = normalizeTradingGuidance(options.tradingGuidance || DEFAULT_TRADING_GUIDANCE);
@@ -328,6 +339,8 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   // Catalyst setups are intraday, so the daily-bar operating rule (scan after the close, do not poll
   // forming bars) would contradict them. They read live catalysts and completed 5-minute bars every beat.
   const CATALYST_OPERATING_RULE = '- Catalyst setups are intraday. On every regular-session heartbeat: reconcile, scan for new public company catalysts, and for each live catalyst read completed 5-minute bars (complete=true only; a forming bar never counts) and act when the range break is confirmed. After the close, record next-session ideas with prophet_log_decision action WATCHLIST (symbol, catalyst, trigger level, invalidation, expiry window). For every candidate that you rejected, record the single number that failed (for example the gap percent, the range break or the volume versus the range baseline) in the decision log.';
+  const INTRADAY_OPERATING_RULE = '- Your setups can trigger during the session. On every regular-session heartbeat: reconcile, then work through your strategy universe in batches (about 15 names per beat), using completed daily bars for context and completed 5-minute bars (complete=true only) for intraday entries, and re-price earlier candidates whose option evidence is older than one beat. If the scan is incomplete, record where you stopped with prophet_log_decision (action WATCHLIST, "scan cursor") and continue from there next beat; incomplete research is never a reason to stop scanning. After the close, record next-session ideas with action WATCHLIST (symbol, trigger level, invalidation, expiry window). For every candidate that you rejected, record the single number that failed in the decision log.';
+  const usesIntradayRule = ['prophet', 'long-vol'].includes(strategyFamilyOf(agentConfig.strategyId));
   const scopedPromptOwner = {
     sbx_723be98b: ['catalyst', 'mean-reversion'],
     sbx_956ff9e4: ['mean-reversion', 'momentum', 'long-vol'],
@@ -469,7 +482,7 @@ ${riskDisciplineGuidance}
 ## Operating Rules
 - You are autonomous for permitted actions. If requireConfirmation blocks an order, stop and report that operator approval is required; do not retry or work around the guardrail.
 - Be decisive. When nothing qualifies, report NO_SETUP, DATA_BLOCK or INCOMPLETE_RESEARCH per symbol group in a line or two; a scan that skipped candidates is INCOMPLETE_RESEARCH, not NO_SETUP.
-${isCatalystStrategy ? CATALYST_OPERATING_RULE : '- Daily-bar facts only change after each close. Scan the strategy universe on completed daily bars after the close or before the open (record next-session candidates with \`prophet_log_decision\`, action "WATCHLIST": symbol, trigger level, invalidation, expiry window), then during the session act on WATCHLIST triggers, refresh exact option evidence, and manage positions; do not re-fetch unchanged daily history every beat. When you are flat, nothing is pending and you hold no WATCHLIST candidate, do not poll bars that are still forming (they cannot satisfy a completed-bar rule): reconcile, record the outcome and end the beat. For every symbol that cleared a recent high or looked like a candidate but was rejected, record the single number that failed (for example its volume ratio, extension or average slope) in the decision log.'}
+${isCatalystStrategy ? CATALYST_OPERATING_RULE : usesIntradayRule ? INTRADAY_OPERATING_RULE : '- Daily-bar facts only change after each close. Scan the strategy universe on completed daily bars after the close or before the open (record next-session candidates with \`prophet_log_decision\`, action "WATCHLIST": symbol, trigger level, invalidation, expiry window), then during the session act on WATCHLIST triggers, refresh exact option evidence, and manage positions; do not re-fetch unchanged daily history every beat. When you are flat, nothing is pending and you hold no WATCHLIST candidate, do not poll bars that are still forming (they cannot satisfy a completed-bar rule): reconcile, record the outcome and end the beat. For every symbol that cleared a recent high or looked like a candidate but was rejected, record the single number that failed (for example its volume ratio, extension or average slope) in the decision log.'}
 - Re-establish live state (positions, orders, prices, quotes) from tools every beat. Prior-session context and your WATCHLIST records are for continuity only; verify them against live data before acting.
 - Report what you did (or deliberately didn't) and why, concisely. When you are flat, nothing is pending and nothing has changed since your last beat, keep the report to a few lines.`;
 
@@ -1333,9 +1346,9 @@ ${userBlock}`;
       try {
         if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
         result = await this._runClaude(prompt, model, actorSnapshot);
-        if (isEarlyOpenCodeCrash(result) && this.state.running && !this.state.paused
+        if ((isEarlyOpenCodeCrash(result) || isContextOverflow(result)) && this.state.running && !this.state.paused
           && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
-          this.state.emit('agent_log', { message: `Beat #${beatNum}: ${sanitizeOpenCodeError(result.error)} before any tool call; retrying once in a fresh session.`, level: 'warning' });
+          this.state.emit('agent_log', { message: `Beat #${beatNum}: ${isContextOverflow(result) ? 'the conversation is full (context window exceeded)' : sanitizeOpenCodeError(result.error)} before any tool call; retrying once in a fresh session.`, level: 'warning' });
           await new Promise(resolve => setTimeout(resolve, this._beatRetryDelayMs ?? 5000));
           if (this.state.running && !this.state.paused
             && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {

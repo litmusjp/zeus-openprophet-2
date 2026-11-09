@@ -118,7 +118,7 @@ test('technical agents get no news requirement; Herald discovers with Alpaca fir
   }
   const herald = await buildSystemPrompt(agent('catalyst-news', { id: 'catalyst', sandboxId: 'sbx_723be98b' }), deps);
   assert.match(herald, /call prophet_get_alpaca_news first for your watch-list names \(symbols in batches of up to 30, the last 36 hours; follow has_more with page_token/);
-  assert.match(herald, /Then use prophet_get_news, prophet_search_news, prophet_get_market_news and the MarketWatch tools for coverage gaps, wider discovery and the original announcement/);
+  assert.match(herald, /Use prophet_get_news, prophet_search_news, prophet_get_market_news and the MarketWatch tools only for names or events Alpaca does not cover/);
   assert.match(herald, /Say which source each item came from/);
 });
 

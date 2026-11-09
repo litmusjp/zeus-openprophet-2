@@ -47,15 +47,17 @@ test('catalyst guidance is direction-aware, intraday, and drops the daily defini
   assert.match(text, /prophet_get_earnings_dates only warns you off positions ahead of a scheduled release; it is never entry evidence/);
   assert.match(text, /call prophet_get_alpaca_news first for your watch-list names/);
   assert.match(text, /follow has_more with page_token/);
-  assert.match(text, /a successful Alpaca result does not stop you checking them/);
-  assert.match(text, /is the publication time of the article, not necessarily the original event time; verify the original event time before anchoring the post-news range, and later coverage, updated_at or fetched_at never restarts the catalyst clock/);
+  assert.match(text, /only for names or events Alpaca does not cover/);
+  assert.match(text, /use the earliest created_at among the articles about the same event as its publication time; look for an earlier original announcement only when no article gives a time; later coverage, updated_at or fetched_at never restarts the catalyst clock/);
+  assert.doesNotMatch(text, /verify the original event time/);
   assert.match(text, /a story found only on Google or MarketWatch may not appear in its evidence/);
   // the range is anchored to the news, with completed 5-minute bars only
   assert.match(text, /news published before the open .* the first 30 minutes of regular-session completed 5-minute bars/);
   assert.match(text, /news published during the session, the high and low of the first 30 minutes of completed 5-minute bars after the publication time/);
   assert.match(text, /timeframe 5Min.*explicit regular-session start and end timestamps.*complete=true/);
   // intraday volume baseline excludes the breakout and forming bars; daily volume rule is not used
-  assert.match(text, /above the average volume of the range's completed bars \(the baseline excludes the breakout bar and any bar still forming\)/);
+  assert.match(text, /above the average volume of the 6 completed 5-minute bars immediately before it \(fewer if fewer exist since the open; the baseline excludes the breakout bar and any bar still forming\)/);
+  assert.doesNotMatch(text, /average volume of the range's completed bars/);
   assert.doesNotMatch(text, /last_volume_to_avg_ratio above 1/);
   assert.match(text, /gap from the previous close is more than 12%/);
   assert.match(text, /INCOMPLETE_RESEARCH, never confirmation/);

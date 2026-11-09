@@ -154,7 +154,7 @@ function formatTradingBotFailure(endpoint, status, responseDetail, attempts = 0,
 
 async function callTradingBot(endpoint, method = 'GET', data = null, options = {}) {
   const safe = method === 'GET' || endpoint === '/options/assessment' || endpoint === '/options/trade-assessment';
-  const budgetMs = endpoint === '/options/order' ? 15000 : endpoint === '/options/trade-assessment' ? 6000 : 3000;
+  const budgetMs = endpoint === '/options/order' ? 15000 : endpoint === '/options/trade-assessment' ? 6000 : method === 'GET' ? 8000 : 3000;
   const maxAttempts = safe ? 3 : 1;
   const started = Date.now();
   let attempt = 0;
@@ -196,13 +196,14 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
       const status = error?.response?.status || 0;
       if (options.returnAvailability && status === 503 && error?.response?.data?.category) return { ...error.response.data, http_status: 503 };
       if (options.returnValidation && [400, 422].includes(status) && error?.response?.data) return error.response.data;
-      const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
+      const retryable = safe && (!status || [500, 502, 503, 504].includes(status) || (method === 'GET' && status === 429));
       if (!retryable || attempt >= maxAttempts) break;
-      await new Promise(resolve => setTimeout(resolve, Math.min(100 * (2 ** (attempt - 1)), 750)));
+      const waitMs = status === 429 ? 1000 * attempt : Math.min(100 * (2 ** (attempt - 1)), 750);
+      await new Promise(resolve => setTimeout(resolve, waitMs));
     }
   }
   const status = lastError?.response?.status || 0;
-  const retryable = safe && (!status || [500, 502, 503, 504].includes(status));
+  const retryable = safe && (!status || [500, 502, 503, 504].includes(status) || (method === 'GET' && status === 429));
   const responseDetail = lastError?.response?.data;
   const formatted = formatTradingBotFailure(endpoint, status, responseDetail, attempt, retryable);
   const err = new Error(formatted.message);

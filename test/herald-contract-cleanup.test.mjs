@@ -47,7 +47,7 @@ test('Herald-owned prompt alone gets a focused supported menu and coherent asses
 });
 
 test('options order alone receives 15 seconds while unsafe mutation failures remain one attempt', async () => {
-  assert.match(mcp, /endpoint === '\/options\/order' \? 15000 : endpoint === '\/options\/trade-assessment' \? 6000 : 3000/);
+  assert.match(mcp, /endpoint === '\/options\/order' \? 15000 : endpoint === '\/options\/trade-assessment' \? 6000 : method === 'GET' \? 8000 : 3000/);
   const begin = mcp.indexOf('function formatTradingBotFailure(');
   const callStart = mcp.indexOf('async function callTradingBot(', begin);
   const end = mcp.indexOf('\n}', callStart) + 2;
@@ -87,7 +87,7 @@ test('options order alone receives 15 seconds while unsafe mutation failures rem
   const readStarted = Date.now();
   assert.deepEqual(await readCall('/positions', 'GET'), { positions: [] });
   const readElapsed = Date.now() - readStarted;
-  assert.ok(readTimeout + readElapsed >= 2500 && readTimeout + readElapsed <= 3500, `ordinary GET timeout ${readTimeout}ms after ${readElapsed}ms elapsed`);
+  assert.ok(readTimeout + readElapsed >= 7500 && readTimeout + readElapsed <= 8500, `ordinary GET timeout ${readTimeout}ms after ${readElapsed}ms elapsed`);
 
   let attempts = 0;
   context.axios = async () => { attempts += 1; throw Object.assign(new Error('fixture HTTP failure'), { response: { status: 503 } }); };

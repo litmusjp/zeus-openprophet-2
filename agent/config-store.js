@@ -1180,6 +1180,8 @@ export function getResolvedAgentForSandbox(sandboxId) {
     accountId: sandbox.accountId,
     customStrategyRules: overrides.customStrategyRules ?? null,
   };
+  // Session mode is a sandbox-level setting, not an agent identity override, so it applies regardless of agentId scoping.
+  resolved.sessionMode = overrides.sessionMode === 'fresh' ? 'fresh' : (baseAgent?.sessionMode === 'fresh' ? 'fresh' : 'continuous');
 
   if (overridesBelongToSelectedAgent && overrides.name !== null) resolved.name = overrides.name;
   if (overridesBelongToSelectedAgent && overrides.description !== null) resolved.description = overrides.description;

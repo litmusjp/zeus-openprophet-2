@@ -60,7 +60,7 @@ test('trade assessment has a six-second read-only budget while ordinary and muta
 
   const ordinaryConfigs = [];
   await invoke('/account', 'GET', async config => { ordinaryConfigs.push(config); return { data: {} }; });
-  assert.equal(ordinaryConfigs[0].timeout, 3000);
+  assert.equal(ordinaryConfigs[0].timeout, 8000);
 
   let mutationCalls = 0;
   await assert.rejects(() => invoke('/orders/buy', 'POST', async config => {

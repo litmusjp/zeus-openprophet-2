@@ -406,7 +406,8 @@ if (EXECUTION_START_ENABLED) {
   await import('dotenv/config');
 }
 // Credentials saved in the app: load the private store and put provider keys into the environment before anything reads them.
-secretsStore.initSecrets({ split: EXECUTION_START_ENABLED });
+// OPENPROPHET_SECRETS_SPLIT=1 lets a rehearsal on a throwaway data folder exercise the move without a broker.
+secretsStore.initSecrets({ split: EXECUTION_START_ENABLED || process.env.OPENPROPHET_SECRETS_SPLIT === '1' });
 secretsStore.applyProviderEnv();
 await loadConfig();
 await loadTradingGuidance();

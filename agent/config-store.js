@@ -7,6 +7,8 @@ import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { DEFAULT_AGENT_MODEL, alpacaTradingUrl, resolveAgentModel } from './defaults.js';
 import { nativeOpenCodeEnv, stripOperatorSecrets } from './chatgpt-oauth.js';
+import * as secrets from './secrets-store.js';
+import * as configSecrets from './config-secrets.js';
 
 function configuredDefaultModel() {
   return resolveAgentModel();
@@ -862,12 +864,24 @@ function paperImportEndpoint() {
 }
 
 export async function loadConfig() {
+  // When the private secrets file is in use, account and AlphaDesk keys live there and the config file holds
+  // markers. Keys are put back into the loaded config here, so everything else sees exactly what it saw before.
+  const useSecrets = secrets.isSplitEnabled() && !secrets.isCorrupt();
+  let secretsPlan = useSecrets ? configSecrets.emptyPlan() : null;
+  let rawAccountIds = [];
   try {
     const raw = await fs.readFile(CONFIG_PATH, 'utf-8');
-    _config = normalizeConfig(JSON.parse(raw));
+    const parsed = JSON.parse(raw);
+    rawAccountIds = (parsed.accounts || []).map(a => a.id);
+    if (useSecrets) secretsPlan = configSecrets.prepareRaw(parsed);
+    _config = normalizeConfig(parsed);
   } catch (err) {
     if (err.code !== 'ENOENT') console.error('Warning: Failed to parse config file:', err.message);
     _config = createDefaultConfig();
+  }
+  if (secretsPlan) {
+    const outcome = configSecrets.adopt(secretsPlan, { configPath: CONFIG_PATH, accountIds: rawAccountIds });
+    if (outcome.migrated) console.log('  Moved ' + outcome.migrated + ' stored key(s) to the private secrets file' + (outcome.backup ? ' (backup: ' + outcome.backup + ')' : ''));
   }
 
   // Inert/read-only startup must not import credentials or contact a broker.
@@ -913,7 +927,13 @@ export async function saveConfig() {
   const write = _writeLock.catch(() => {}).then(async () => {
     syncLegacyAliases(_config);
     await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-    await fs.writeFile(CONFIG_PATH, JSON.stringify(_config, null, 2));
+    let toWrite = _config;
+    if (configSecrets.isActive()) {
+      // Keys reach the private file first; the config file is only rewritten with markers once that succeeded.
+      configSecrets.syncFromConfig(_config);
+      toWrite = configSecrets.toDiskConfig(_config);
+    }
+    await fs.writeFile(CONFIG_PATH, JSON.stringify(toWrite, null, 2));
   });
   _writeLock = write;
   return write;
@@ -997,6 +1017,7 @@ export async function addAccount({ name, publicKey, secretKey, baseUrl, paper })
 export async function removeAccount(id) {
   _config.accounts = _config.accounts.filter(a => a.id !== id);
   delete _config.sandboxes[`sbx_${id}`];
+  if (configSecrets.isActive()) configSecrets.forgetAccount(id);
   if (_config.activeAccountId === id) {
     const next = _config.accounts[0]?.id || null;
     _config.activeAccountId = next;

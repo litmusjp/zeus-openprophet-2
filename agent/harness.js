@@ -269,6 +269,23 @@ function parseOpenCodeStderrError(line) {
   return metadata.message ? metadata : null;
 }
 
+// Trading agents work through the prophet_ tools plus web search and fetch. The native shell, file-editing and
+// file-search tools are not available to them. Reading a file stays allowed because OpenCode spills long tool
+// outputs to a file that the agent reads back; only the files that hold credentials or the service configuration
+// are denied (OpenCode applies the last matching rule, so these denies sit after the default read rules).
+export const TRADING_AGENT_NATIVE_TOOL_DENIES = Object.freeze({
+  bash: 'deny', edit: 'deny', write: 'deny', patch: 'deny', multiedit: 'deny', grep: 'deny', glob: 'deny', list: 'deny',
+});
+export const TRADING_AGENT_READ_DENIES = Object.freeze({
+  '**/agent-config.json': 'deny',
+  '**/agent-config.pre-secrets-*': 'deny',
+  '**/secrets.json': 'deny',
+  '**/secrets.json.*': 'deny',
+  '**/auth.json': 'deny',
+  '**/.env': 'deny',
+  '**/.env.*': 'deny',
+});
+
 // ── System Prompt Builder ──────────────────────────────────────────
 function isOwnedHeraldWorkflow(agentConfig) {
   const prompt = agentConfig?.customSystemPrompt || '';
@@ -401,7 +418,7 @@ For ordinary heartbeat orientation, call \`prophet_get_orders(status="active")\`
 - Assessment currently supports long calls, long puts, and same-expiry 1:1 directional debit verticals. Agent execution is single-leg only; never claim an unsupported spread was executed.
 - Company news: when you research news about a company, call prophet_get_alpaca_news first (it is the news provider AlphaDesk reads). The other news tools (Google News, MarketWatch, summaries) stay available for verification, the original announcement, wider discovery, or when Alpaca is empty, unavailable or insufficient; a successful Alpaca result does not stop you checking them. State which source each item came from and never present another source's evidence as Alpaca's. created_at is the article time, not necessarily the original announcement; an updated_at, fetched_at or summary time never starts a new catalyst clock. A result with has_more true is not by itself incomplete research: say which symbols and window you checked and whether newer relevant items may remain. AI summaries are optional. This adds no new news scan or entry rule to your strategy.
 ${noTestGuidance}
-- Do not use native shell or file tools to discover credentials, edit application/configuration files, or bypass broker controls. Use authorized MCP tools for trading.
+- Use only the prophet_ tools plus web search and fetch. Native shell, edit and file-search tools are not available to you; read a file only to read back a long tool result you were pointed to. Never try to find or read credentials or configuration files, or to bypass broker controls.
 
 ## Your Heartbeat Loop
 Each time you wake, work through this loop using the current heartbeat and tool budget:
@@ -1533,6 +1550,8 @@ ${userBlock}`;
       primaryAgent.permission = {
         ...(primaryAgent.permission && typeof primaryAgent.permission === 'object' && !Array.isArray(primaryAgent.permission) ? primaryAgent.permission : {}),
         todowrite: 'deny', todoread: 'deny', task: 'deny',
+        ...TRADING_AGENT_NATIVE_TOOL_DENIES,
+        read: { ...(primaryAgent.permission?.read && typeof primaryAgent.permission.read === 'object' ? primaryAgent.permission.read : {}), ...TRADING_AGENT_READ_DENIES },
       };
       delete primaryAgent.maxSteps;
       invocationEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inherited, model: ocModel, small_model: ocModel, agent: agents });

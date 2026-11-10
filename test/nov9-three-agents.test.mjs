@@ -95,7 +95,9 @@ test('Herald gets the paper-experiment stop, target and market-wide discovery; o
   assert.match(text, /range_low \+ 0\.5 x \(range_high - range_low\)/);
   assert.match(text, /Target \(an exit-rule choice for paper trading, not a proven improvement\)/);
   assert.match(text, /close half of the broker-confirmed contracts rounded down to whole contracts \(a one-contract position closes in full\)/);
-  assert.match(text, /already beyond the target when you enter, take the half at the first permitted evaluation and trail the rest/);
+  assert.match(text, /already beyond that target when you would enter, measure the target instead as the same multiple of the range height beyond the underlying price at your entry/);
+  assert.match(text, /never sell a newly opened position just because the original target was crossed/);
+  assert.doesNotMatch(text, /take the half at the first permitted evaluation/);
   assert.doesNotMatch(text, /already crossed the target/);
   assert.match(text, /not an unconditional close of a working position/);
   assert.match(text, /once on every regular-session heartbeat, also call prophet_get_alpaca_news with no symbols/i);

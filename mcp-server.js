@@ -194,7 +194,15 @@ async function callTradingBot(endpoint, method = 'GET', data = null, options = {
     } catch (error) {
       lastError = error;
       const status = error?.response?.status || 0;
-      if (options.returnAvailability && status === 503 && error?.response?.data?.category) return { ...error.response.data, http_status: 503 };
+      if (options.returnAvailability && status === 503 && error?.response?.data?.category) {
+        // A provider throttle (Alpaca news maps its 429 to 503 rate_limited) gets the same bounded GET retry as a raw 429.
+        if (method === 'GET' && error.response.data.category === 'rate_limited' && attempt < maxAttempts
+          && Date.now() - started + 1000 * attempt < budgetMs) {
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+          continue;
+        }
+        return { ...error.response.data, http_status: 503 };
+      }
       if (options.returnValidation && [400, 422].includes(status) && error?.response?.data) return error.response.data;
       const retryable = safe && (!status || [500, 502, 503, 504].includes(status) || (method === 'GET' && status === 429));
       if (!retryable || attempt >= maxAttempts) break;

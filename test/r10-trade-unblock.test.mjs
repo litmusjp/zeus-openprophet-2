@@ -94,9 +94,12 @@ test('catalyst guidance drops the blockers found on Nov 9 and adds the new defin
   assert.doesNotMatch(text, /already crossed the target/);
   assert.doesNotMatch(text, /average volume of the range's completed bars/);
   assert.match(text, /average volume of the 6 completed 5-minute bars immediately before it/);
+  assert.match(text, /record which article set the anchor/);
   assert.match(text, /earliest created_at among the articles about the same event/);
   assert.match(text, /gap from the previous close is more than 12%\./);
-  assert.match(text, /take the half at the first permitted evaluation/);
+  assert.match(text, /never sell a newly opened position just because the original target was crossed/);
+  assert.doesNotMatch(text, /take the half at the first permitted evaluation/);
+  assert.doesNotMatch(text, /only for names or events Alpaca does not cover/);
 });
 
 test('the no-own-veto sentence is in the cost discipline line of every strategy family', () => {
@@ -111,6 +114,8 @@ test('Prophet and Vega scan on every beat, daily-bar strategies keep the early-e
     const p = await build(id);
     assert.match(p, /work through your strategy universe in batches/, id);
     assert.match(p, /incomplete research is never a reason to stop scanning/, id);
+    assert.match(p, /in the timeframe your Strategy Rules require for each condition/, id);
+    assert.doesNotMatch(p, /completed 5-minute bars \(complete=true only\) for intraday entries/, id);
     assert.doesNotMatch(p, /reconcile, record the outcome and end the beat/, id);
   }
   for (const id of ['etf-mean-reversion', 'equity-momentum']) {
@@ -161,4 +166,51 @@ test('a rate-limited GET is retried with a wait, but orders and other writes are
   const assess = await invoke('/options/trade-assessment', 'POST', async () => { assessCalls += 1; throw { response: { status: 429, data: {} } }; });
   assert.ok(assess.error);
   assert.equal(assessCalls, 1, 'assessments keep their existing no-429-retry behaviour');
+});
+
+test('an Alpaca news throttle reported as 503 rate_limited is retried for GET only, within the budget', async () => {
+  const vm = await import('node:vm');
+  const source = await fs.readFile(new URL('../mcp-server.js', import.meta.url), 'utf8');
+  const slice = source.slice(source.indexOf('function formatTradingBotFailure('), source.indexOf('// Automatic memory'));
+  async function invoke(endpoint, method, axios, options) {
+    let now = 1000;
+    const waits = [];
+    const context = {
+      Date: { now: () => now }, JSON, Promise, setTimeout: (resolve, ms) => { waits.push(ms); now += ms; resolve(); },
+      _lastPortCheck: now, _tradingBotUrl: 'http://localhost',
+      TRADING_BOT_TOKEN: '', TRADING_BOT_OPERATOR_TOKEN: '',
+      OPENPROPHET_SANDBOX_ID: 'sandbox', OPENPROPHET_ACCOUNT_ID: 'account', OPENPROPHET_PROCESS_NONCE: 'nonce',
+      axios,
+    };
+    vm.runInNewContext(`${slice}\nthis.callTradingBot = callTradingBot;`, context);
+    const result = await context.callTradingBot(endpoint, method, {}, options).then(value => ({ value }), error => ({ error }));
+    return { ...result, waits };
+  }
+  const throttled = { response: { status: 503, data: { status: 'unavailable', category: 'rate_limited', endpoint: 'alpaca_news' } } };
+
+  let calls = 0;
+  const recovered = await invoke('/news/alpaca?limit=20', 'GET', async () => {
+    calls += 1;
+    if (calls === 1) throw throttled;
+    return { data: { articles: [] } };
+  }, { returnAvailability: true });
+  assert.deepEqual(recovered.value, { articles: [] });
+  assert.equal(calls, 2);
+  assert.deepEqual(recovered.waits, [1000]);
+
+  calls = 0;
+  const exhausted = await invoke('/news/alpaca?limit=20', 'GET', async () => { calls += 1; throw throttled; }, { returnAvailability: true });
+  assert.equal(calls, 3, 'bounded at the existing three attempts');
+  assert.equal(exhausted.value.category, 'rate_limited');
+  assert.equal(exhausted.value.http_status, 503);
+  assert.equal(exhausted.value.status, 'unavailable');
+
+  calls = 0;
+  const permission = await invoke('/news/alpaca?limit=20', 'GET', async () => { calls += 1; throw { response: { status: 503, data: { status: 'unavailable', category: 'permission' } } }; }, { returnAvailability: true });
+  assert.equal(calls, 1, 'other categories return at once');
+  assert.equal(permission.value.category, 'permission');
+
+  calls = 0;
+  await invoke('/options/order', 'POST', async () => { calls += 1; throw throttled; }, { returnAvailability: true });
+  assert.equal(calls, 1, 'writes never retry this response');
 });

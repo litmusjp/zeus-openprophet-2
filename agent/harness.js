@@ -332,6 +332,13 @@ export function isContextOverflow(result) {
     && !(Array.isArray(result.toolEvents) && result.toolEvents.length > 0);
 }
 
+/** A model-provider usage-limit failure (HTTP 429 "The usage limit has been reached"), not an Alpaca or broker 429. */
+export const USAGE_LIMIT_RETRY_SECONDS = 900;
+export function isProviderUsageLimitFailure({ status, message } = {}) {
+  const text = String(message || '');
+  return /usage limit/i.test(text) && (Number(status) === 429 || /\b429\b/.test(text));
+}
+
 export async function buildSystemPrompt(agentConfig, options = {}) {
   const { getStrategyById = () => null, heartbeatIntervalsForced = false } = options;
   const guidance = normalizeTradingGuidance(options.tradingGuidance || DEFAULT_TRADING_GUIDANCE);
@@ -475,7 +482,7 @@ ${riskDisciplineGuidance}
 - maxOrderValue=0 means there is no single-order dollar cap; it does not disable trading and is not an order blocker. A positive maxOrderValue is the only time the dollar cap applies. All other configured risk limits and permission flags still apply.
 - daily loss is derived from current broker account/P&L state, not from a dedicated status tool.
 - Always use limit orders; never market into a position you can't price.
-- Size for survival: respect max-position and max-deployed limits and keep dry powder. Size each new entry at no less than ${guidance.minEntryPct}% of current account equity in option premium (limit price x contracts x 100), rounded to whole contracts, and never above the max-position limit; it must also fit remaining max-deployed, max-open-position and daily-loss capacity. If one contract alone exceeds the max-position limit, or remaining capacity is below ${guidance.minEntryPct}%, skip the entry and report the reason. Account limits, not AlphaDesk, govern size.
+- Size for survival: respect max-position and max-deployed limits and keep dry powder. Size each new entry at no less than ${guidance.minEntryPct}% of current account equity in option premium (limit price x contracts x 100), rounded to whole contracts, and never above the max-position limit; it must also fit remaining max-deployed, max-open-position and daily-loss capacity. If one contract alone exceeds the max-position limit, or remaining capacity is below ${guidance.minEntryPct}%, skip the entry and report the reason. Account limits, not AlphaDesk, govern size. AlphaDesk-guarded openings are limited to 10 contracts per order. If your minimum entry would need more than 10 contracts, prefer an eligible contract inside your delta and expiry rules whose 10 contracts meet it; if none does, enter 10 contracts, which is below the standard size and acceptable. Never split one intent into several orders.
 - The assigned strategy and recorded trade plan control exits, including whether a target or stop applies and the confirmation timeframe. Do not invent a target, tighten a stop, or advance a strategy exit trigger without support in that plan. Honor all existing risk controls and reducing-exit safeguards.
 - One clear thesis per trade. If you can't state it in a sentence, don't take it.
 
@@ -672,6 +679,7 @@ export class AgentHarness {
     this._killEscalationTimer = null;
     this._sessionEpoch = 0;
     this._consecutiveErrors = 0;
+    this._usageLimitErrors = 0;
     this._marketSessionDates = new Set();
   }
 
@@ -1183,10 +1191,13 @@ ${userBlock}`;
       const researchEvent = scheduledReason === 'pre-open-review' || scheduledReason === 'post-close-review';
       if ((start && inSession) || (runReview && (inSession || researchEvent))) await this._beat();
       if (!current()) return;
-      const backoffFactor = this._consecutiveErrors >= BEAT_BACKOFF.threshold
+      const usageLimitOnly = this._consecutiveErrors >= BEAT_BACKOFF.threshold && this._usageLimitErrors === this._consecutiveErrors;
+      const backoffFactor = this._consecutiveErrors >= BEAT_BACKOFF.threshold && !usageLimitOnly
         ? Math.min(2 ** (this._consecutiveErrors - 2), BEAT_BACKOFF.factor) : 1;
       const intervals = Object.fromEntries(['market_open','midday','market_close'].map(phase => [phase,
-        Math.min(this.getHeartbeatForPhase(this.sandboxId, phase) * backoffFactor, BEAT_BACKOFF.capSeconds)]));
+        usageLimitOnly
+          ? Math.max(this.getHeartbeatForPhase(this.sandboxId, phase), USAGE_LIMIT_RETRY_SECONDS)
+          : Math.min(this.getHeartbeatForPhase(this.sandboxId, phase) * backoffFactor, BEAT_BACKOFF.capSeconds)]));
       const next = nextMarketReview(this._marketCalendar, this.now(), clock, intervals);
       if (!next?.at) {
         this._marketScheduleUnavailable = true;
@@ -1229,6 +1240,8 @@ ${userBlock}`;
     // Exponential backoff after repeated beat failures: slow the loop so a broken
     // dependency (auth, broker, opencode) isn't hammered. Caps at 16x / 1 hour.
     if (this._consecutiveErrors >= BEAT_BACKOFF.threshold) {
+      // A model usage limit resets on its own: retry on a fixed step instead of doubling up to the cap.
+      if (this._usageLimitErrors === this._consecutiveErrors) return Math.max(base, USAGE_LIMIT_RETRY_SECONDS);
       const factor = Math.min(2 ** (this._consecutiveErrors - 2), BEAT_BACKOFF.factor);
       return Math.min(base * factor, BEAT_BACKOFF.capSeconds);
     }
@@ -1395,6 +1408,7 @@ ${userBlock}`;
       }
 
       this._consecutiveErrors = 0; // clean beat clears any backoff
+      this._usageLimitErrors = 0;
 
     } catch (err) {
       if (executionFailed && beatEpoch === this._sessionEpoch && beatAccountId === this.state.activeAccountId) {
@@ -1422,6 +1436,7 @@ ${userBlock}`;
       }
       this.state.stats.errors++;
       this._consecutiveErrors++;
+      this._usageLimitErrors = isProviderUsageLimitFailure({ status: failedResult?.errorStatus, message: err?.message || err }) ? (this._usageLimitErrors || 0) + 1 : 0;
       this.state.emit('agent_log', { message: `Beat #${beatNum} error: ${sanitizeOpenCodeError(err?.message || err)}`, level: 'error' });
       if (this._consecutiveErrors >= BEAT_BACKOFF.threshold) {
         this.state.emit('agent_log', { message: `${this._consecutiveErrors} consecutive beat failures — backing off the next heartbeat.`, level: 'warning' });

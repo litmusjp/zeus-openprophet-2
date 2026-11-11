@@ -955,7 +955,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place one single-leg OCC options order. Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. Reconcile option positions first; long entries use buy_to_open and reductions use sell_to_close on the same OCC contract for the broker-reconciled remaining quantity. Supply exact-contract timestamped bid/ask and sizes from the chain; missing evidence blocks entry. Managed-position tools are equities-only and do not provide broker-held option stops or OCO. AlphaDesk assessment applies only to new exposure; FAIL/UNAVAILABLE blocks openings but not reducing a long. Backend controls still apply. Accepted/new/open acknowledge only; positive filled quantity confirms execution.',
+        description: 'Place one single-leg OCC options order (openings: 1-10 contracts). Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. Reconcile option positions first; long entries use buy_to_open and reductions use sell_to_close on the same OCC contract for the broker-reconciled remaining quantity. Supply exact-contract timestamped bid/ask and sizes from the chain; missing evidence blocks entry. Managed-position tools are equities-only and do not provide broker-held option stops or OCO. AlphaDesk assessment applies only to new exposure; FAIL/UNAVAILABLE blocks openings but not reducing a long. Backend controls still apply. Accepted/new/open acknowledge only; positive filled quantity confirms execution.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2125,6 +2125,13 @@ ${allNews.map((article, i) =>
       }
 
       case 'place_options_order': {
+        // OP2's standalone AlphaDesk guard accepts 1-10 contracts per opening order; say so before calling the backend.
+        if (isOpeningIntent(args.position_intent) && Number(args.quantity) > 10) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: `AlphaDesk-guarded openings are limited to 1-10 contracts per order. This proposal asked for ${args.quantity}. Re-size within your rules (see the sizing rule); do not split one intent into several orders.`, category: 'local_validation', max_quantity: 10, execution_confirmed: false, filled_qty: 0 }) }],
+            isError: true,
+          };
+        }
         const requestData = {
           ...(args.client_order_id && { client_order_id: args.client_order_id }),
           symbol: args.symbol,

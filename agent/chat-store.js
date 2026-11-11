@@ -72,6 +72,20 @@ function isReconciledPositionNotFound(record, records) {
       && Number(order?.FilledQty ?? order?.filled_qty ?? 0) > 0);
   });
 }
+// A guarded opening order that AlphaDesk refused (FAIL or UNAVAILABLE) before anything reached the broker, or that
+// OP2 refused locally for its contract limit, is a normal outcome, not a failed heartbeat. Anything else about an
+// order (unknown submission state, authentication, broker errors, a fill) keeps the Failed/Error treatment.
+const AD_BLOCK_PREFIX = 'AlphaDesk blocked';
+function adPreBrokerBlock(record) {
+  if (!record || (record.kind !== 'tool_call' && record.eventType !== 'tool_call')) return null;
+  if (String(record.tool || '').replace(/^prophet_/, '') !== 'place_options_order') return null;
+  const text = (String(record.error || '') + ' ' + (typeof record.result === 'string' ? record.result : JSON.stringify(record.result || ''))).replace(/\\+"/g, '"');
+  if (/limited to 1-10 contracts per order/.test(text) && /"execution_confirmed":\s*false/.test(text)) return `${AD_BLOCK_PREFIX} (quantity limit)`;
+  const decision = (text.match(/"assessment_decision":\s*"(FAIL|UNAVAILABLE)"/) || [])[1];
+  if (!decision) return null;
+  if (!/"execution_confirmed":\s*false/.test(text) || !/"filled_qty":\s*0(?![.\d])/.test(text)) return null;
+  return `${AD_BLOCK_PREFIX} (${decision})`;
+}
 /** Split an activity's failing records into essential failures and optional-research warnings. */
 function classifyFailures(records) {
   const essential = [];
@@ -81,6 +95,7 @@ function classifyFailures(records) {
     const optional = optionalResearchToolName(record);
     if (optional) warnings.push(optional);
     else if (isReconciledPositionNotFound(record, records)) warnings.push(POSITION_NOT_FOUND_WARNING);
+    else if (adPreBrokerBlock(record)) warnings.push(adPreBrokerBlock(record));
     else essential.push(record);
   }
   return { essential, warnings: [...new Set(warnings)] };
@@ -88,9 +103,11 @@ function classifyFailures(records) {
 function activityOutcome({ recovery, status, essential, warnings }) {
   // An optional-research warning is appended to whichever outcome applies, so it is never hidden by a
   // recorded order status or a recovery. An essential failure keeps the plain Failed outcome.
-  const unavailable = warnings.filter(w => w !== POSITION_NOT_FOUND_WARNING);
+  const adBlocks = warnings.filter(w => w.startsWith(AD_BLOCK_PREFIX));
+  const unavailable = warnings.filter(w => w !== POSITION_NOT_FOUND_WARNING && !w.startsWith(AD_BLOCK_PREFIX));
   const parts = [];
   if (unavailable.length) parts.push(`${unavailable.join(', ')} unavailable`);
+  if (adBlocks.length) parts.push(adBlocks.join('; '));
   if (warnings.includes(POSITION_NOT_FOUND_WARNING)) parts.push(POSITION_NOT_FOUND_WARNING);
   const warning = parts.length ? ` (warning: ${parts.join('; ')})` : '';
   if (recovery) return `Recovered${warning}`;

@@ -104,17 +104,19 @@ func TestResolvePrecisionRejectionRefusesAndChangesNothingOtherwise(t *testing.T
 		token   string
 		code    int
 	}{
-		"no operator token":        {func(o *interfaces.Order) {}, &lookupTrading{}, "", http.StatusForbidden},
-		"wrong operator token":     {func(o *interfaces.Order) {}, &lookupTrading{}, "nope", http.StatusForbidden},
-		"broker has the order":     {func(o *interfaces.Order) {}, &lookupTrading{order: &interfaces.Order{ID: "b1", Status: "new"}}, "operator-secret", http.StatusConflict},
-		"broker lookup unclear":    {func(o *interfaces.Order) {}, &lookupTrading{err: errors.New("timeout")}, "operator-secret", http.StatusConflict},
-		"different failure reason": {func(o *interfaces.Order) { o.Metadata = `{"op2_failure":{"status":"submission_uncertain","reason":"client_order_id must be unique (HTTP 422, Code 42210000)"}}` }, &lookupTrading{}, "operator-secret", http.StatusConflict},
-		"no failure evidence":      {func(o *interfaces.Order) { o.Metadata = "" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
-		"filled quantity":          {func(o *interfaces.Order) { o.FilledQty = 1 }, &lookupTrading{}, "operator-secret", http.StatusConflict},
-		"broker order id":          {func(o *interfaces.Order) { o.ID = "broker-1" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
-		"not uncertain":            {func(o *interfaces.Order) { o.Status = "submit_failed" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
-		"other sandbox":            {func(o *interfaces.Order) { o.SandboxID = "another-sandbox" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
-		"not paper":                {func(o *interfaces.Order) { o.PaperLive = "live" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
+		"no operator token":     {func(o *interfaces.Order) {}, &lookupTrading{}, "", http.StatusForbidden},
+		"wrong operator token":  {func(o *interfaces.Order) {}, &lookupTrading{}, "nope", http.StatusForbidden},
+		"broker has the order":  {func(o *interfaces.Order) {}, &lookupTrading{order: &interfaces.Order{ID: "b1", Status: "new"}}, "operator-secret", http.StatusConflict},
+		"broker lookup unclear": {func(o *interfaces.Order) {}, &lookupTrading{err: errors.New("timeout")}, "operator-secret", http.StatusConflict},
+		"different failure reason": {func(o *interfaces.Order) {
+			o.Metadata = `{"op2_failure":{"status":"submission_uncertain","reason":"client_order_id must be unique (HTTP 422, Code 42210000)"}}`
+		}, &lookupTrading{}, "operator-secret", http.StatusConflict},
+		"no failure evidence": {func(o *interfaces.Order) { o.Metadata = "" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
+		"filled quantity":     {func(o *interfaces.Order) { o.FilledQty = 1 }, &lookupTrading{}, "operator-secret", http.StatusConflict},
+		"broker order id":     {func(o *interfaces.Order) { o.ID = "broker-1" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
+		"not uncertain":       {func(o *interfaces.Order) { o.Status = "submit_failed" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
+		"other sandbox":       {func(o *interfaces.Order) { o.SandboxID = "another-sandbox" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
+		"not paper":           {func(o *interfaces.Order) { o.PaperLive = "live" }, &lookupTrading{}, "operator-secret", http.StatusConflict},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

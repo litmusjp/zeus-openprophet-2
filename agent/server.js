@@ -15,6 +15,7 @@ import { testAlphaDeskAssessmentCapability } from './alphadesk-connection.js';
 
 import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
+import { registerPrecisionResolutionRoute } from './precision-resolution-route.js';
 import { DEFAULT_TRADING_GUIDANCE, loadTradingGuidance, getTradingGuidanceForSandbox, setTradingGuidanceForSandbox } from './trading-guidance.js';
 import { buildTradeLedger } from './trade-ledger.js';
 import { buildScorecard } from './trade-scorecard.js';
@@ -1411,6 +1412,15 @@ app.put('/api/sandboxes/:id/agent/overrides', async (req, res) => {
     broadcast('config', safeConfig());
     res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
   } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+registerPrecisionResolutionRoute(app, {
+  operatorAuth: operatorAuthMiddleware,
+  sameOrigin: sameOriginStateChange,
+  getSandbox,
+  getClient: getExistingGoClientForSandbox,
+  isReady: sandboxId => (isActiveSandbox(sandboxId) ? goReady : orchestrator.getSandboxRuntime(sandboxId)?.goReady === true),
+  operatorToken: () => process.env.TRADING_BOT_OPERATOR_TOKEN || '',
 });
 
 app.put('/api/sandboxes/:id/strategy-rules', async (req, res) => {

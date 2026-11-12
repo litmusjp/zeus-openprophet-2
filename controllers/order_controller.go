@@ -180,6 +180,20 @@ func (oc *OrderController) ReconcileOpenOrders(ctx context.Context) (reconciled 
 			broker, brokerErr = oc.tradingService.GetOrderByClientOrderID(ctx, order.ClientOrderID)
 		}
 		if brokerErr != nil {
+			// A record created before OP2 recognised Alpaca's two-decimal limit price validation (422 / 42210000) holds
+			// that exact stored evidence; with a broker not-found lookup it is a definite rejection, not an unknown.
+			if services.IsOrderNotFound(brokerErr) && services.HasPrecisionRejectionEvidence(order) {
+				if markErr := services.MarkPrecisionRejected(order, "startup_reconciliation"); markErr == nil {
+					if saveErr := oc.storageService.SaveOrder(order); saveErr == nil {
+						oc.logger.WithField("client_order_id", order.ClientOrderID).
+							Warn("Reconcile: resolved an uncertain order as rejected (two-decimal limit price validation, broker has no such order)")
+						reconciled++
+						continue
+					} else {
+						oc.logger.WithError(saveErr).WithField("client_order_id", order.ClientOrderID).Warn("Reconcile: failed to persist the precision rejection resolution")
+					}
+				}
+			}
 			oc.logger.WithError(brokerErr).WithFields(logrus.Fields{"client_order_id": order.ClientOrderID, "order_id": order.ID}).
 				Info("Reconcile: order not confirmed at broker, leaving as-is")
 			skipped++

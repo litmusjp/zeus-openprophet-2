@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,38 +18,11 @@ import (
 // before OP2 recognised Alpaca's two-decimal limit price validation (HTTP 422 / 42210000) as a definite rejection.
 // It never submits anything to the broker, never deletes or replays, and refuses unless every check holds.
 
-const (
-	precisionResolutionRule    = "alpaca_422_42210000_price_precision"
-	precisionReasonStatusText  = "http 422, code 42210000"
-	precisionReasonMessageText = "limit price must be limited to 2 decimal places"
-)
-
 // PrecisionResolutionRefusedError reports why a record was left unchanged.
 type PrecisionResolutionRefusedError struct{ Reason string }
 
 func (e *PrecisionResolutionRefusedError) Error() string {
 	return "precision rejection resolution refused: " + e.Reason
-}
-
-func precisionFailureReason(metadata string) string {
-	if strings.TrimSpace(metadata) == "" {
-		return ""
-	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(metadata), &doc); err != nil {
-		return ""
-	}
-	raw, ok := doc["op2_failure"]
-	if !ok {
-		return ""
-	}
-	var failure struct {
-		Reason string `json:"reason"`
-	}
-	if err := json.Unmarshal(raw, &failure); err != nil {
-		return ""
-	}
-	return failure.Reason
 }
 
 // ResolvePrecisionRejectionWithCapability marks one uncertain, never-acknowledged order as rejected when the stored
@@ -98,8 +70,7 @@ func (oc *OrderController) ResolvePrecisionRejectionWithCapability(ctx context.C
 	if order.FilledQty != 0 {
 		return refuse("a filled quantity is recorded")
 	}
-	reason := strings.ToLower(precisionFailureReason(order.Metadata))
-	if !strings.Contains(reason, precisionReasonStatusText) || !strings.Contains(reason, precisionReasonMessageText) {
+	if !services.HasPrecisionRejectionEvidence(order) {
 		return refuse("stored failure evidence is not the two-decimal limit price validation (HTTP 422, code 42210000)")
 	}
 	brokerOrder, brokerErr := oc.tradingService.GetOrderByClientOrderID(ctx, clientOrderID)
@@ -109,27 +80,9 @@ func (oc *OrderController) ResolvePrecisionRejectionWithCapability(ctx context.C
 	if brokerErr == nil || !services.IsOrderNotFound(brokerErr) {
 		return refuse("the broker lookup did not confirm that no such order exists")
 	}
-	// Keep every field (client_order_id, SubmissionAttempted, price, quantity, original failure evidence).
-	doc := map[string]json.RawMessage{}
-	if strings.TrimSpace(order.Metadata) != "" {
-		if err := json.Unmarshal([]byte(order.Metadata), &doc); err != nil || doc == nil {
-			return refuse("stored metadata is not readable")
-		}
+	if err := services.MarkPrecisionRejected(order, "operator"); err != nil {
+		return refuse(err.Error())
 	}
-	resolution, err := json.Marshal(map[string]string{
-		"by": "operator", "at": time.Now().UTC().Format(time.RFC3339), "rule": precisionResolutionRule,
-		"broker_lookup": "not_found", "previous_status": order.Status,
-	})
-	if err != nil {
-		return nil, err
-	}
-	doc["resolution"] = resolution
-	metadata, err := json.Marshal(doc)
-	if err != nil {
-		return nil, err
-	}
-	order.Metadata = string(metadata)
-	order.Status = "rejected"
 	if err := oc.storageService.SaveOrder(order); err != nil {
 		return nil, fmt.Errorf("precision rejection resolution persistence failed: %w", err)
 	}

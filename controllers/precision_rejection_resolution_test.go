@@ -7,10 +7,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"prophet-trader/database"
 	"prophet-trader/interfaces"
 	"prophet-trader/models"
 	"prophet-trader/services"
@@ -89,7 +91,7 @@ func TestResolvePrecisionRejectionSucceedsOnlyWithAllEvidenceAndKeepsTheRecord(t
 	if err := json.Unmarshal(doc["resolution"], &resolution); err != nil {
 		t.Fatalf("resolution metadata missing: %v", err)
 	}
-	if resolution["by"] != "operator" || resolution["rule"] != precisionResolutionRule || resolution["broker_lookup"] != "not_found" || resolution["previous_status"] != "submission_uncertain" || resolution["at"] == "" {
+	if resolution["by"] != "operator" || resolution["rule"] != services.PrecisionResolutionRule || resolution["broker_lookup"] != "not_found" || resolution["previous_status"] != "submission_uncertain" || resolution["at"] == "" {
 		t.Fatalf("unexpected resolution metadata: %v", resolution)
 	}
 	if trading.calls != 1 {
@@ -147,7 +149,75 @@ func TestResolvePrecisionRejectionUnknownOrderAndBadRequest(t *testing.T) {
 	if rec := resolveRequest(oc, "  ", "operator-secret"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty id status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(precisionFailureReason(precisionFailureMetadata), "42210000") {
+	if !strings.Contains(services.PrecisionFailureReason(precisionFailureMetadata), "42210000") {
 		t.Fatal("reason helper does not read op2_failure.reason")
+	}
+}
+
+// Startup reconciliation resolves exactly this evidence class (and nothing else) so a restart is not blocked forever.
+func TestReconcileOpenOrdersResolvesOnlyThePrecisionRejectionEvidenceClass(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	defer storage.Close()
+
+	otherReason := `{"op2_failure":{"status":"submission_uncertain","reason":"submission_uncertain: broker submission result is unknown: client_order_id must be unique (HTTP 422, Code 42210000)"}}`
+	for _, order := range []*interfaces.Order{
+		{ClientOrderID: "precision-1", Symbol: "GE261120C00337500", Qty: 6, Side: "buy", Type: "limit", TimeInForce: "day", Status: "submission_uncertain", SubmissionAttempted: true, Metadata: precisionFailureMetadata},
+		{ClientOrderID: "other-reason", Symbol: "JNJ261211C00275000", Qty: 6, Side: "buy", Type: "limit", TimeInForce: "day", Status: "submission_uncertain", SubmissionAttempted: true, Metadata: otherReason},
+		{ClientOrderID: "no-evidence", Symbol: "MSFT261211C00400000", Qty: 1, Side: "buy", Type: "limit", TimeInForce: "day", Status: "submission_uncertain", SubmissionAttempted: true},
+	} {
+		if err := storage.SaveOrder(order); err != nil {
+			t.Fatalf("SaveOrder(%q) error = %v", order.ClientOrderID, err)
+		}
+	}
+
+	controller := NewOrderController(&lookupTrading{}, nil, storage) // the broker has none of them
+	reconciled, skipped := controller.ReconcileOpenOrders(context.Background())
+	if reconciled != 1 || skipped != 2 {
+		t.Fatalf("ReconcileOpenOrders() = (%d, %d), want (1, 2)", reconciled, skipped)
+	}
+	resolved, err := storage.GetOrderByClientOrderID("precision-1")
+	if err != nil || resolved == nil {
+		t.Fatalf("resolved order lookup = %v, %v", resolved, err)
+	}
+	if resolved.Status != "rejected" || !resolved.SubmissionAttempted || resolved.ID != "" || resolved.FilledQty != 0 {
+		t.Fatalf("resolved order = %#v", resolved)
+	}
+	if !strings.Contains(resolved.Metadata, `"startup_reconciliation"`) || !strings.Contains(resolved.Metadata, "42210000") {
+		t.Fatalf("resolution or original evidence missing: %s", resolved.Metadata)
+	}
+	pending, err := storage.GetOrdersNeedingReconciliation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]string{}
+	for _, order := range pending {
+		seen[order.ClientOrderID] = order.Status
+	}
+	if len(seen) != 2 || seen["other-reason"] != "submission_uncertain" || seen["no-evidence"] != "submission_uncertain" {
+		t.Fatalf("still-unresolved orders = %#v, want only the two without the exact evidence", seen)
+	}
+}
+
+func TestReconcileOpenOrdersLeavesPrecisionEvidenceAloneWhenTheBrokerHasTheOrder(t *testing.T) {
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	defer storage.Close()
+	if err := storage.SaveOrder(&interfaces.Order{ClientOrderID: "precision-1", Symbol: "GE261120C00337500", Qty: 6, Side: "buy", Type: "limit", TimeInForce: "day", Status: "submission_uncertain", SubmissionAttempted: true, Metadata: precisionFailureMetadata}); err != nil {
+		t.Fatal(err)
+	}
+	// An unclear broker lookup (not a clean not-found) must never resolve it.
+	controller := NewOrderController(&lookupTrading{err: errors.New("timeout")}, nil, storage)
+	reconciled, skipped := controller.ReconcileOpenOrders(context.Background())
+	if reconciled != 0 || skipped != 1 {
+		t.Fatalf("ReconcileOpenOrders() = (%d, %d), want (0, 1)", reconciled, skipped)
+	}
+	order, _ := storage.GetOrderByClientOrderID("precision-1")
+	if order == nil || order.Status != "submission_uncertain" {
+		t.Fatalf("order changed without a broker not-found: %#v", order)
 	}
 }

@@ -139,6 +139,11 @@ func TestClassifyBrokerSubmissionErrorOnlyTerminalTypedRejections(t *testing.T) 
 	}{
 		{"wash trade rejection", &alpaca.APIError{StatusCode: 403, Code: 40310000, Message: "potential wash trade detected"}, true},
 		{"validation rejection", &alpaca.APIError{StatusCode: 422, Code: 42210000, Message: "client_order_id must be unique"}, false},
+		{"limit price precision rejection is definite", &alpaca.APIError{StatusCode: 422, Code: 42210000, Message: "limit price must be limited to 2 decimal places"}, true},
+		{"limit price precision rejection ignores message case", &alpaca.APIError{StatusCode: 422, Code: 42210000, Message: "Limit Price Must Be Limited To 2 Decimal Places"}, true},
+		{"precision message with a different status stays uncertain", &alpaca.APIError{StatusCode: 400, Code: 42210000, Message: "limit price must be limited to 2 decimal places"}, false},
+		{"precision message with a different code stays uncertain", &alpaca.APIError{StatusCode: 422, Code: 42210002, Message: "limit price must be limited to 2 decimal places"}, false},
+		{"duplicate client order id 422 stays uncertain", &alpaca.APIError{StatusCode: 422, Code: 42210000, Message: "client order id must be unique"}, false},
 		{"conflict", &alpaca.APIError{StatusCode: 409, Code: 40910000, Message: "conflict"}, false},
 		{"route not found", &alpaca.APIError{StatusCode: 404, Code: 40410000, Message: "not found"}, false},
 		{"request timeout", &alpaca.APIError{StatusCode: 408, Code: 40810000, Message: "timeout"}, false},

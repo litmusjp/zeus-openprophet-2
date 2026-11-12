@@ -16,6 +16,7 @@ import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
 import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
 import { futureHistoricalBarsError } from './historical-bars-time.js';
+import { normalizeOptionLimitPrice } from './option-price.js';
 
 // Configuration
 const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
@@ -2132,6 +2133,10 @@ ${allNews.map((article, i) =>
             isError: true,
           };
         }
+        if (args.limit_price !== undefined) {
+          try { args.limit_price = normalizeOptionLimitPrice(args.limit_price, args.side); }
+          catch (priceError) { return { content: [{ type: 'text', text: JSON.stringify({ error: priceError.message, category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true }; }
+        }
         const requestData = {
           ...(args.client_order_id && { client_order_id: args.client_order_id }),
           symbol: args.symbol,
@@ -2171,6 +2176,10 @@ ${allNews.map((article, i) =>
       }
 
       case 'assess_options_trade': {
+        if (args.limit_price !== undefined) {
+          try { args.limit_price = normalizeOptionLimitPrice(args.limit_price, 'buy'); }
+          catch (priceError) { return { content: [{ type: 'text', text: JSON.stringify({ error: priceError.message, category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true }; }
+        }
         const { legs, quantity, limit_price, client_reference } = args;
         const data = await callTradingBot('/options/trade-assessment', 'POST', {
           legs, quantity, limit_price, ...(client_reference === undefined ? {} : {client_reference}),
@@ -2179,6 +2188,10 @@ ${allNews.map((article, i) =>
       }
 
       case 'assess_options_strategy': {
+        if (args.limit_price !== undefined) {
+          try { args.limit_price = normalizeOptionLimitPrice(args.limit_price, args.side); }
+          catch (priceError) { return { content: [{ type: 'text', text: JSON.stringify({ error: priceError.message, category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true }; }
+        }
         const data = await callTradingBot('/options/assessment', 'POST', { symbol: args.symbol, underlying: args.underlying, qty: args.quantity, side: args.side, position_intent: args.position_intent, type: args.order_type, time_in_force: args.time_in_force, ...(args.limit_price !== undefined && {limit_price: args.limit_price}), ...(args.strategy_type && {strategy_type: args.strategy_type}), ...(args.legs && {legs: args.legs}), ...(args.max_loss !== undefined && {max_loss: args.max_loss}), ...(args.greeks && {greeks: args.greeks}), ...(args.market_evidence_at && {market_evidence_at: args.market_evidence_at}), ...(args.observed_at && {observed_at: args.observed_at}), ...(args.expires_at && {expires_at: args.expires_at}), ...(args.market_scanner_features && {market_scanner_features: args.market_scanner_features}) }, { returnValidation: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }

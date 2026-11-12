@@ -8,6 +8,7 @@ import vm from 'node:vm';
 import { AgentHarness, buildSystemPrompt, isProviderUsageLimitFailure, USAGE_LIMIT_RETRY_SECONDS } from '../agent/harness.js';
 import { DEFAULT_TRADING_GUIDANCE, renderTradingGuidance } from '../agent/trading-guidance.js';
 import { ChatStore } from '../agent/chat-store.js';
+import { normalizeOptionLimitPrice } from '../option-price.js';
 import { BEAT_BACKOFF } from '../agent/defaults.js';
 
 const guidance = strategyId => renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId });
@@ -86,7 +87,7 @@ test('openings above 10 contracts get a specific local error; closes and 10-cont
   const body = source.slice(begin, end).replace("case 'place_options_order': {", '').trim().replace(/}s*$/, '');
   const calls = [];
   const invoke = vm.runInNewContext(`(async (args) => {${body}})`, {
-    JSON, Number,
+    JSON, Number, normalizeOptionLimitPrice,
     callTradingBot: async (...a) => { calls.push(a); return { status: 'accepted' }; },
     isOpeningIntent: intent => typeof intent !== 'string' || !intent || intent.includes('open'),
     autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),

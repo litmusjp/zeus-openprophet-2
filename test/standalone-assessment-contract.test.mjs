@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { normalizeOptionLimitPrice } from '../option-price.js';
 
 const source = fs.readFileSync(new URL('../mcp-server.js', import.meta.url), 'utf8');
 
@@ -14,7 +15,7 @@ test('standalone tool forwards only proposal to one assessment route and preserv
   const reply = {decision:'FAIL',signal_score:40,execution_allowed:false,
     checks:[{code:'minimum_signal_score',passed:false}],remediation:['Choose a stronger genuine signal']};
   const invoke = vm.runInNewContext(`(async (args) => {${body}})`, {
-    callTradingBot: async (...args) => { calls.push(args); return reply; },
+    callTradingBot: async (...args) => { calls.push(args); return reply; }, normalizeOptionLimitPrice,
   });
   const result = await invoke({legs:[{symbol:'AAPL261106C00200000',side:'buy'}],
     quantity:1,limit_price:2,signal_score:100,market_scanner_features:{invented:true}});
@@ -60,7 +61,7 @@ test('MCP place_options_order preserves typed HTTP outcome diagnostics', async (
   const calls = [];
   const invoke = vm.runInNewContext(`(async (args) => {${body}})`, {
     callTradingBot: async (...args) => { calls.push(args); return { status: 'risk_blocked', assessment_decision: 'PASS', assessment_category: 'execution_blocked', assessment_stage: 'market_session' }; },
-    isOpeningIntent: () => true, autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
+    isOpeningIntent: () => true, normalizeOptionLimitPrice, autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
   });
   const output = await invoke({ client_order_id: 'stable-id', symbol: 'AAPL261106C00200000', underlying: 'AAPL', quantity: 1, side: 'buy', position_intent: 'buy_to_open', order_type: 'limit', limit_price: 2, thesis: 'fixture' });
   assert.equal(calls[0][0], '/options/order');

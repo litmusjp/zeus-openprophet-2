@@ -96,19 +96,28 @@ func IsBrokerRejection(err error) bool {
 	return errors.As(err, &rejection)
 }
 
-// classifyBrokerSubmissionError intentionally relies on the one observed
-// typed SDK rejection, not HTTP status or message substrings. Unknown 4xx
+// classifyBrokerSubmissionError intentionally relies on typed SDK rejections that are known to create no order
+// (the 403/40310000 wash-trade rejection and the 422/42210000 limit price precision validation), not on a broad HTTP status. Unknown 4xx
 // responses, duplicate identities, conflicts, and timeouts remain uncertain.
 func classifyBrokerSubmissionError(err error) error {
 	var apiErr *alpaca.APIError
 	if !errors.As(err, &apiErr) || apiErr == nil {
 		return nil
 	}
-	if apiErr.StatusCode != 403 || apiErr.Code != 40310000 {
-		return nil
+	if apiErr.StatusCode == 403 && apiErr.Code == 40310000 {
+		return &BrokerRejectionError{Err: apiErr}
 	}
-	return &BrokerRejectionError{Err: apiErr}
+	// Alpaca validates the limit price scale before it creates an order: HTTP 422 / 42210000 with this exact
+	// message means no order exists. No other 422 (duplicate client order ID, quantity, anything else) qualifies.
+	if apiErr.StatusCode == 422 && apiErr.Code == 42210000 &&
+		strings.Contains(strings.ToLower(apiErr.Message), limitPricePrecisionRejectionMessage) {
+		return &BrokerRejectionError{Err: apiErr}
+	}
+	return nil
 }
+
+// limitPricePrecisionRejectionMessage is the lower-cased fragment of Alpaca's two-decimal limit price validation.
+const limitPricePrecisionRejectionMessage = "limit price must be limited to 2 decimal places"
 
 // ManagedRequestError identifies a request that is invalid before any broker interaction.
 type ManagedRequestError struct{ Err error }

@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 import { normalizeOptionLimitPrice } from '../option-price.js';
+import { sessionFields, openingGateDecision, parseMinOpeningMinutes } from '../session-clock.js';
 import { DEFAULT_TRADING_GUIDANCE, renderTradingGuidance } from '../agent/trading-guidance.js';
 
 const source = await fsp.readFile(new URL('../mcp-server.js', import.meta.url), 'utf8');
@@ -48,7 +49,7 @@ function caseBody(start, endMarker) {
 }
 function runner(body, calls, extra = {}) {
   return vm.runInNewContext(`(async (args) => {${body}})`, {
-    JSON, Number, normalizeOptionLimitPrice,
+    JSON, Number, normalizeOptionLimitPrice, sessionFields, openingGateDecision, parseMinOpeningMinutes, process: { env: {} },
     callTradingBot: async (...a) => { calls.push(a); return { status: 'accepted' }; },
     isOpeningIntent: () => true, autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
     ...extra,
@@ -128,7 +129,10 @@ test('the cents, requote, stale-order and uncertain-intent lines reach every fam
     assert.match(text, /Limit prices are whole cents: the order and assessment tools round a buy down and a sell up to the cent, and the receipt shows the price used/, id);
     assert.match(text, /submit at once \(aim for under 90 seconds\); OP2 rejects quote evidence older than 2 minutes and that check still decides\. Write your logs after the order call/, id);
     assert.match(text, /Review an unfilled opening order at the second heartbeat after submission/, id);
-    assert.match(text, /Copy order IDs exactly from the latest get_orders result; never retype them\. Confirm the cancel is terminal with zero fill before any replacement/, id);
+    assert.match(text, /Copy order IDs exactly from the latest get_orders result; never retype them\. Before any replacement, confirm the cancel is terminal and read its cumulative filled quantity; a replacement covers only the verified remaining quantity, never more\./, id);
+    assert.match(text, /do not submit a duplicate exit; record the block with prophet_log_decision and continue at the next heartbeat\. The second-heartbeat review above applies to opening orders only\./, id);
+    assert.doesNotMatch(text, /zero fill before any replacement/, id);
+    assert.match(text, /Session time: reason about time of day only from session_time_et, minutes_since_open and minutes_to_close in get_datetime/, id);
     assert.match(text, /An unresolved submission_uncertain intent never stops research: keep scanning and record candidates as WATCHLIST, but open nothing new until it is resolved/, id);
     assert.match(text, /Never change price, quantity or direction merely to obtain a PASS/, id);
   }

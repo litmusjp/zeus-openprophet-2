@@ -8,7 +8,7 @@ import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelV
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
-import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, getTradingGuidanceForSandbox, strategyFamilyOf } from './trading-guidance.js';
+import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, getTradingGuidanceForSandbox, strategyFamilyOf, openingGateMinutesFor } from './trading-guidance.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
 import { nextMarketReview, marketSession, marketSessionPhase, validateMarketCalendar } from './market-aware-scheduler.js';
@@ -1591,6 +1591,8 @@ ${userBlock}`;
           OPENPROPHET_SANDBOX_ID: this.sandboxId || '',
           OPENPROPHET_ACCOUNT_ID: this.state.activeAccountId || this.accountId || '',
           OPENPROPHET_HEARTBEAT_INTERVALS_FORCED: this.isHeartbeatIntervalsForced() ? 'true' : 'false',
+          // Always set (empty means no gate) so nothing inherited from the parent environment can switch it on or off.
+          OPENPROPHET_MIN_OPENING_MINUTES: openingGateMinutesFor(this._agentConfig?.strategyId, getTradingGuidanceForSandbox(this.sandboxId)),
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });

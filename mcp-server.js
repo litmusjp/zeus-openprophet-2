@@ -17,6 +17,8 @@ import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
 import { futureHistoricalBarsError } from './historical-bars-time.js';
 import { normalizeOptionLimitPrice } from './option-price.js';
+import { sessionFields, openingGateDecision, parseMinOpeningMinutes } from './session-clock.js';
+import { ordersFrom, isOptionExitOrder, buildPostCancelCheck, unverifiedPostCancelCheck } from './cancel-check.js';
 
 // Configuration
 const EXECUTION_MODE = process.env.OPENPROPHET_EXECUTION_MODE || 'paper';
@@ -1676,7 +1678,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'cancel_order': {
+        // Read-only look at the order first so a cancelled option exit can be followed up. Never blocks the cancel.
+        let exitOrder = null;
+        try {
+          const before = ordersFrom(await callTradingBot('/orders?status=open')).find(o => o.id === String(args.order_id));
+          if (before && isOptionExitOrder(before)) exitOrder = before;
+        } catch { /* cancel proceeds unchanged */ }
         const data = await callTradingBot(`/orders/${args.order_id}`, 'DELETE');
+        if (exitOrder && data && typeof data === 'object' && !Array.isArray(data)) {
+          try {
+            const [ordersAfter, positions] = await Promise.all([callTradingBot('/orders?status=all'), callTradingBot('/options/positions')]);
+            data.post_cancel_check = buildPostCancelCheck({ order: exitOrder, ordersAfter: ordersFrom(ordersAfter), positions });
+          } catch (checkError) {
+            data.post_cancel_check = unverifiedPostCancelCheck(exitOrder.symbol, checkError.message);
+          }
+        }
         return {
           content: [
             {
@@ -2133,6 +2149,22 @@ ${allNews.map((article, i) =>
             isError: true,
           };
         }
+        // Opening-range backstop. The minimum comes only from the harness environment (set for the news-catalyst
+        // strategy from its own range length); it is never read from tool arguments. Reducing orders are unaffected.
+        if (isOpeningIntent(args.position_intent)) {
+          const minOpening = parseMinOpeningMinutes(process.env.OPENPROPHET_MIN_OPENING_MINUTES);
+          if (minOpening > 0) {
+            let fields = sessionFields(null, null);
+            try { const calendar = await callTradingBot('/calendar'); fields = sessionFields(calendar?.clock, calendar?.sessions); } catch { /* unavailable clock refuses the opening */ }
+            const gate = openingGateDecision(minOpening, fields);
+            if (!gate.allowed) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ error: gate.message, code: 'OPENING_RANGE_NOT_COMPLETE', category: 'local_validation', minimum_minutes_after_open: minOpening, minutes_since_open: gate.minutes_since_open, execution_confirmed: false, filled_qty: 0 }) }],
+                isError: true,
+              };
+            }
+          }
+        }
         if (args.limit_price !== undefined) {
           try { args.limit_price = normalizeOptionLimitPrice(args.limit_price, args.side); }
           catch (priceError) { return { content: [{ type: 'text', text: JSON.stringify({ error: priceError.message, category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true }; }
@@ -2300,10 +2332,22 @@ ${allNews.map((article, i) =>
         const now = new Date();
         let brokerClock = null;
         let brokerClockError = null;
+        let sessionInfo = sessionFields(null, null);
+        let sessionFieldsError = null;
         try {
-          brokerClock = await callTradingBot('/clock');
-        } catch (error) {
-          brokerClockError = error.message;
+          // The calendar response carries the broker clock plus today's broker session times.
+          const calendar = await callTradingBot('/calendar');
+          brokerClock = calendar?.clock || null;
+          if (!brokerClock) throw new Error('calendar response had no clock');
+          sessionInfo = sessionFields(brokerClock, calendar.sessions);
+        } catch (calendarError) {
+          sessionFieldsError = calendarError.message;
+          try {
+            brokerClock = await callTradingBot('/clock');
+            sessionInfo = sessionFields(brokerClock, null);
+          } catch (error) {
+            brokerClockError = error.message;
+          }
         }
 
         try {
@@ -2387,6 +2431,12 @@ ${allNews.map((article, i) =>
                   market_status: marketStatus,
                   markets_open_today: brokerClock ? Boolean(brokerIsOpen) : null,
                   market_status_source: brokerClock ? 'alpaca_clock' : 'unavailable',
+                  session_time_et: sessionInfo.session_time_et,
+                  session_open_et: sessionInfo.session_open_et,
+                  session_close_et: sessionInfo.session_close_et,
+                  minutes_since_open: sessionInfo.minutes_since_open,
+                  minutes_to_close: sessionInfo.minutes_to_close,
+                  session_fields_error: sessionFieldsError,
                   broker_clock: brokerClock,
                   broker_clock_error: brokerClockError,
                 }, null, 2),

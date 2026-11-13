@@ -1685,8 +1685,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const preRead = callTradingBot('/orders?status=open');
           preRead.catch(() => {});
           let timer;
-          const listed = await Promise.race([preRead, new Promise(resolve => { timer = setTimeout(() => resolve(null), 1500); })]);
-          clearTimeout(timer);
+          let listed;
+          try {
+            listed = await Promise.race([preRead, new Promise(resolve => { timer = setTimeout(() => resolve(null), 1500); })]);
+          } finally {
+            clearTimeout(timer);
+          }
           const before = listed ? ordersFrom(listed).find(o => o.id === String(args.order_id)) : null;
           if (before && isOptionExitOrder(before)) exitOrder = before;
         } catch { /* cancel proceeds unchanged */ }

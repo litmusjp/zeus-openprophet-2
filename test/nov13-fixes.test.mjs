@@ -159,14 +159,15 @@ test('A1: calendar failure falls back to /clock with null minutes and an error n
   assert.equal(both.minutes_since_open, null);
 });
 
-// ── A2: cancel_order follow-up ────────────────────────────────────────────────────────────────
-function cancelRunner({ open, all, positions, failAfter = false, failBefore = false }) {
+// ── A2: cancel_order follow-up (real DTO shapes: wrapped /orders, Go field names) ─────────────
+function cancelRunner({ open, all, positions, failAfter = false, failBefore = false, hangBefore = false }) {
   const calls = [];
   const fn = run(caseBody("case 'cancel_order': {", "case 'get_quote': {"), {
+    setTimeout, clearTimeout,
     callTradingBot: async (endpoint, method = 'GET') => {
       calls.push(`${method} ${endpoint}`);
       if (method === 'DELETE') return { message: 'Order canceled successfully' };
-      if (endpoint === '/orders?status=open') { if (failBefore) throw new Error('read failed'); return open; }
+      if (endpoint === '/orders?status=open') { if (hangBefore) return new Promise(() => {}); if (failBefore) throw new Error('read failed'); return open; }
       if (endpoint === '/orders?status=all') { if (failAfter) throw new Error('read failed'); return all; }
       if (endpoint === '/options/positions') { if (failAfter) throw new Error('read failed'); return positions; }
       throw new Error(`unexpected ${endpoint}`);
@@ -174,28 +175,41 @@ function cancelRunner({ open, all, positions, failAfter = false, failBefore = fa
   });
   return { fn, calls };
 }
-const exitOrder = (over = {}) => ({ order_id: 'A1', symbol: SYM, side: 'sell', position_intent: 'sell_to_close', status: 'new', qty: 4, filled_qty: 0, ...over });
+const goOrder = (over = {}) => ({ ID: 'A1', ClientOrderID: 'c1', Symbol: SYM, Qty: 4, Side: 'sell', Type: 'limit', Status: 'new', FilledQty: 0, AssetClass: 'us_option', PositionIntent: 'sell_to_close', ...over });
+const wrapped = (orders, over = {}) => ({ orders, complete: true, broker_state: 'available', ...over });
+const goPos = (qty, symbol = SYM) => ({ Symbol: symbol, Qty: qty, Side: 'long' });
 
 test('A2: cancelling an option exit with the position still held adds post_cancel_check with the verified remainder', async () => {
-  const { fn } = cancelRunner({ open: [exitOrder()], all: [exitOrder({ status: 'canceled', filled_qty: 1 })], positions: [{ Symbol: SYM, Qty: 3, Side: 'long' }] });
+  const { fn } = cancelRunner({ open: wrapped([goOrder()]), all: wrapped([goOrder({ Status: 'canceled', FilledQty: 1 })]), positions: [goPos(3)] });
   const out = JSON.parse((await fn({ order_id: 'A1' })).content[0].text);
   assert.equal(out.message, 'Order canceled successfully');
+  assert.equal(out.post_cancel_check.verified, true);
   assert.equal(out.post_cancel_check.held_qty_after_cancel, 3);
-  assert.equal(out.post_cancel_check.unreserved_held_qty, 3);
   assert.match(out.post_cancel_check.note, /replace only the 3 verified/);
 });
 
-test('A2: no warning when another working exit covers it, or the position is gone', async () => {
-  const other = exitOrder({ order_id: 'B2' });
-  const covered = JSON.parse((await cancelRunner({ open: [exitOrder()], all: [exitOrder({ status: 'canceled' }), other], positions: [{ Symbol: SYM, Qty: 4 }] }).fn({ order_id: 'A1' })).content[0].text);
+test('A2: no advice when another working exit covers it, or the position is gone', async () => {
+  const covered = JSON.parse((await cancelRunner({ open: wrapped([goOrder()]), all: wrapped([goOrder({ Status: 'canceled' }), goOrder({ ID: 'B2' })]), positions: [goPos(4)] }).fn({ order_id: 'A1' })).content[0].text);
   assert.match(covered.post_cancel_check.note, /already cover/);
-  const gone = JSON.parse((await cancelRunner({ open: [exitOrder()], all: [exitOrder({ status: 'filled', filled_qty: 4 })], positions: [] }).fn({ order_id: 'A1' })).content[0].text);
+  const gone = JSON.parse((await cancelRunner({ open: wrapped([goOrder()]), all: wrapped([goOrder({ Status: 'filled', FilledQty: 4 })]), positions: [] }).fn({ order_id: 'A1' })).content[0].text);
   assert.match(gone.post_cancel_check.note, /No position remains/);
 });
 
+test('A2: an HTTP-200 incomplete or local-only order list never becomes verified advice', async () => {
+  const run1 = async over => JSON.parse((await cancelRunner({ open: wrapped([goOrder()]), all: wrapped([goOrder({ Status: 'canceled' })], over), positions: [goPos(4)] }).fn({ order_id: 'A1' })).content[0].text);
+  for (const over of [{ complete: false }, { broker_state: 'unavailable' }]) {
+    const out = await run1(over);
+    assert.equal(out.message, 'Order canceled successfully', 'the DELETE outcome is unchanged');
+    assert.equal(out.post_cancel_check.verified, false);
+    assert.match(out.post_cancel_check.note, /Unverified/);
+  }
+  const bad = JSON.parse((await cancelRunner({ open: wrapped([goOrder()]), all: wrapped([goOrder({ Status: 'canceled' })]), positions: { error: 'x' } }).fn({ order_id: 'A1' })).content[0].text);
+  assert.equal(bad.post_cancel_check.verified, false);
+});
+
 test('A2: ordinary cancels are unchanged (buy order, stock order, order not in the open list)', async () => {
-  for (const open of [[exitOrder({ side: 'buy', position_intent: 'buy_to_open' })], [exitOrder({ symbol: 'AAPL' })], []]) {
-    const { fn, calls } = cancelRunner({ open, all: [], positions: [] });
+  for (const open of [wrapped([goOrder({ Side: 'buy', PositionIntent: 'buy_to_open' })]), wrapped([goOrder({ Symbol: 'AAPL' })]), wrapped([])]) {
+    const { fn, calls } = cancelRunner({ open, all: wrapped([]), positions: [] });
     const result = await fn({ order_id: 'A1' });
     assert.equal(result.content[0].text, JSON.stringify({ message: 'Order canceled successfully' }, null, 2));
     assert.deepEqual(calls, ['GET /orders?status=open', 'DELETE /orders/A1']);
@@ -203,12 +217,22 @@ test('A2: ordinary cancels are unchanged (buy order, stock order, order not in t
 });
 
 test('A2: a failed read never blocks or alters the cancel; after-read failure says unverified', async () => {
-  const before = cancelRunner({ open: [], all: [], positions: [], failBefore: true });
+  const before = cancelRunner({ open: null, all: null, positions: null, failBefore: true });
   assert.equal(JSON.parse((await before.fn({ order_id: 'A1' })).content[0].text).message, 'Order canceled successfully');
-  const after = JSON.parse((await cancelRunner({ open: [exitOrder()], all: [], positions: [], failAfter: true }).fn({ order_id: 'A1' })).content[0].text);
+  const after = JSON.parse((await cancelRunner({ open: wrapped([goOrder()]), all: null, positions: null, failAfter: true }).fn({ order_id: 'A1' })).content[0].text);
   assert.equal(after.message, 'Order canceled successfully');
   assert.equal(after.post_cancel_check.verified, false);
-  assert.match(after.post_cancel_check.note, /Unverified/);
+});
+
+test('A2: a slow pre-read is abandoned after about 1.5 seconds and the cancel still runs', async () => {
+  const { fn, calls } = cancelRunner({ hangBefore: true, open: null, all: null, positions: null });
+  const started = Date.now();
+  const out = JSON.parse((await fn({ order_id: 'A1' })).content[0].text);
+  const took = Date.now() - started;
+  assert.equal(out.message, 'Order canceled successfully');
+  assert.ok(took >= 1400 && took < 4000, `took ${took} ms`);
+  assert.deepEqual(calls, ['GET /orders?status=open', 'DELETE /orders/A1']);
+  assert.equal(out.post_cancel_check, undefined);
 });
 
 // ── guidance reaches every strategy ───────────────────────────────────────────────────────────
@@ -222,17 +246,39 @@ test('A1/A2/A4: the new guidance lines appear once per agent prompt and carry no
   }
   const herald = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, catalystRangeMinutes: 15 }, { strategyId: 'catalyst-news' });
   assert.equal(herald.split('This target exit happens once per position').length - 1, 1);
-  assert.match(herald, /enter only once minutes_since_open is at least 15 \(OP2 also refuses an earlier opening\)/);
+  assert.match(herald, /Enter only once minutes_since_open is at least 15 \(OP2 also refuses an earlier opening\)/);
+  assert.match(herald, /the end is the actual session close \(session_close_et from get_datetime; early-close days end earlier\)/);
+  assert.match(herald, /or the publication time for news published during the session/);
+  assert.match(herald, /overnight or pre-open news \(session_open_et from get_datetime; a pre-market bar never forms the range\)/);
+  assert.doesNotMatch(herald, /09:30 to 16:00 ET/);
   const other = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: 'default' });
-  assert.doesNotMatch(other, /This target exit happens once|Pre-market bars never form the range/);
+  assert.doesNotMatch(other, /This target exit happens once|a pre-market bar never forms the range/);
 });
 
 test('A5: trend definitions are added for the catalyst strategy only; other strategies are unchanged', () => {
   const flat = '"Flat or rising average" means';
   const count = (id, s) => renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: id }).split(s).length - 1;
   assert.equal(count('catalyst-news', flat), 1);
-  assert.equal(count('catalyst-news', '"Falling average" means'), 1);
+  assert.equal(count('catalyst-news', '"Flat or falling average" means'), 1);
   assert.equal(count('etf-mean-reversion', flat), 1, 'mean-reversion keeps its single definition');
-  for (const id of ['etf-mean-reversion', 'default', 'equity-momentum', 'long-premium-volatility', 'capital-preservation']) assert.equal(count(id, '"Falling average" means'), 0, id);
+  for (const id of ['etf-mean-reversion', 'default', 'equity-momentum', 'long-premium-volatility', 'capital-preservation']) assert.equal(count(id, '"Flat or falling average" means'), 0, id);
   for (const id of ['default', 'equity-momentum', 'long-premium-volatility']) assert.equal(count(id, flat), 0, id);
+});
+
+test('A5/B1: both directional thresholds are mirrored at the boundary and follow the shared setting', () => {
+  const text = avg => renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, avgSlopeMinPct: avg }, { strategyId: 'catalyst-news' });
+  // default -0.3: calls need a 5-session change of -0.3% or higher; puts need 0.3% or lower
+  let t = text(-0.3);
+  assert.match(t, /"Flat or rising average" means the 5-session change of the 20-day average is -0\.3% or higher/);
+  assert.match(t, /"Flat or falling average" means the 5-session change of the 20-day average is 0\.3% or lower/);
+  assert.doesNotMatch(t, /below -0\.3%/, 'no strict complement wording');
+  // a different shared setting moves both sides together
+  t = text(-0.5);
+  assert.match(t, /is -0\.5% or higher/); assert.match(t, /is 0\.5% or lower/);
+  // zero threshold: both sides meet at zero with no "-0"
+  t = text(0);
+  assert.match(t, /is 0% or higher/); assert.match(t, /is 0% or lower/); assert.doesNotMatch(t, /-0%/);
+  // a positive setting is mirrored, not folded
+  t = text(0.4);
+  assert.match(t, /is 0\.4% or higher/); assert.match(t, /is -0\.4% or lower/);
 });

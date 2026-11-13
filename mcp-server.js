@@ -1679,16 +1679,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'cancel_order': {
         // Read-only look at the order first so a cancelled option exit can be followed up. Never blocks the cancel.
+        // The pre-read is best effort and tightly bounded (1.5 s); on a miss or timeout the cancel runs with no advisory.
         let exitOrder = null;
         try {
-          const before = ordersFrom(await callTradingBot('/orders?status=open')).find(o => o.id === String(args.order_id));
+          const preRead = callTradingBot('/orders?status=open');
+          preRead.catch(() => {});
+          let timer;
+          const listed = await Promise.race([preRead, new Promise(resolve => { timer = setTimeout(() => resolve(null), 1500); })]);
+          clearTimeout(timer);
+          const before = listed ? ordersFrom(listed).find(o => o.id === String(args.order_id)) : null;
           if (before && isOptionExitOrder(before)) exitOrder = before;
         } catch { /* cancel proceeds unchanged */ }
         const data = await callTradingBot(`/orders/${args.order_id}`, 'DELETE');
         if (exitOrder && data && typeof data === 'object' && !Array.isArray(data)) {
           try {
             const [ordersAfter, positions] = await Promise.all([callTradingBot('/orders?status=all'), callTradingBot('/options/positions')]);
-            data.post_cancel_check = buildPostCancelCheck({ order: exitOrder, ordersAfter: ordersFrom(ordersAfter), positions });
+            data.post_cancel_check = buildPostCancelCheck({ order: exitOrder, ordersResponse: ordersAfter, positions });
           } catch (checkError) {
             data.post_cancel_check = unverifiedPostCancelCheck(exitOrder.symbol, checkError.message);
           }

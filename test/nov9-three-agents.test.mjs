@@ -97,7 +97,7 @@ test('Herald gets the paper-experiment stop, target and market-wide discovery; o
   assert.match(text, /close half of the broker-confirmed contracts rounded down to whole contracts, and trail the remainder/);
   assert.match(text, /This target exit happens once per position and is based on the quantity held when the target is first reached: a position that was a single contract at that moment closes in full\. After the first target exit, a later touch of the target never closes the remainder/);
   assert.doesNotMatch(text, /\(a one-contract position closes in full\)/);
-  assert.match(text, /Pre-market bars never form the range: begin the request at session_open_et from get_datetime/);
+  assert.match(text, /the start is the session open for overnight or pre-open news \(session_open_et from get_datetime; a pre-market bar never forms the range\) or the publication time for news published during the session/);
   assert.match(text, /already beyond that target when you would enter, measure the target instead as the same multiple of the range height beyond the underlying price at your entry/);
   assert.match(text, /never sell a newly opened position just because the original target was crossed/);
   assert.doesNotMatch(text, /take the half at the first permitted evaluation/);

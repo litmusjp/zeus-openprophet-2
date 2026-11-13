@@ -15,7 +15,7 @@ test('regular winter day: open, 09:44:59, 09:45:00, last minute', () => {
   assert.equal(late.session_time_et, '15:59');
 });
 
-test('the Nov 12 COST moment: 16:00 UTC is 11:00 ET, 330 minutes to close', () => {
+test('the Nov 12 COST moment: 16:00 UTC is 11:00 ET, 299 minutes to close', () => {
   const f = sessionFields(clock('2026-11-12T16:00:09Z'), [day('2026-11-12')]);
   assert.equal(f.session_time_et, '11:00');
   assert.equal(f.minutes_since_open, 90);
@@ -52,6 +52,15 @@ test('daylight saving: summer (EDT) and the transition dates', () => {
   assert.equal(sessionFields(clock('2026-11-02T14:45:00Z'), [day('2026-11-02')]).minutes_since_open, 15); // Monday after fall-back, 09:45 EST
   assert.doesNotThrow(() => nyWallToInstantMs('2026-03-08', '02:30')); // wall time that does not exist: no throw (null is fine)
   assert.equal(nyWallToInstantMs('2026-03-08', '09:30'), Date.UTC(2026, 2, 8, 13, 30)); // 09:30 EDT on the transition Sunday
+});
+
+test('literal HH:MM:SS calendar rows are accepted (seconds ignored) and give the same minutes', () => {
+  const s = [{ date: '2026-11-12', open: '09:30:00', close: '16:00:00' }];
+  const f = sessionFields(clock('2026-11-12T09:45:00-05:00'), s);
+  assert.equal(f.minutes_since_open, 15);
+  assert.equal(f.minutes_to_close, 375);
+  assert.equal(f.session_open_et, '09:30');
+  assert.equal(f.session_close_et, '16:00');
 });
 
 test('missing or bad inputs give nulls', () => {

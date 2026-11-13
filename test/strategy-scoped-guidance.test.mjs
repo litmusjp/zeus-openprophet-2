@@ -67,7 +67,7 @@ test('catalyst guidance is direction-aware, intraday, and drops the daily defini
   assert.doesNotMatch(text, /"Extended" means|"Near support"|"Sector supportive"|"Market supportive"/);
   // Nov 13: the daily-trend test for the catalyst strategy needs exactly these two trend definitions
   assert.equal(text.split('"Flat or rising average" means the 5-session change of the 20-day average is -0.3% or higher').length - 1, 1);
-  assert.equal(text.split('"Falling average" means the 5-session change of the 20-day average is below -0.3%').length - 1, 1);
+  assert.equal(text.split('"Flat or falling average" means the 5-session change of the 20-day average is 0.3% or lower').length - 1, 1);
   assert.match(text, /Use get_daily_features for the previous close, gap context, average volume and the daily-trend figures defined above/);
   assert.doesNotMatch(text, /prophet_analyze_stocks/);
   assert.match(text, /Catalyst coverage: the CATALYST UNIVERSE/);

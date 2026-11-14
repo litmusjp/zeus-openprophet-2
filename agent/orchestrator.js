@@ -25,6 +25,7 @@ import {
 import { shouldShowGoLogLine, createGoLogLineBuffer } from './go-log-filter.js';
 import { resolveApiAuthToken } from './auth.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
+import { getTradingGuidanceForSandbox } from './trading-guidance.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -76,7 +77,7 @@ function setRuntimeProcessNonce(runtime) {
 // The tenant is derived from the server-owned account binding. An inherited
 // tenant is only acceptable when it agrees; callers cannot redirect a runtime
 // to another tenant through environment input.
-export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, port, databasePath, activityLogDir, permissions, alphaDesk }) {
+export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, port, databasePath, activityLogDir, permissions, alphaDesk, optionSpreadCapPct }) {
   const tenantID = String(account?.id || '').trim();
   if (!tenantID) throw new Error('server-owned tenant identity is missing');
   const inheritedTenant = String(baseEnv?.OPENPROPHET_TENANT_ID || '').trim();
@@ -103,6 +104,8 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     OPENPROPHET_ACCOUNT_ID: account.id,
     OPENPROPHET_PROCESS_NONCE: processNonce,
     ...tradingPolicyEnvironment(permissions),
+    // OP2's entry spread cap is the sandbox's saved maxOptionSpreadPct; the backend also receives later changes through its risk endpoint.
+    ...(optionSpreadCapPct !== undefined && optionSpreadCapPct !== null && Number.isFinite(Number(optionSpreadCapPct)) ? { OPENPROPHET_MAX_OPTION_SPREAD_PCT: String(optionSpreadCapPct) } : {}),
     ALPHADESK_ENABLED: alphaDesk?.enabled ? 'true' : 'false',
     ALPHADESK_SIGNAL_QUALITY_ENABLED: baseEnv?.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true' && alphaDesk?.enabled ? 'true' : 'false',
     ALPHADESK_EXECUTION_MODE: baseEnv?.ALPHADESK_EXECUTION_MODE || 'ACCOUNT_VERIFIED',
@@ -345,6 +348,7 @@ export class AgentOrchestrator extends EventEmitter {
       activityLogDir: path.join(this.projectRoot, 'data', 'sandboxes', sandboxId, 'activity_logs'),
       permissions: getPermissionsForSandbox(sandboxId),
       alphaDesk: getSandbox(sandboxId)?.plugins?.alphadesk,
+      optionSpreadCapPct: getTradingGuidanceForSandbox(sandboxId).maxOptionSpreadPct,
     });
 
     const binaryPath = path.join(this.projectRoot, 'prophet_bot');

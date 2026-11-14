@@ -185,6 +185,7 @@ func main() {
 		lockPath := filepath.Join(filepath.Dir(filepath.Dir(cfg.DatabasePath)), "account-"+hex.EncodeToString(accountHash[:])[:24]+".opening.lock")
 		tradingService.SetOpeningReservationLock(lockPath)
 		tradingService.SetDailyLossLockStore(services.NewDailyLossLockStore(filepath.Join(filepath.Dir(cfg.DatabasePath), "daily-loss-lock.json")))
+		tradingService.LoadOptionSpreadCapFromEnv()
 	}
 
 	// Create order controller
@@ -421,6 +422,12 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 					return
 				}
 			}
+			if c.Request.Method == http.MethodPut && c.Request.URL.Path == "/api/v1/risk/option-spread-cap" {
+				if config.AppConfig.OperatorToken == "" || c.GetHeader("X-OpenProphet-Operator-Token") != config.AppConfig.OperatorToken {
+					c.AbortWithStatusJSON(403, gin.H{"error": "operator authorization is required to change the option spread cap"})
+					return
+				}
+			}
 			if c.Request.Method == http.MethodDelete && (strings.HasPrefix(c.Request.URL.Path, "/api/v1/orders/") || strings.HasPrefix(c.Request.URL.Path, "/api/v1/positions/managed/")) {
 				if config.AppConfig.OperatorToken == "" || c.GetHeader("X-OpenProphet-Operator-Token") != config.AppConfig.OperatorToken {
 					c.AbortWithStatusJSON(403, gin.H{"error": "operator authorization is required for cancellation"})
@@ -444,6 +451,8 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		api.GET("/calendar", orderController.HandleGetMarketCalendar)
 		api.POST("/risk/daily-loss/evaluate", orderController.HandleEvaluateDailyLossLock)
 		api.GET("/risk/session-lock", orderController.HandleGetSessionLock)
+		api.GET("/risk/option-spread-cap", orderController.HandleGetOptionSpreadCap)
+		api.PUT("/risk/option-spread-cap", orderController.HandlePutOptionSpreadCap)
 
 		// Position and account endpoints
 		api.GET("/positions", orderController.HandleGetPositions)

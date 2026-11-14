@@ -315,6 +315,7 @@ type AlphaDeskAssessment struct {
 	Remediation                  []string                      `json:"remediation,omitempty"`
 	Retryable                    *bool                         `json:"retryable,omitempty"`
 	PolicyVersion                string                        `json:"policy_version,omitempty"`
+	ScoreProfile                 string                        `json:"score_profile,omitempty"`
 	MarketEvidenceAt             time.Time                     `json:"market_evidence_at,omitempty"`
 	ObservedAt                   time.Time                     `json:"observed_at,omitempty"`
 	ScoreSource                  string                        `json:"score_source,omitempty"`

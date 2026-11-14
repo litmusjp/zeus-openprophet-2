@@ -1218,6 +1218,48 @@ func (oc *OrderController) HandleEvaluateDailyLossLock(c *gin.Context) {
 	c.JSON(200, status)
 }
 
+type optionSpreadCapService interface {
+	SetOptionSpreadCapPct(float64) error
+	OptionSpreadCapPct() (float64, bool, bool)
+}
+
+func optionSpreadCapBody(pct float64, configured, invalid bool) gin.H {
+	return gin.H{"effective_pct": pct, "configured": configured, "invalid": invalid, "min_pct": services.MinOptionSpreadCapPct, "max_pct": services.MaxOptionSpreadCapPct}
+}
+
+// HandleGetOptionSpreadCap reports the entry spread cap this backend enforces.
+func (oc *OrderController) HandleGetOptionSpreadCap(c *gin.Context) {
+	service, ok := oc.tradingService.(optionSpreadCapService)
+	if !ok {
+		c.JSON(503, gin.H{"error": "option spread cap is unavailable"})
+		return
+	}
+	pct, configured, invalid := service.OptionSpreadCapPct()
+	c.JSON(200, optionSpreadCapBody(pct, configured, invalid))
+}
+
+// HandlePutOptionSpreadCap applies the sandbox's saved cap to the running backend (operator token required).
+func (oc *OrderController) HandlePutOptionSpreadCap(c *gin.Context) {
+	service, ok := oc.tradingService.(optionSpreadCapService)
+	if !ok {
+		c.JSON(503, gin.H{"error": "option spread cap is unavailable"})
+		return
+	}
+	var body struct {
+		Pct *float64 `json:"pct"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Pct == nil {
+		c.JSON(400, gin.H{"error": "pct is required"})
+		return
+	}
+	if err := service.SetOptionSpreadCapPct(*body.Pct); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	pct, configured, invalid := service.OptionSpreadCapPct()
+	c.JSON(200, optionSpreadCapBody(pct, configured, invalid))
+}
+
 // HandleGetSessionLock reports the stored daily-loss lock without ever setting one.
 func (oc *OrderController) HandleGetSessionLock(c *gin.Context) {
 	service, ok := oc.tradingService.(dailyLossLockService)

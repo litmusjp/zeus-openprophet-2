@@ -44,6 +44,7 @@ type AlpacaTradingService struct {
 	openingReservationMu    sync.Mutex
 	openingReservationPath  string
 	dailyLossLock           *DailyLossLockStore
+	optionSpreadCap         optionSpreadCapState
 	submissionMarker        func(string) error
 	managedSubmissionMarker func(string, string, string) error
 	alphaDesk               *AlphaDeskClient

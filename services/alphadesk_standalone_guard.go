@@ -237,10 +237,11 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 		}
 		if !verifyPolicy {
 			if receiptManaged || c.RequireManagedApprovalGate {
-				version, currentGate, err := c.standalonePolicyState(ctx)
+				reading, err := c.standalonePolicyRead(ctx)
 				if err != nil {
 					return nil, err
 				}
+				version, currentGate, evaluator := reading.version, reading.gate, reading.evaluator
 				if currentGate == nil {
 					return nil, &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk approval policy is missing", Category: "configuration", Stage: "approval_gate"}
 				}
@@ -250,7 +251,7 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 					}
 					return nil, managedGateUnavailable("AlphaDesk human-review lock is ON", true)
 				}
-				if !receiptManaged || !sameManagedApprovalGate(receiptGate, *currentGate) || version != doc["policy_version"] {
+				if !receiptManaged || !sameManagedApprovalGate(receiptGate, *currentGate) || version != doc["policy_version"] || evaluator != receiptEvaluator(doc) {
 					found = false
 				} else {
 					if err := c.standaloneFresh(ctx, doc); err != nil {
@@ -265,14 +266,15 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 				return standaloneDiagnostics(doc), nil
 			}
 		} else {
-			version, currentGate, err := c.standalonePolicyState(ctx)
+			reading, err := c.standalonePolicyRead(ctx)
 			if err != nil {
 				return nil, err
 			}
+			version, currentGate := reading.version, reading.gate
 			if currentGate != nil && currentGate.Required {
 				return nil, managedGateUnavailable("AlphaDesk human-review lock is ON", true)
 			}
-			if version == doc["policy_version"] && ((!receiptManaged && currentGate == nil) || (receiptManaged && currentGate != nil && sameManagedApprovalGate(receiptGate, *currentGate))) {
+			if version == doc["policy_version"] && reading.evaluator == receiptEvaluator(doc) && ((!receiptManaged && currentGate == nil) || (receiptManaged && currentGate != nil && sameManagedApprovalGate(receiptGate, *currentGate))) {
 				if err := c.standaloneFresh(ctx, doc); err != nil {
 					return nil, err
 				}
@@ -285,10 +287,11 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 		return nil, err
 	}
 	if doc["decision"] == "PASS" && verifyPolicy {
-		version, currentGate, err := c.standalonePolicyState(ctx)
+		reading, err := c.standalonePolicyRead(ctx)
 		if err != nil {
 			return nil, err
 		}
+		version, currentGate := reading.version, reading.gate
 		receiptGate, receiptManaged, receiptErr := parseManagedApprovalGate(doc)
 		if receiptErr != nil || (c.RequireManagedApprovalGate && !receiptManaged) {
 			return nil, &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk approval policy is invalid", Category: "response_validation", Stage: "approval_gate"}
@@ -296,7 +299,7 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 		if currentGate != nil && currentGate.Required {
 			return nil, managedGateUnavailable("AlphaDesk human-review lock is ON", true)
 		}
-		if version != doc["policy_version"] || (receiptManaged && (currentGate == nil || !sameManagedApprovalGate(receiptGate, *currentGate))) || (!receiptManaged && currentGate != nil) {
+		if version != doc["policy_version"] || reading.evaluator != receiptEvaluator(doc) || (receiptManaged && (currentGate == nil || !sameManagedApprovalGate(receiptGate, *currentGate))) || (!receiptManaged && currentGate != nil) {
 			return nil, &AlphaDeskUnavailableError{Reason: "Standalone policy changed during assessment"}
 		}
 	}
@@ -352,9 +355,22 @@ func (c *AlphaDeskClient) standaloneFresh(ctx context.Context, doc map[string]an
 	}
 	return nil
 }
+// standalonePolicyReading is the current policy state: the policy version, the managed gate and the evaluator
+// version (score profile). A receipt is usable only while all of them still match.
+type standalonePolicyReading struct {
+	version   string
+	gate      *managedApprovalGate
+	evaluator string
+}
+
 func (c *AlphaDeskClient) standalonePolicyState(ctx context.Context) (string, *managedApprovalGate, error) {
-	unavailable := func() (string, *managedApprovalGate, error) {
-		return "", nil, &AlphaDeskUnavailableError{Reason: "Current standalone policy is unavailable", Category: "configuration", Stage: "policy_version"}
+	reading, err := c.standalonePolicyRead(ctx)
+	return reading.version, reading.gate, err
+}
+
+func (c *AlphaDeskClient) standalonePolicyRead(ctx context.Context) (standalonePolicyReading, error) {
+	unavailable := func() (standalonePolicyReading, error) {
+		return standalonePolicyReading{}, &AlphaDeskUnavailableError{Reason: "Current standalone policy is unavailable", Category: "configuration", Stage: "policy_version"}
 	}
 	if ValidateAlphaDeskURL(c.URL) != nil {
 		return unavailable()
@@ -388,16 +404,20 @@ func (c *AlphaDeskClient) standalonePolicyState(ctx context.Context) (string, *m
 	if gateErr != nil || (c.RequireManagedApprovalGate && !managed) {
 		return unavailable()
 	}
+	evaluator, evaluatorOK := standalonePolicyScoreProfile(doc)
+	if !evaluatorOK {
+		return unavailable()
+	}
 	if managed {
 		if version == "" || doc["scope"] != "TRADE_ASSESSMENT" || !validStandalonePolicy(doc["policy_snapshot"], version, func() float64 { n, _ := standaloneNumber(doc["minimum_passing_score"]); return n }()) {
 			return unavailable()
 		}
-		return version, &managedGate, nil
+		return standalonePolicyReading{version: version, gate: &managedGate, evaluator: evaluator}, nil
 	}
 	if !ok || version == "" || doc["scope"] != "TRADE_ASSESSMENT" || doc["execution_allowed"] != false || !validStandalonePolicy(doc["policy_snapshot"], version, func() float64 { n, _ := standaloneNumber(doc["minimum_passing_score"]); return n }()) {
 		return unavailable()
 	}
-	return version, nil, nil
+	return standalonePolicyReading{version: version, evaluator: evaluator}, nil
 }
 
 func (c *AlphaDeskClient) standalonePolicyVersion(ctx context.Context) (string, error) {
@@ -424,7 +444,17 @@ func (s *AlpacaTradingService) ReadStandaloneAssessmentPolicy(ctx context.Contex
 	if s == nil || s.alphaDesk == nil || !s.expectedPaper || s.expectedAccountID == "" || s.expectedTenantID == "" || s.expectedSandboxID == "" {
 		return nil, &AlphaDeskUnavailableError{Reason: "Standalone assessment policy is unavailable", Category: "configuration"}
 	}
-	return s.alphaDesk.ReadAssessmentPolicy(ctx)
+	policy, err := s.alphaDesk.ReadAssessmentPolicy(ctx)
+	if err != nil || policy == nil {
+		return policy, err
+	}
+	// OP2's own entry spread cap belongs beside AlphaDesk's thresholds so the agent sees one set of facts.
+	if facts, ok := policy["assessment_policy_facts"].(map[string]any); ok {
+		if pct, configured, invalid := s.OptionSpreadCapPct(); configured && !invalid {
+			facts["op2_option_spread_cap_pct"] = pct
+		}
+	}
+	return policy, nil
 }
 func standaloneProposalForOrder(order *interfaces.OptionsOrder) (StandaloneTradeProposal, error) {
 	if order == nil || order.LimitPrice == nil || order.Qty < 1 || math.Trunc(order.Qty) != order.Qty || order.Side != "buy" || order.Type != "limit" || order.PositionIntent != "buy_to_open" {
@@ -521,6 +551,10 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 			return &AlphaDeskUnavailableError{Reason: "Standalone receipt is not a paper-only advisory assessment"}
 		}
 	}
+	// OP2 owns the entry spread cap; the spread is AlphaDesk's own observation of the exact contract.
+	if err := s.enforceOptionSpreadCap(p, doc); err != nil {
+		return err
+	}
 	score, err := standaloneNumber(doc["signal_score"])
 	if err != nil {
 		return err
@@ -535,7 +569,7 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 	market, _ := time.Parse(time.RFC3339Nano, doc["evidence_observed_at"].(string))
 	version, _ := doc["policy_version"].(string)
 	id, _ := doc["assessment_id"].(string)
-	a := &interfaces.AlphaDeskAssessment{Scope: "TRADE_ASSESSMENT", AssessmentID: id, Decision: "PASS", Pass: true, SignalScore: &score, Threshold: &threshold,
+	a := &interfaces.AlphaDeskAssessment{Scope: "TRADE_ASSESSMENT", AssessmentID: id, Decision: "PASS", Pass: true, SignalScore: &score, Threshold: &threshold, ScoreProfile: receiptEvaluator(doc),
 		Evidence: doc, Policy: doc["policy_snapshot"], PolicyVersion: version, ExpiresAt: expiry, OP2EffectiveExpiresAt: op2Expiry, ObservedAt: observed, MarketEvidenceAt: market,
 		Fingerprint: OptionsOrderFingerprint(s.standaloneIdentity(), order), HumanApprovalRequired: !managed, ExecutionAllowed: false, ScoreSource: "alphadesk_direct_market_data", ScoreObservedAt: market,
 		ManagedContract: managed, ManagedGateRequired: managedGate.Required, ManagedGateRevision: managedGate.Revision, ManagedGateWorkspaceID: managedGate.WorkspaceID, ManagedGateAssessmentKeyID: managedGate.AssessmentKeyID}
@@ -553,8 +587,9 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 	if err := order.AssessmentAuditSink(&auditRecord); err != nil {
 		return &AlphaDeskUnavailableError{Reason: "Standalone assessment audit failed", Err: err}
 	}
-	currentVersion, currentGate, err := s.alphaDesk.standalonePolicyState(ctx)
-	if err != nil || currentVersion != version {
+	currentReading, err := s.alphaDesk.standalonePolicyRead(ctx)
+	currentVersion, currentGate := currentReading.version, currentReading.gate
+	if err != nil || currentVersion != version || currentReading.evaluator != evaluatorOrLegacy(a.ScoreProfile) {
 		return &AlphaDeskUnavailableError{Reason: "Standalone policy changed during final audit", Err: err}
 	}
 	if managed && (currentGate == nil || currentGate.Required || !sameManagedApprovalGate(managedGate, *currentGate)) {
@@ -584,6 +619,9 @@ func (s *AlpacaTradingService) validatePaperAdvisoryReceipt(ctx context.Context,
 	if !ok || doc["decision"] != "PASS" || doc["advisory_policy_profile"] != "paper_advisory_greeks_v1" || doc["paper_only"] != true || doc["policy_version"] != a.PolicyVersion {
 		return &AlphaDeskUnavailableError{Reason: "Trusted paper advisory receipt changed before submission"}
 	}
+	if profile := receiptEvaluator(doc); (profile != scoreProfileV1 && profile != scoreProfileV2) || profile != evaluatorOrLegacy(a.ScoreProfile) {
+		return &AlphaDeskUnavailableError{Reason: "Trusted paper advisory receipt changed before submission", Category: "response_validation", Stage: "score_profile"}
+	}
 	gate, managed, gateErr := parseManagedApprovalGate(doc)
 	if gateErr != nil || managed != a.ManagedContract || (s.alphaDesk.RequireManagedApprovalGate && !managed) {
 		return &AlphaDeskUnavailableError{Reason: "Trusted managed approval receipt changed before submission", Category: "response_validation", Stage: "approval_gate"}
@@ -602,7 +640,7 @@ func (s *AlpacaTradingService) validatePaperAdvisoryReceipt(ctx context.Context,
 	if err != nil || OptionsOrderFingerprint(s.standaloneIdentity(), order) != a.Fingerprint || doc["trade_fingerprint"] != standaloneProposalFingerprint(p) {
 		return &AlphaDeskUnavailableError{Reason: "Paper advisory proposal changed before submission", Err: err}
 	}
-	return nil
+	return s.enforceOptionSpreadCap(p, doc)
 }
 
 // Recheck policy after durable submission-marker work. The caller follows this
@@ -614,8 +652,9 @@ func (s *AlpacaTradingService) validatePaperAdvisoryAtSubmission(ctx context.Con
 	if err := s.validatePaperAdvisoryReceipt(ctx, order); err != nil {
 		return err
 	}
-	version, currentGate, err := s.alphaDesk.standalonePolicyState(ctx)
-	if err != nil || version != order.AlphaDeskAssessment.PolicyVersion {
+	reading, err := s.alphaDesk.standalonePolicyRead(ctx)
+	version, currentGate := reading.version, reading.gate
+	if err != nil || version != order.AlphaDeskAssessment.PolicyVersion || reading.evaluator != evaluatorOrLegacy(order.AlphaDeskAssessment.ScoreProfile) {
 		return &AlphaDeskUnavailableError{Reason: "Managed AlphaDesk policy changed or is unknown before paper order submission", Err: err, Decision: "UNAVAILABLE", Category: "upstream_service_error", Stage: "approval_gate"}
 	}
 	if order.AlphaDeskAssessment.ManagedContract {

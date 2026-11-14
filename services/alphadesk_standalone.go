@@ -327,7 +327,7 @@ func (c *AlphaDeskClient) AssessOptionsTrade(ctx context.Context, proposal Stand
 		if result["score_source"] != "alphadesk_direct_market_data" {
 			return rejectField("score_source")
 		}
-		if result["score_profile"] != "catalyst_momentum_v1" {
+		if profile, _ := result["score_profile"].(string); profile != scoreProfileV1 && profile != scoreProfileV2 {
 			return rejectField("score_profile")
 		}
 		if result["retryable"] != false {
@@ -629,6 +629,10 @@ func (c *AlphaDeskClient) ReadAssessmentPolicy(ctx context.Context) (map[string]
 	if !ok || !versionOK || !scopeOK || document["paper_only"] != true || document["advisory_policy_profile"] != "paper_advisory_greeks_v1" || document["advisory_policy_hash"] != "c5282def77c620c544eb6a3906df21839f8ee775851bb8cdf73dfb99ceccfeca" || thresholdErr != nil || !validStandalonePolicy(snapshot, baseVersion, threshold) {
 		return unavailable("response_validation")
 	}
+	evaluator, evaluatorOK := standalonePolicyScoreProfile(document)
+	if !evaluatorOK {
+		return unavailable("response_validation")
+	}
 	budget, budgetOK := snapshot["max_investment_per_candidate"].(string)
 	budgetValue, budgetErr := standaloneNumber(json.Number(budget))
 	contractsValue, contractsErr := standaloneNumber(snapshot["maximum_contracts_per_candidate"])
@@ -640,6 +644,7 @@ func (c *AlphaDeskClient) ReadAssessmentPolicy(ctx context.Context) (map[string]
 		"policy_version": version, "max_investment_per_candidate": budget,
 		"maximum_contracts_per_candidate": snapshot["maximum_contracts_per_candidate"],
 		"standard_contract_multiplier":    100, "paper_only": true,
+		"score_profile": evaluator, "assessment_policy_facts": standalonePolicyFacts(snapshot, evaluator),
 	}
 	if managed {
 		result["contract_version"] = "managed-assessment-v1"

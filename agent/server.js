@@ -17,6 +17,7 @@ import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { registerPrecisionResolutionRoute } from './precision-resolution-route.js';
 import { DEFAULT_TRADING_GUIDANCE, loadTradingGuidance, getTradingGuidanceForSandbox, setTradingGuidanceForSandbox } from './trading-guidance.js';
+import { pushOptionSpreadCap } from './option-spread-cap.js';
 import { buildTradeLedger } from './trade-ledger.js';
 import { buildScorecard } from './trade-scorecard.js';
 import * as secretsStore from './secrets-store.js';
@@ -289,6 +290,7 @@ async function startGoBackendUnlocked(account, sandboxId) {
     activityLogDir: path.join(PROJECT_ROOT, 'data', 'sandboxes', sandboxId, 'activity_logs'),
     permissions: getPermissionsForSandbox(sandboxId),
     alphaDesk: getPluginForSandbox(sandboxId, 'alphadesk'),
+    optionSpreadCapPct: getTradingGuidanceForSandbox(sandboxId).maxOptionSpreadPct,
   });
   env.TRADING_BOT_TOKEN = TRADING_BOT_TOKEN;
   env.TRADING_BOT_PROCESS_NONCE = TRADING_BOT_PROCESS_NONCE;
@@ -1960,11 +1962,30 @@ app.get('/api/trading-guidance', (req, res) => {
   res.json({ sandboxId, guidance: getTradingGuidanceForSandbox(sandboxId), defaults: DEFAULT_TRADING_GUIDANCE });
 });
 
+// The Go backend enforces OP2's entry spread cap (the saved maxOptionSpreadPct). A running backend receives a changed
+// value before it is saved; a backend that is not running reads the saved value from its environment when it starts.
+function runningGoClientForSandbox(sandboxId) {
+  if (isActiveSandbox(sandboxId)) return goReady ? goAxios : null;
+  const runtime = orchestrator.runtimes.get(sandboxId);
+  return runtime?.goReady ? runtime.goAxios : null;
+}
+
 app.put('/api/trading-guidance', operatorAuthMiddleware, async (req, res) => {
   try {
     const { sandboxId, ...patch } = req.body || {};
     if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
-    const guidance = await setTradingGuidanceForSandbox(sandboxId, patch);
+    const previous = getTradingGuidanceForSandbox(sandboxId);
+    let pushed = false;
+    let guidance;
+    try {
+      guidance = await setTradingGuidanceForSandbox(sandboxId, patch, {
+        beforePersist: async next => { pushed = await pushOptionSpreadCap(runningGoClientForSandbox(sandboxId), next.maxOptionSpreadPct); },
+      });
+    } catch (error) {
+      // The save failed after the backend accepted the new cap: put the saved value back so the two cannot differ.
+      if (pushed) await pushOptionSpreadCap(runningGoClientForSandbox(sandboxId), previous.maxOptionSpreadPct).catch(() => {});
+      throw error;
+    }
     await refreshHarnessConfigForSandbox(sandboxId, { resetSession: true });
     res.json({ ok: true, sandboxId, guidance });
   } catch (err) { res.status(400).json({ error: err.message }); }

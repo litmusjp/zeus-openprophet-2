@@ -178,3 +178,39 @@ test('O4: the saved prompt states the cap rule once, carries no symbols or dates
 test('O4: the spread line follows the saved setting', () => {
   assert.match(renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, maxOptionSpreadPct: 7.5 }, { strategyId: 'default' }), /spread cap is applied by OP2 itself.*is above 7\.5%\. That quote can be wider/s);
 });
+
+// ── predicate parity: Node configures a cap exactly when the emitted Go mode can apply it ─────────────────────────
+test('parity: whitespace around the execution mode is trimmed like Go, with the ACCOUNT_VERIFIED fallback, for the decision and the emitted mode', () => {
+  const emitted = base => goEnv({ optionSpreadCapPct: 10 }, base);
+  for (const mode of ['STANDALONE_OP2', 'PAPER_ADVISORY_OP2']) {
+    for (const padded of [mode, ` ${mode}`, `${mode} `, `  ${mode}\t`, `\n${mode}\n`]) {
+      const base = { ALPHADESK_SIGNAL_QUALITY_ENABLED: 'true', ALPHADESK_EXECUTION_MODE: padded };
+      assert.equal(optionSpreadCapApplies(desk, base), true, JSON.stringify(padded));
+      const env = emitted(base);
+      assert.equal(env.ALPHADESK_EXECUTION_MODE, mode, `the emitted mode is trimmed: ${JSON.stringify(padded)}`);
+      assert.equal(env.OPENPROPHET_MAX_OPTION_SPREAD_PCT, '10', JSON.stringify(padded));
+    }
+  }
+  for (const [raw, want] of [[undefined, 'ACCOUNT_VERIFIED'], ['', 'ACCOUNT_VERIFIED'], ['   ', 'ACCOUNT_VERIFIED'], [' ACCOUNT_VERIFIED ', 'ACCOUNT_VERIFIED'], ['paper_advisory_op2', 'paper_advisory_op2'], [' SIGNAL_QUALITY_OP2 ', 'SIGNAL_QUALITY_OP2']]) {
+    const base = { ALPHADESK_SIGNAL_QUALITY_ENABLED: 'true', ...(raw === undefined ? {} : { ALPHADESK_EXECUTION_MODE: raw }) };
+    const env = emitted(base);
+    assert.equal(env.ALPHADESK_EXECUTION_MODE, want, JSON.stringify(raw));
+    assert.equal(optionSpreadCapApplies(desk, base), false, `${JSON.stringify(raw)} cannot apply a cap`);
+    assert.equal(env.OPENPROPHET_MAX_OPTION_SPREAD_PCT, '', JSON.stringify(raw));
+  }
+});
+
+test('parity: for every combination, a cap is configured exactly when the emitted environment lets Go apply it', () => {
+  const supported = new Set(['STANDALONE_OP2', 'PAPER_ADVISORY_OP2']);
+  for (const mode of [undefined, '', '  ', 'ACCOUNT_VERIFIED', 'SIGNAL_QUALITY_OP2', 'STANDALONE_OP2', ' PAPER_ADVISORY_OP2 ', 'PAPER_ADVISORY_OP2', 'paper_advisory_op2']) {
+    for (const quality of [undefined, 'true', 'false', 'TRUE']) {
+      for (const plugin of [desk, { ...desk, enabled: false }, null]) {
+        const base = { ...(quality === undefined ? {} : { ALPHADESK_SIGNAL_QUALITY_ENABLED: quality }), ...(mode === undefined ? {} : { ALPHADESK_EXECUTION_MODE: mode }) };
+        const env = goEnv({ optionSpreadCapPct: 10 }, base, plugin);
+        const goCanApply = env.ALPHADESK_ENABLED === 'true' && env.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true' && supported.has(env.ALPHADESK_EXECUTION_MODE);
+        assert.equal(env.OPENPROPHET_MAX_OPTION_SPREAD_PCT === '10', goCanApply, JSON.stringify({ mode, quality, plugin: plugin?.enabled }));
+        assert.equal(optionSpreadCapApplies(plugin, base), goCanApply, JSON.stringify({ mode, quality, plugin: plugin?.enabled }));
+      }
+    }
+  }
+});

@@ -12,9 +12,17 @@ const mcpSource = await fs.readFile(new URL('../mcp-server.js', import.meta.url)
 // opening whose confirmed revision is not the current one.
 function fakeGo({ effective = 10, revision = 1, configured = true } = {}) {
   const go = { effective, revision, configured, orders: [], refused: [], onSubmit: null };
+  // GET reports the backend's real configured flag; the first PUT configures it and moves the revision even when the stored
+  // numeric placeholder already equals the pushed value (as the real backend does).
+  go.invalid = false;
+  const body = () => ({ effective_pct: go.effective, configured: go.configured, invalid: go.invalid, revision: go.revision });
   go.client = {
-    get: async () => ({ data: { effective_pct: go.effective, configured: true, invalid: false, revision: go.revision } }),
-    put: async (_url, payload) => { if (payload.pct !== go.effective) { go.effective = payload.pct; go.revision += 1; } return { data: { effective_pct: go.effective, configured: true, invalid: false, revision: go.revision } }; },
+    get: async () => ({ data: body() }),
+    put: async (_url, payload) => {
+      if (!go.configured || go.invalid || payload.pct !== go.effective) go.revision += 1;
+      go.effective = payload.pct; go.configured = true; go.invalid = false;
+      return { data: body() };
+    },
   };
   go.submit = async (endpoint, _method, data) => {
     if (endpoint !== '/options/order') return { ok: true };
@@ -114,9 +122,9 @@ test('revision: the controller refuses to confirm a backend that reports no whol
 });
 
 // ── sandboxes where no cap can be in force are left exactly as they were ───────────────────────────────────
-test('not applicable: the controller saves without pushing and re-checks nothing', async () => {
+test('not applicable: the controller saves and re-checks with read-only observations and never pushes', async () => {
   const calls = [];
-  const client = { get: async () => { calls.push('get'); return { data: {} }; }, put: async () => { calls.push('put'); return { data: {} }; } };
+  const client = { get: async () => { calls.push('get'); return { data: { configured: false, invalid: false } }; }, put: async () => { calls.push('put'); return { data: {} }; } };
   const saved = [];
   const controller = createOptionSpreadCapController({ getClient: () => client, getSaved: () => 8, applies: () => false, token: () => 't',
     save: async (id, patch, hooks) => { saved.push({ id, patch, hooks }); return { maxOptionSpreadPct: patch.maxOptionSpreadPct }; } });
@@ -125,7 +133,7 @@ test('not applicable: the controller saves without pushing and re-checks nothing
   assert.equal(result.guidance.maxOptionSpreadPct, 10);
   assert.deepEqual(saved[0].hooks, {}, 'no push hook');
   assert.deepEqual(await controller.reconcile('s'), { state: 'not_applicable' });
-  assert.deepEqual(calls, [], 'the backend was never contacted');
+  assert.deepEqual(calls, ['get', 'get'], 'one read-only observation per call (the save and the re-check) and no push');
 });
 
 test('not applicable: the opening helper returns undefined, the order carries no revision and goes through', async () => {
@@ -142,4 +150,127 @@ test('not applicable: the opening helper returns undefined, the order carries no
   assert.equal(result.isError, undefined);
   assert.equal(go.orders[0].cap_revision, undefined);
   assert.doesNotMatch(placeBody(), /capRevision === undefined/, 'only null refuses');
+});
+
+// ── not_applicable is an observed backend state, never an inference from saved configuration ──────────────────
+// The sync answer maps the controller's state exactly as the server route and the opening helper do.
+const syncToRevision = result => (result.state === 'not_applicable' ? undefined : result.state === 'in_sync' ? result.revision : null);
+
+function observedBackend(data, { throws = false, rejects = false } = {}) {
+  const calls = { get: 0, put: 0 };
+  const client = {
+    get: async () => { calls.get += 1; if (throws) throw new Error('read failed'); if (rejects) return new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5)); return { data }; },
+    put: async () => { calls.put += 1; return { data: {} }; },
+  };
+  return { client, calls };
+}
+
+function nonApplicableController({ client, applicable = () => false, persisted = [] }) {
+  const controller = createOptionSpreadCapController({
+    getClient: () => client, getSaved: () => 8, applies: applicable, token: () => 't',
+    save: async (id, patch) => { persisted.push({ id, patch }); return { maxOptionSpreadPct: patch.maxOptionSpreadPct }; },
+  });
+  return { controller, persisted };
+}
+
+test('observed: saved config says non-applicable while the running backend still has a cap -> unreconciled, no opening, no save, no push', async () => {
+  const stuck = fakeGo({ effective: 10, revision: 5 }); // configured: true
+  const calls = { put: 0 };
+  const put = stuck.client.put; stuck.client.put = async (...a) => { calls.put += 1; return put(...a); };
+  const persisted = [];
+  const { controller } = nonApplicableController({ client: stuck.client, persisted });
+  const reconciled = await controller.reconcile('s');
+  assert.equal(reconciled.state, 'unreconciled');
+  assert.notEqual(reconciled.state, 'not_applicable');
+  // MCP: the opening is refused locally and nothing is submitted.
+  const ctx = { ...ctxFor(stuck), capSyncRevision: async () => syncToRevision(await controller.reconcile('s')) };
+  const refused = await run(placeBody(), ctx)({ ...optionOrder });
+  assert.equal(refused.isError, true);
+  assert.equal(JSON.parse(refused.content[0].text).code, 'OPTION_SPREAD_CAP_UNRESOLVED');
+  assert.equal(stuck.orders.length, 0);
+  // Save: fails before persistence, and nothing is pushed into an unsupported mode.
+  await assert.rejects(() => controller.save('s', { maxOptionSpreadPct: 10 }), /nothing was saved/);
+  assert.deepEqual(persisted, []);
+  assert.equal(calls.put, 0);
+});
+
+test('observed: the running backend reports no cap (configured false, invalid false) -> not_applicable, ordinary order goes through, save allowed with zero pushes', async () => {
+  const none = fakeGo({ effective: 10, revision: 0, configured: false });
+  const calls = { put: 0 };
+  const put = none.client.put; none.client.put = async (...a) => { calls.put += 1; return put(...a); };
+  const persisted = [];
+  const { controller } = nonApplicableController({ client: none.client, persisted });
+  assert.deepEqual(await controller.reconcile('s'), { state: 'not_applicable' });
+  const ctx = { ...ctxFor(none), capSyncRevision: async () => syncToRevision(await controller.reconcile('s')) };
+  const result = await run(placeBody(), ctx)({ ...optionOrder });
+  assert.equal(result.isError, undefined);
+  assert.equal(none.orders.length, 1);
+  assert.equal(none.orders[0].cap_revision, undefined, 'no revision is sent where no cap exists');
+  const saved = await controller.save('s', { maxOptionSpreadPct: 10 });
+  assert.equal(saved.capSync, 'not_applicable');
+  assert.equal(persisted.length, 1);
+  assert.equal(calls.put, 0);
+});
+
+test('observed: an invalid cap, missing or malformed flags and a failed read are all unreconciled, never converted to no-cap', async () => {
+  const cases = {
+    'invalid cap': { configured: false, invalid: true, revision: 1, effective_pct: 10 },
+    'configured and invalid': { configured: true, invalid: true, revision: 1, effective_pct: 10 },
+    'configured flag missing': { invalid: false, revision: 1 },
+    'invalid flag missing': { configured: false, revision: 1 },
+    'both missing': { revision: 1 },
+    'flags as strings': { configured: 'false', invalid: 'false' },
+    'flags as numbers': { configured: 0, invalid: 0 },
+    'null flags': { configured: null, invalid: null },
+    'empty answer': {},
+    'no answer': null,
+  };
+  for (const [name, data] of Object.entries(cases)) {
+    const { client, calls } = observedBackend(data);
+    const persisted = [];
+    const { controller } = nonApplicableController({ client, persisted });
+    assert.equal((await controller.reconcile('s')).state, 'unreconciled', name);
+    await assert.rejects(() => controller.save('s', { maxOptionSpreadPct: 10 }), /nothing was saved/, name);
+    assert.deepEqual(persisted, [], name);
+    assert.equal(calls.put, 0, `${name}: no push`);
+  }
+  for (const [name, options] of Object.entries({ 'read throws': { throws: true }, 'read times out': { rejects: true } })) {
+    const { client, calls } = observedBackend({ configured: false, invalid: false }, options);
+    const persisted = [];
+    const { controller } = nonApplicableController({ client, persisted });
+    assert.equal((await controller.reconcile('s')).state, 'unreconciled', name);
+    await assert.rejects(() => controller.save('s', { maxOptionSpreadPct: 10 }), /nothing was saved/, name);
+    assert.deepEqual(persisted, [], name);
+    assert.equal(calls.put, 0, name);
+  }
+});
+
+test('observed: with no ready backend the answer is no_backend (openings refuse through the null path) and offline guidance can still be saved', async () => {
+  const persisted = [];
+  const { controller } = nonApplicableController({ client: null, persisted });
+  assert.deepEqual(await controller.reconcile('s'), { state: 'no_backend' });
+  assert.equal(syncToRevision({ state: 'no_backend' }), null);
+  const saved = await controller.save('s', { maxOptionSpreadPct: 10 });
+  assert.equal(saved.capSync, 'no_backend');
+  assert.equal(persisted.length, 1);
+});
+
+test('observed: applicability is decided inside the serialized queue, after earlier work, not when the call is made', async () => {
+  const state = { applicable: false };
+  const go = fakeGo({ effective: 8, revision: 2 });
+  const order = [];
+  const controller = createOptionSpreadCapController({
+    getClient: () => go.client, getSaved: () => 8, token: () => 't',
+    applies: () => { order.push(`applies:${state.applicable}`); return state.applicable; },
+    save: async (id, patch, hooks) => { order.push('save-start'); await new Promise(resolve => setTimeout(resolve, 20)); if (hooks?.beforePersist) await hooks.beforePersist({ maxOptionSpreadPct: patch.maxOptionSpreadPct }); order.push('save-end'); return { maxOptionSpreadPct: patch.maxOptionSpreadPct }; },
+  });
+  state.applicable = true;
+  const slow = controller.save('s', { maxOptionSpreadPct: 8 }); // runs first
+  state.applicable = false;
+  const queued = controller.reconcile('s'); // asked while the sandbox looks non-applicable...
+  state.applicable = true; // ...but it is applicable again by the time the queue reaches it
+  await slow;
+  const result = await queued;
+  assert.equal(result.state, 'in_sync', 'the applicable flow ran because the decision was made inside the queue');
+  assert.equal(order.at(-1), 'applies:true');
 });

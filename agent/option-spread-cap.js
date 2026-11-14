@@ -19,7 +19,26 @@ const headers = token => ({ [CAP_CONTROL_HEADER]: token });
 export function optionSpreadCapApplies(alphaDesk, env = process.env) {
   return alphaDesk?.enabled === true
     && env?.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true'
-    && ['STANDALONE_OP2', 'PAPER_ADVISORY_OP2'].includes(env?.ALPHADESK_EXECUTION_MODE);
+    && ['STANDALONE_OP2', 'PAPER_ADVISORY_OP2'].includes(alphaDeskExecutionMode(env));
+}
+
+/** The execution mode the Go backend will see: it trims the value and falls back to ACCOUNT_VERIFIED, and so does this. */
+export function alphaDeskExecutionMode(env = process.env) {
+  return String(env?.ALPHADESK_EXECUTION_MODE ?? '').trim() || 'ACCOUNT_VERIFIED';
+}
+
+/**
+ * For a sandbox where no cap can apply, ask the running backend whether it really holds none. `not_applicable` is returned only
+ * when the backend itself says configured false AND invalid false; any cap, an invalid cap, missing or malformed flags or a
+ * failed read is `unreconciled` (never converted to "no cap"), and no ready backend is `no_backend`. Read-only: nothing is pushed.
+ */
+async function observeNonApplicable(client) {
+  if (!client) return { state: 'no_backend' };
+  try {
+    const data = (await client.get(PATH, { timeout: 4000 }))?.data;
+    if (data && data.configured === false && data.invalid === false) return { state: 'not_applicable' };
+  } catch { /* an unreadable backend is unreconciled */ }
+  return { state: 'unreconciled' };
 }
 // The backend reports the enforced cap with its revision (every change of the enforced value moves it). A backend that does not
 // report a whole-number revision cannot be confirmed.
@@ -82,10 +101,17 @@ export function createOptionSpreadCapController({ getClient, getSaved, save, app
   return {
     save(sandboxId, patch) {
       return queue(async () => {
+        // Applicability is decided here, inside the queue, after any earlier save or re-check has finished.
         if (!applies(sandboxId)) {
-          // No cap is in force for this sandbox: the guidance is saved as is and nothing is pushed.
+          // No cap can apply: nothing is ever pushed. Guidance is saved only when the running backend itself reports no cap (or
+          // there is no running backend, whose next normal start reads the saved value); a backend that still holds a cap, or
+          // cannot be read, fails the save before anything is stored.
+          const seen = await observeNonApplicable(getClient(sandboxId));
+          if (seen.state === 'unreconciled') {
+            throw new Error('The running trading backend still holds an entry spread cap although none can apply to this sandbox now (or its state could not be read), so nothing was saved; it is re-checked when the replacement backend is ready.');
+          }
           const guidance = await save(sandboxId, patch, {});
-          return { guidance, capSync: 'not_applicable' };
+          return { guidance, capSync: seen.state };
         }
         try {
           const guidance = await save(sandboxId, patch, {
@@ -106,8 +132,9 @@ export function createOptionSpreadCapController({ getClient, getSaved, save, app
     },
     // Called before every heartbeat; never throws.
     reconcile(sandboxId) {
-      if (!applies(sandboxId)) return Promise.resolve({ state: 'not_applicable' });
-      return queue(async () => reconcileOptionSpreadCap(getClient(sandboxId), getSaved(sandboxId), options())).catch(() => ({ state: 'unreconciled' }));
+      return queue(async () => (applies(sandboxId)
+        ? reconcileOptionSpreadCap(getClient(sandboxId), getSaved(sandboxId), options())
+        : observeNonApplicable(getClient(sandboxId)))).catch(() => ({ state: 'unreconciled' }));
     },
   };
 }

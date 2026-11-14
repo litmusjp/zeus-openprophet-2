@@ -26,7 +26,7 @@ import { shouldShowGoLogLine, createGoLogLineBuffer } from './go-log-filter.js';
 import { resolveApiAuthToken } from './auth.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
 import { getTradingGuidanceForSandbox } from './trading-guidance.js';
-import { CAP_CONTROL_ENV, optionSpreadCapApplies } from './option-spread-cap.js';
+import { CAP_CONTROL_ENV, alphaDeskExecutionMode, optionSpreadCapApplies } from './option-spread-cap.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -112,7 +112,7 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     OPENPROPHET_MAX_OPTION_SPREAD_PCT: optionSpreadCapPct !== undefined && optionSpreadCapPct !== null && Number.isFinite(Number(optionSpreadCapPct)) && optionSpreadCapApplies(alphaDesk, baseEnv) ? String(optionSpreadCapPct) : '',
     ALPHADESK_ENABLED: alphaDesk?.enabled ? 'true' : 'false',
     ALPHADESK_SIGNAL_QUALITY_ENABLED: baseEnv?.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true' && alphaDesk?.enabled ? 'true' : 'false',
-    ALPHADESK_EXECUTION_MODE: baseEnv?.ALPHADESK_EXECUTION_MODE || 'ACCOUNT_VERIFIED',
+    ALPHADESK_EXECUTION_MODE: alphaDeskExecutionMode(baseEnv),
     ALPHADESK_URL: alphaDesk?.url || '',
     ALPHADESK_API_KEY: alphaDesk?.apiKey || '',
     ALPHADESK_REQUIRE_MANAGED_APPROVAL_GATE: alphaDesk?.requireManagedApprovalGate ? 'true' : 'false',

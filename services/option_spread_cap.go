@@ -288,8 +288,10 @@ func (s *AlpacaTradingService) leaseOptionSpreadCap(order *interfaces.OptionsOrd
 		return noop, optionSpreadCapRejection(optionSpreadCapConfigErr, "OP2's option spread cap setting is invalid, so new options entries are refused until it is corrected.")
 	}
 	if !c.configured {
-		c.mu.RUnlock()
-		return noop, nil
+		// No cap yet: the opening needs no revision, but the first cap must not activate between this check and the end of the
+		// dispatch, so the lock is held exactly as for a configured cap.
+		var once sync.Once
+		return func() { once.Do(c.mu.RUnlock) }, nil
 	}
 	if !s.optionSpreadCapModeSupported() {
 		c.mu.RUnlock()

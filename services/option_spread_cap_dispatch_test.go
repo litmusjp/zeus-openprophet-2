@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -191,7 +192,12 @@ func TestTheCapRequirementIsAtTheCommonOpeningBoundaryForEveryMode(t *testing.T)
 				return
 			}
 			if mode == "STANDALONE_OP2" {
-				return // this fixture's advisory receipt cannot authorize in standalone mode; covered by the no-revision case above
+				// This fixture serves a paper-advisory receipt, which standalone mode refuses by design (the existing assessment guard).
+				// The cap boundary was passed (no cap code), the assessment ran, and nothing reached the broker.
+				if err == nil || spreadCapCode(err) != "" || !strings.Contains(err.Error(), "Paper advisory assessment cannot authorize an order") || f.alphaCalls() != 1 || f.brokerCalls() != 0 {
+					t.Fatalf("standalone mode with a confirmed revision: err=%v alpha=%d broker=%d; want the assessment rejection and no broker call", err, f.alphaCalls(), f.brokerCalls())
+				}
+				return
 			}
 			if spreadCapCode(err) != optionSpreadCapUnsupported || f.brokerCalls() != 0 {
 				t.Fatalf("mode %q: an unsupported combination was not rejected: %v", mode, err)
@@ -212,14 +218,42 @@ func TestWithNoCapInForceOrWithAnInvalidOneTheBoundaryBehavesAsDocumented(t *tes
 			release()
 		}
 	}
+}
+
+// An invalid cap refuses every opening in every mode, through the real PlaceOptionsOrder, before any assessment or broker work.
+func TestAnInvalidCapRefusesEveryOpeningInEveryModeBeforeAnyWork(t *testing.T) {
 	t.Setenv(optionSpreadCapEnv, "abc")
-	f := newDispatchFixture(t, "ACCOUNT_VERIFIED", "0.05", nil)
-	f.service.LoadOptionSpreadCapFromEnv()
-	for _, mode := range []string{"ACCOUNT_VERIFIED", "PAPER_ADVISORY_OP2"} {
-		f.service.alphaDesk.ExecutionMode = mode
-		if got := spreadCapCode(f.service.checkOptionSpreadCapBoundary(f.opening("bad", nil))); got != optionSpreadCapConfigErr {
-			t.Fatalf("mode %q: an invalid cap did not fail closed at the common boundary: %q", mode, got)
+	for _, mode := range []string{"", "ACCOUNT_VERIFIED", "SIGNAL_QUALITY_OP2", "STANDALONE_OP2", "PAPER_ADVISORY_OP2"} {
+		f := newDispatchFixture(t, mode, "0.05", nil)
+		f.service.LoadOptionSpreadCapFromEnv()
+		revision := f.service.OptionSpreadCapRevision()
+		for _, order := range []*interfaces.OptionsOrder{f.opening("bad-none", nil), f.opening("bad-rev", &revision)} {
+			_, err := f.service.PlaceOptionsOrder(context.Background(), order)
+			if spreadCapCode(err) != optionSpreadCapConfigErr || !IsPreSubmissionRejection(err) || f.alphaCalls() != 0 || f.brokerCalls() != 0 {
+				t.Fatalf("mode %q: err=%v alpha=%d broker=%d; want an invalid-cap rejection and no work", mode, err, f.alphaCalls(), f.brokerCalls())
+			}
 		}
+	}
+}
+
+// A cap in force with AlphaDesk absent, disabled or without signal quality is an unsupported combination, in the real path.
+func TestAConfiguredCapWithoutAStandaloneAssessmentIsRejectedAsUnsupported(t *testing.T) {
+	variants := map[string]func(f *dispatchFixture){
+		"alphadesk_absent":        func(f *dispatchFixture) { f.service.alphaDesk = nil },
+		"alphadesk_disabled":      func(f *dispatchFixture) { f.service.alphaDesk.Enabled = false },
+		"signal_quality_disabled": func(f *dispatchFixture) { f.service.alphaDesk.SignalQualityEnabled = false },
+	}
+	for name, apply := range variants {
+		t.Run(name, func(t *testing.T) {
+			f := newDispatchFixture(t, "PAPER_ADVISORY_OP2", "0.05", nil)
+			apply(f)
+			_ = f.service.SetOptionSpreadCapPct(10)
+			revision := f.service.OptionSpreadCapRevision()
+			_, err := f.service.PlaceOptionsOrder(context.Background(), f.opening(name, &revision))
+			if spreadCapCode(err) != optionSpreadCapUnsupported || !IsPreSubmissionRejection(err) || f.alphaCalls() != 0 || f.brokerCalls() != 0 {
+				t.Fatalf("err=%v alpha=%d broker=%d; want the unsupported-combination rejection and no work", err, f.alphaCalls(), f.brokerCalls())
+			}
+		})
 	}
 }
 
@@ -253,8 +287,10 @@ func TestExitsAreNeverRefusedForTheCapAndNeverWaitOnIt(t *testing.T) {
 	}
 }
 
-// Under the race detector: many openings and many cap changes together never deadlock and never let a stale revision through.
-func TestOpeningsAndCapChangesTogetherNeverDeadlockOrAcceptAStaleRevision(t *testing.T) {
+// Smoke test, not a proof of the lock lifetime (the deterministic boundary tests above are): forty openings run one after another
+// while a setter flips the cap concurrently. Under the race detector it must not deadlock, every accepted opening must have
+// reached the broker exactly once, and every other outcome must be a stale-revision or above-cap refusal.
+func TestSerialOpeningsAgainstAConcurrentCapSetterNeverDeadlockOrAcceptAStaleRevision(t *testing.T) {
 	f := newDispatchFixture(t, "PAPER_ADVISORY_OP2", "0.05", nil)
 	_ = f.service.SetOptionSpreadCapPct(10)
 	stop := make(chan struct{})

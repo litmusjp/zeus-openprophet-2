@@ -65,7 +65,7 @@ function ctxFor(calls, capState, checks = []) {
     autoStoreSetup: () => {},
     orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
     callTradingBot: async endpoint => { calls.push(endpoint); return { status: 'accepted' }; },
-    capSyncAllowsOpening: async () => { checks.push(capState.value); return capState.value === 'in_sync'; },
+    capSyncRevision: async () => { checks.push(capState.value); return capState.value === 'in_sync' ? (capState.revision ?? 7) : null; },
   };
 }
 const optionOrder = { symbol: 'AAPL270115C00200000', underlying: 'AAPL', quantity: 1, side: 'buy', order_type: 'limit', position_intent: 'buy_to_open', limit_price: 1, client_order_id: 'x', thesis: 't' };
@@ -95,7 +95,7 @@ test('cap guard: every state other than in_sync, and an unreachable check, fails
     assert.equal(codeOf(refused), 'OPTION_SPREAD_CAP_UNRESOLVED', String(state));
     assert.deepEqual(calls, []);
   }
-  const unreachable = { ...ctxFor([], { value: 'in_sync' }), capSyncAllowsOpening: async () => false };
+  const unreachable = { ...ctxFor([], { value: 'in_sync' }), capSyncRevision: async () => null };
   assert.equal(codeOf(await run(placeBody(), unreachable)({ ...optionOrder })), 'OPTION_SPREAD_CAP_UNRESOLVED');
 });
 
@@ -119,11 +119,11 @@ test('cap guard: exits, reducing orders and the equity paths never call the chec
   const buy = await run(mcpCase("case 'place_buy_order': {", "case 'place_sell_order': {"), ctxFor(calls, capState, checks))({ symbol: 'AAPL', quantity: 1, order_type: 'market' });
   assert.equal(buy.isError, undefined, 'the options spread cap does not govern equity orders');
   assert.deepEqual(checks, []);
-  assert.equal((mcpSource.match(/capSyncAllowsOpening\(\)/g) || []).length, 2, 'one definition and one use: the options opening guard');
+  assert.equal((mcpSource.match(/capSyncRevision\(\)/g) || []).length, 2, 'one definition and one use: the options opening guard');
   for (const marker of ["case 'cancel_order': {", "case 'get_options_positions': {", "case 'get_orders': {", "case 'place_buy_order': {", "case 'place_managed_position': {"]) {
     const index = mcpSource.indexOf(marker);
     if (index < 0) continue;
-    assert.doesNotMatch(mcpSource.slice(index, index + 900), /capSyncAllowsOpening/, marker);
+    assert.doesNotMatch(mcpSource.slice(index, index + 900), /capSyncRevision/, marker);
   }
 });
 
@@ -133,22 +133,22 @@ test('cap guard: the daily-loss lock keeps its own message and order of preceden
   assert.equal(codeOf(await run(placeBody(), ctx)({ ...optionOrder })), 'DAILY_LOSS_LIMIT_REACHED');
 });
 
-test('cap guard: the real check reads the agent server and passes only on in_sync', async () => {
-  const begin = mcpSource.indexOf('async function capSyncAllowsOpening() {');
+test('cap guard: the real check reads the agent server and returns a revision only for in_sync', async () => {
+  const begin = mcpSource.indexOf('async function capSyncRevision() {');
   const end = mcpSource.indexOf('async function enforcePermissions(', begin);
   assert.ok(begin > 0 && end > begin);
   const source = mcpSource.slice(begin, end);
   const seen = [];
-  const build = reply => vm.runInNewContext(`${source}; capSyncAllowsOpening`, {
+  const build = reply => vm.runInNewContext(`${source}; capSyncRevision`, {
     AGENT_URL: 'http://agent.test', AGENT_QUERY: { sandboxId: 'sbx_1' },
     agentAxios: { get: async (url, options) => { seen.push({ url, options }); if (reply instanceof Error) throw reply; return reply; } },
   });
-  assert.equal(await build({ data: { state: 'in_sync' } })(), true);
+  assert.equal(await build({ data: { state: 'in_sync', revision: 12 } })(), 12);
   assert.equal(seen[0].url, 'http://agent.test/api/option-spread-cap/sync');
   assert.deepEqual(seen[0].options.params, { sandboxId: 'sbx_1' });
   assert.ok(seen[0].options.timeout > 0, 'bounded wait');
-  for (const reply of [{ data: { state: 'unreconciled' } }, { data: { state: 'no_backend' } }, { data: {} }, { data: null }, undefined, new Error('agent server down')]) {
-    assert.equal(await build(reply)(), false, String(reply?.message || JSON.stringify(reply)));
+  for (const reply of [{ data: { state: 'unreconciled', revision: 3 } }, { data: { state: 'no_backend', revision: 3 } }, { data: { state: 'in_sync' } }, { data: { state: 'in_sync', revision: null } }, { data: { state: 'in_sync', revision: '3' } }, { data: { state: 'in_sync', revision: 1.5 } }, { data: {} }, { data: null }, undefined, new Error('agent server down')]) {
+    assert.equal(await build(reply)(), null, String(reply?.message || JSON.stringify(reply)));
   }
 });
 
@@ -157,6 +157,7 @@ test('cap guard: the agent server answers from a reconcile that is serialized wi
   assert.ok(start > 0, 'route present');
   const route = serverSource.slice(start, serverSource.indexOf("app.put('/api/trading-guidance'", start));
   assert.match(route, /optionSpreadCap\.reconcile\(sandboxId\)/);
+  assert.match(route, /revision: result\.state === 'in_sync' \? result\.revision : null/);
   assert.match(route, /status\(404\)\.json\(\{ state: 'unknown'/);
   assert.match(route, /status\(503\)\.json\(\{ state: 'unknown'/);
 });

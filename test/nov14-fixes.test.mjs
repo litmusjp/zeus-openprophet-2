@@ -76,7 +76,7 @@ function caseBody(start, endMarker) {
 const run = (body, ctx) => vm.runInNewContext(`(async (args) => {${body}})`, { ...helpers, ...ctx });
 const BASE_CTX = calls => ({
   process: { env: { OPENPROPHET_OPENINGS_BLOCKED: '1' } },
-  capSyncAllowsOpening: async () => true, // the cap guard has its own tests (nov15-cap-unresolved)
+  capSyncRevision: async () => 1, // the cap guard has its own tests (nov15-cap-unresolved)
   isOpeningIntent: p => typeof p !== 'string' || !p || p.includes('open'),
   autoStoreSetup: () => {},
   orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),

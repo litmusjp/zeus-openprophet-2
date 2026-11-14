@@ -558,7 +558,7 @@ func (s *AlpacaTradingService) requireStandaloneApprovalMode(ctx context.Context
 		}
 	}
 	// OP2 owns the entry spread cap; the spread is AlphaDesk's own observation of the exact contract.
-	if err := s.enforceOptionSpreadCap(p, doc); err != nil {
+	if err := s.enforceOptionSpreadCapForOrder(order, p, doc); err != nil {
 		return err
 	}
 	score, err := standaloneNumber(doc["signal_score"])
@@ -646,7 +646,7 @@ func (s *AlpacaTradingService) validatePaperAdvisoryReceipt(ctx context.Context,
 	if err != nil || OptionsOrderFingerprint(s.standaloneIdentity(), order) != a.Fingerprint || doc["trade_fingerprint"] != standaloneProposalFingerprint(p) {
 		return &AlphaDeskUnavailableError{Reason: "Paper advisory proposal changed before submission", Err: err}
 	}
-	return s.enforceOptionSpreadCap(p, doc)
+	return s.enforceOptionSpreadCapForOrder(order, p, doc)
 }
 
 // Recheck policy after durable submission-marker work. The caller follows this

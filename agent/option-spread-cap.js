@@ -9,7 +9,9 @@ export const CAP_CONTROL_HEADER = 'X-OpenProphet-Cap-Control-Token';
 export const CAP_CONTROL_ENV = 'OPENPROPHET_CAP_CONTROL_TOKEN';
 
 const headers = token => ({ [CAP_CONTROL_HEADER]: token });
-const sameCap = (data, pct) => Number(data?.effective_pct) === Number(pct) && data?.configured === true && !data?.invalid;
+// The backend reports the enforced cap with its revision (every change of the enforced value moves it). A backend that does not
+// report a whole-number revision cannot be confirmed.
+const sameCap = (data, pct) => Number(data?.effective_pct) === Number(pct) && data?.configured === true && !data?.invalid && Number.isSafeInteger(data?.revision);
 
 /**
  * Push the cap to a running backend. Resolves false when there is no running backend (nothing to push); throws when the
@@ -36,13 +38,13 @@ export async function reconcileOptionSpreadCap(client, savedPct, { token = proce
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const current = await client.get(PATH, { timeout: 4000 });
-      if (sameCap(current?.data, savedPct)) return { state: 'in_sync' };
+      if (sameCap(current?.data, savedPct)) return { state: 'in_sync', revision: current.data.revision };
     } catch { /* fall through to a push, then read back again */ }
     try { await client.put(PATH, { pct: savedPct }, { timeout: 4000, headers: headers(token) }); } catch { /* confirmed by the next read */ }
   }
   try {
     const last = await client.get(PATH, { timeout: 4000 });
-    if (sameCap(last?.data, savedPct)) return { state: 'in_sync' };
+    if (sameCap(last?.data, savedPct)) return { state: 'in_sync', revision: last.data.revision };
   } catch { /* unreconciled */ }
   return { state: 'unreconciled' };
 }

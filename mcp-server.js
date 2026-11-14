@@ -1497,14 +1497,16 @@ const agentAxios = EXECUTION_START_ENABLED ? axios.create({
   } : {},
 }) : unavailableBrokerClient();
 // Trusted cap state, read from the agent server at the moment of an options opening (never from a flag fixed when this process
-// started): the server reconciles and reports whether the running backend holds the saved entry spread cap. Anything other than
-// 'in_sync', including an unreachable server or an unknown answer, refuses the opening. Exits, cancels and reads never call this.
-async function capSyncAllowsOpening() {
+// started): the server reconciles and reports whether the running backend holds the saved entry spread cap, with the backend's
+// revision of that cap. Anything other than 'in_sync' with a whole-number revision, including an unreachable server or an unknown
+// answer, gives null and refuses the opening. The order carries the revision and the backend refuses it if the cap changed after
+// this confirmation. Exits, cancels and reads never call this.
+async function capSyncRevision() {
   try {
     const resp = await agentAxios.get(`${AGENT_URL}/api/option-spread-cap/sync`, { timeout: 8000, params: AGENT_QUERY });
-    return resp?.data?.state === 'in_sync';
+    return resp?.data?.state === 'in_sync' && Number.isSafeInteger(resp?.data?.revision) ? resp.data.revision : null;
   } catch {
-    return false;
+    return null;
   }
 }
 async function enforcePermissions(toolName, args) {
@@ -2176,7 +2178,6 @@ ${allNews.map((article, i) =>
         // strategy from its own range length); it is never read from tool arguments. Reducing orders are unaffected.
         if (isOpeningIntent(args.position_intent)) {
           if (typeof process !== 'undefined' && process.env.OPENPROPHET_OPENINGS_BLOCKED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'Daily loss limit reached earlier this session; new openings are blocked until the next session. Closing and reducing orders are not affected.', code: 'DAILY_LOSS_LIMIT_REACHED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
-          if (!(await capSyncAllowsOpening())) return { content: [{ type: 'text', text: JSON.stringify({ error: 'OP2 cannot confirm that its entry spread cap matches the saved setting right now, so new options openings are refused until it is confirmed (checked at every opening). Closing and reducing orders are not affected.', code: 'OPTION_SPREAD_CAP_UNRESOLVED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
           const minOpening = parseMinOpeningMinutes(process.env.OPENPROPHET_MIN_OPENING_MINUTES);
           if (minOpening > 0) {
             let fields = sessionFields(null, null);
@@ -2194,6 +2195,13 @@ ${allNews.map((article, i) =>
           try { args.limit_price = normalizeOptionLimitPrice(args.limit_price, args.side); }
           catch (priceError) { return { content: [{ type: 'text', text: JSON.stringify({ error: priceError.message, category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true }; }
         }
+        // The cap confirmation is taken here, after every other local check, and travels with the order: the backend refuses the
+        // opening if the enforced cap changed after this point (a concurrent save or a failed rollback).
+        let capRevision;
+        if (isOpeningIntent(args.position_intent)) {
+          capRevision = await capSyncRevision();
+          if (capRevision === null) return { content: [{ type: 'text', text: JSON.stringify({ error: 'OP2 cannot confirm that its entry spread cap matches the saved setting right now, so new options openings are refused until it is confirmed (checked at every opening). Closing and reducing orders are not affected.', code: 'OPTION_SPREAD_CAP_UNRESOLVED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
+        }
         const requestData = {
           ...(args.client_order_id && { client_order_id: args.client_order_id }),
           symbol: args.symbol,
@@ -2203,7 +2211,8 @@ ${allNews.map((article, i) =>
           type: args.order_type,
           position_intent: args.position_intent,
           ...(args.limit_price !== undefined && { limit_price: args.limit_price }),
-          ...(args.market_scanner_features && { market_scanner_features: args.market_scanner_features })
+          ...(args.market_scanner_features && { market_scanner_features: args.market_scanner_features }),
+          ...(capRevision !== undefined && { cap_revision: capRevision })
         };
         const data = await callTradingBot('/options/order', 'POST', requestData);
         if (isOpeningIntent(args.position_intent)) void autoStoreSetup({ ...args, ...data }, args.side || 'buy');

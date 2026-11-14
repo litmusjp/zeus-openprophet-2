@@ -19,6 +19,11 @@ type spreadCapStub struct {
 func (s *spreadCapStub) SetOptionSpreadCapPct(pct float64) error {
 	return s.service.SetOptionSpreadCapPct(pct)
 }
+func (s *spreadCapStub) OptionSpreadCapState() (float64, bool, bool, int64) {
+	return s.service.OptionSpreadCapState()
+}
+
+// OptionSpreadCapPct is a test convenience (the controller reads the state in one call).
 func (s *spreadCapStub) OptionSpreadCapPct() (float64, bool, bool) {
 	return s.service.OptionSpreadCapPct()
 }

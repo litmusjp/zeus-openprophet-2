@@ -1220,11 +1220,11 @@ func (oc *OrderController) HandleEvaluateDailyLossLock(c *gin.Context) {
 
 type optionSpreadCapService interface {
 	SetOptionSpreadCapPct(float64) error
-	OptionSpreadCapPct() (float64, bool, bool)
+	OptionSpreadCapState() (float64, bool, bool, int64)
 }
 
-func optionSpreadCapBody(pct float64, configured, invalid bool) gin.H {
-	return gin.H{"effective_pct": pct, "configured": configured, "invalid": invalid, "min_pct": services.MinOptionSpreadCapPct, "max_pct": services.MaxOptionSpreadCapPct}
+func optionSpreadCapBody(pct float64, configured, invalid bool, revision int64) gin.H {
+	return gin.H{"effective_pct": pct, "configured": configured, "invalid": invalid, "revision": revision, "min_pct": services.MinOptionSpreadCapPct, "max_pct": services.MaxOptionSpreadCapPct}
 }
 
 // HandleGetOptionSpreadCap reports the entry spread cap this backend enforces.
@@ -1234,8 +1234,8 @@ func (oc *OrderController) HandleGetOptionSpreadCap(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "option spread cap is unavailable"})
 		return
 	}
-	pct, configured, invalid := service.OptionSpreadCapPct()
-	c.JSON(200, optionSpreadCapBody(pct, configured, invalid))
+	pct, configured, invalid, revision := service.OptionSpreadCapState()
+	c.JSON(200, optionSpreadCapBody(pct, configured, invalid, revision))
 }
 
 // capControlAuthorized reports whether the request carries the server-only credential that changes the cap. It is a
@@ -1268,8 +1268,8 @@ func (oc *OrderController) HandlePutOptionSpreadCap(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	pct, configured, invalid := service.OptionSpreadCapPct()
-	c.JSON(200, optionSpreadCapBody(pct, configured, invalid))
+	pct, configured, invalid, revision := service.OptionSpreadCapState()
+	c.JSON(200, optionSpreadCapBody(pct, configured, invalid, revision))
 }
 
 // HandleGetSessionLock reports the stored daily-loss lock without ever setting one.
@@ -1739,6 +1739,7 @@ type OptionsOrderRequest struct {
 	ObservedAt            time.Time                           `json:"observed_at,omitempty"`
 	ExpiresAt             time.Time                           `json:"expires_at,omitempty"`
 	OptionLegs            []interfaces.OptionLeg              `json:"option_legs,omitempty"`
+	CapRevision           *int64                              `json:"cap_revision,omitempty"`
 }
 
 type optionsAssessmentValidationError struct {
@@ -1922,6 +1923,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		ObservedAt:            req.ObservedAt,
 		AssessmentExpiresAt:   req.ExpiresAt,
 		Legs:                  req.OptionLegs,
+		CapRevision:           req.CapRevision,
 	}
 	if err := services.ValidateOptionsOrder(order); err != nil {
 		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", err.Error()))

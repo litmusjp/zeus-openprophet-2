@@ -28,7 +28,7 @@ const orderArgs = { symbol: SYM, underlying: 'COST', quantity: 2, side: 'buy', o
 function placeRunner({ now, env, calls }) {
   return run(caseBody("case 'place_options_order': {", "case 'withdraw_planned_intent': {"), {
     process: { env },
-    capSyncAllowsOpening: async () => true, // the cap guard has its own tests (nov15-cap-unresolved)
+    capSyncRevision: async () => 1, // the cap guard has its own tests (nov15-cap-unresolved)
     isOpeningIntent: p => typeof p !== 'string' || !p || p.includes('open'),
     autoStoreSetup: () => {},
     orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
@@ -67,7 +67,7 @@ test('A3: unavailable clock refuses an opening; a reducing order is never gated'
   const calls = [];
   const noClock = run(caseBody("case 'place_options_order': {", "case 'withdraw_planned_intent': {"), {
     process: { env: { OPENPROPHET_MIN_OPENING_MINUTES: '15' } },
-    capSyncAllowsOpening: async () => true, // the cap guard has its own tests (nov15-cap-unresolved)
+    capSyncRevision: async () => 1, // the cap guard has its own tests (nov15-cap-unresolved)
     isOpeningIntent: p => p.includes('open'), autoStoreSetup: () => {}, orderResponse: d => ({ content: [{ type: 'text', text: JSON.stringify(d) }] }),
     callTradingBot: async endpoint => { calls.push(endpoint); if (endpoint === '/calendar') throw new Error('down'); return { status: 'accepted' }; },
   });

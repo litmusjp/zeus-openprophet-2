@@ -63,6 +63,7 @@ func TestRealAlphaDeskReceiptsCrossTheSpreadCapAndEvaluatorGuards(t *testing.T) 
 				if err := service.SetOptionSpreadCapPct(capPct); err != nil {
 					t.Fatal(err)
 				}
+				order.CapRevision = confirmedRevision(service)
 				if err := service.requirePaperAdvisoryQualification(context.Background(), order); err != nil || audits != 1 || order.AlphaDeskAssessment == nil || order.AlphaDeskAssessment.ScoreProfile != tc.profile {
 					t.Fatalf("cap %v refused a 5%% spread on a real receipt: %v", capPct, err)
 				}
@@ -76,6 +77,7 @@ func TestRealAlphaDeskReceiptsCrossTheSpreadCapAndEvaluatorGuards(t *testing.T) 
 				if err := service.SetOptionSpreadCapPct(capPct); err != nil {
 					t.Fatal(err)
 				}
+				order.CapRevision = confirmedRevision(service)
 				err := service.requirePaperAdvisoryQualification(context.Background(), order)
 				if spreadCapCode(err) != optionSpreadAboveCapCode || audits != 0 || order.AlphaDeskAssessment != nil {
 					t.Fatalf("cap %v accepted a 5%% spread: err=%v audits=%d", capPct, err, audits)

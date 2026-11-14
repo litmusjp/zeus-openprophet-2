@@ -1990,7 +1990,9 @@ app.get('/api/option-spread-cap/sync', async (req, res) => {
     const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : getActiveSandbox()?.id;
     if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ state: 'unknown', error: 'Sandbox not found' });
     const result = await optionSpreadCap.reconcile(sandboxId);
-    res.json({ sandboxId, state: result.state, saved: getTradingGuidanceForSandbox(sandboxId).maxOptionSpreadPct });
+    // `revision` is the backend's own revision of the enforced cap; an opening carries it and the backend refuses the opening if
+    // the enforced cap has changed since (a save or a failed rollback running at the same time).
+    res.json({ sandboxId, state: result.state, revision: result.state === 'in_sync' ? result.revision : null, saved: getTradingGuidanceForSandbox(sandboxId).maxOptionSpreadPct });
   } catch (err) { res.status(503).json({ state: 'unknown', error: 'cap state unavailable' }); }
 });
 

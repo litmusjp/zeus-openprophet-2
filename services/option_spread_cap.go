@@ -1,6 +1,8 @@
 package services
 
 import (
+	"prophet-trader/interfaces"
+
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,19 +30,31 @@ const (
 	optionSpreadAboveCapCode = "OPTION_SPREAD_ABOVE_CAP"
 	optionSpreadEvidenceCode = "OPTION_SPREAD_EVIDENCE_INVALID"
 	optionSpreadCapConfigErr = "OPTION_SPREAD_CAP_INVALID"
+	optionSpreadCapChanged   = "OPTION_SPREAD_CAP_CHANGED"
+	optionSpreadCapRevision  = "OPTION_SPREAD_CAP_REVISION_REQUIRED"
 )
 
+// optionSpreadCapState is the cap this backend enforces. `revision` counts every change of the enforced value (a new
+// value, or the first one after the cap was unset or invalid); an unchanged value keeps its revision. An opening carries
+// the revision that was confirmed for it, and the backend refuses it if the enforced cap has changed since.
 type optionSpreadCapState struct {
 	mu         sync.RWMutex
 	pct        decimal.Decimal
 	configured bool
 	invalid    bool
+	revision   int64
 }
 
 func (c *optionSpreadCapState) get() (decimal.Decimal, bool, bool) {
+	pct, configured, invalid, _ := c.snapshot()
+	return pct, configured, invalid
+}
+
+// snapshot reads the value and its revision together.
+func (c *optionSpreadCapState) snapshot() (decimal.Decimal, bool, bool, int64) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.pct, c.configured, c.invalid
+	return c.pct, c.configured, c.invalid, c.revision
 }
 
 // OptionSpreadCapError is a deterministic local rejection of an opening order; it never involves AlphaDesk's decision.
@@ -62,10 +76,27 @@ func (s *AlpacaTradingService) SetOptionSpreadCapPct(pct float64) error {
 	}
 	s.optionSpreadCap.mu.Lock()
 	defer s.optionSpreadCap.mu.Unlock()
-	s.optionSpreadCap.pct = decimal.NewFromFloat(pct)
+	next := decimal.NewFromFloat(pct)
+	if !s.optionSpreadCap.configured || s.optionSpreadCap.invalid || !s.optionSpreadCap.pct.Equal(next) {
+		s.optionSpreadCap.revision++
+	}
+	s.optionSpreadCap.pct = next
 	s.optionSpreadCap.configured = true
 	s.optionSpreadCap.invalid = false
 	return nil
+}
+
+// OptionSpreadCapState reports the enforced cap and its revision from one consistent read.
+func (s *AlpacaTradingService) OptionSpreadCapState() (pct float64, configured bool, invalid bool, revision int64) {
+	value, configured, invalid, revision := s.optionSpreadCap.snapshot()
+	f, _ := value.Float64()
+	return f, configured, invalid, revision
+}
+
+// OptionSpreadCapRevision reports the revision of the enforced cap.
+func (s *AlpacaTradingService) OptionSpreadCapRevision() int64 {
+	_, _, _, revision := s.optionSpreadCap.snapshot()
+	return revision
 }
 
 // OptionSpreadCapPct reports the effective cap (configured is false when none was supplied).
@@ -86,6 +117,7 @@ func (s *AlpacaTradingService) LoadOptionSpreadCapFromEnv() {
 	if err != nil || !validOptionSpreadCapPct(pct) {
 		s.optionSpreadCap.mu.Lock()
 		s.optionSpreadCap.invalid = true
+		s.optionSpreadCap.revision++
 		s.optionSpreadCap.mu.Unlock()
 		return
 	}
@@ -192,7 +224,31 @@ func verifyOptionQuoteBlock(p StandaloneTradeProposal, doc map[string]any, ratio
 // enforceOptionSpreadCap refuses an opening whose worst-leg spread, on AlphaDesk's own quote, is above the cap.
 // Equal passes. Closing and reducing orders never reach this check.
 func (s *AlpacaTradingService) enforceOptionSpreadCap(p StandaloneTradeProposal, doc map[string]any) error {
-	capPct, configured, invalid := s.optionSpreadCap.get()
+	capPct, configured, invalid, _ := s.optionSpreadCap.snapshot()
+	return enforceOptionSpreadCapAt(capPct, configured, invalid, p, doc)
+}
+
+// enforceOptionSpreadCapForOrder is what the order guards call. It takes one snapshot of the enforced cap and its
+// revision, refuses an opening whose confirmed revision is missing or no longer current (a cap change after the
+// confirmation, for example a save or a failed rollback running at the same time), and judges the spread against that same
+// snapshot. No cap change can slip between the revision check and the spread check.
+func (s *AlpacaTradingService) enforceOptionSpreadCapForOrder(order *interfaces.OptionsOrder, p StandaloneTradeProposal, doc map[string]any) error {
+	capPct, configured, invalid, revision := s.optionSpreadCap.snapshot()
+	if configured && !invalid {
+		reject := func(code, message string) error {
+			return &PreSubmissionRejectionError{Err: &OptionSpreadCapError{Code: code, Message: message}}
+		}
+		if order == nil || order.CapRevision == nil {
+			return reject(optionSpreadCapRevision, "this opening carries no confirmation of OP2's entry spread cap, so it is refused; confirm the cap and retry. Nothing was submitted.")
+		}
+		if *order.CapRevision != revision {
+			return reject(optionSpreadCapChanged, "OP2's entry spread cap changed after it was confirmed for this opening, so it is refused; confirm the cap again and retry. Nothing was submitted.")
+		}
+	}
+	return enforceOptionSpreadCapAt(capPct, configured, invalid, p, doc)
+}
+
+func enforceOptionSpreadCapAt(capPct decimal.Decimal, configured, invalid bool, p StandaloneTradeProposal, doc map[string]any) error {
 	reject := func(code, message string) error {
 		return &PreSubmissionRejectionError{Err: &OptionSpreadCapError{Code: code, Message: message}}
 	}

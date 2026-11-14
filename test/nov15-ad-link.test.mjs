@@ -39,13 +39,14 @@ function fakeClient(reply, record = []) {
 
 test('O1: a running backend receives the cap with the server-only credential; the answer must match', async () => {
   const calls = [];
-  assert.equal(await pushOptionSpreadCap(fakeClient({ effective_pct: 10, configured: true, invalid: false }, calls), 10, { token: 'cap-token' }), true);
+  assert.equal(await pushOptionSpreadCap(fakeClient({ effective_pct: 10, configured: true, invalid: false, revision: 4 }, calls), 10, { token: 'cap-token' }), true);
   assert.equal(calls[0].url, '/api/v1/risk/option-spread-cap');
   assert.deepEqual(calls[0].body, { pct: 10 });
   assert.equal(calls[0].options.headers['X-OpenProphet-Cap-Control-Token'], 'cap-token');
   assert.equal('X-OpenProphet-Operator-Token' in calls[0].options.headers, false, 'the operator token is not used for cap changes');
   assert.equal(await pushOptionSpreadCap(null, 10), false, 'no running backend: nothing to push');
-  await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 8, configured: true, invalid: false }), 10), /different option spread cap/);
+  await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 8, configured: true, invalid: false, revision: 4 }), 10), /different option spread cap/);
+  await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 10, configured: true, invalid: false }), 10), /different option spread cap/, 'a backend that reports no revision cannot be confirmed');
   await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 10, configured: true, invalid: true }), 10), /different option spread cap/);
   await assert.rejects(() => pushOptionSpreadCap(fakeClient(Object.assign(new Error('boom'), { response: { data: { error: 'cap control authorization is required' } } })), 10), /did not accept.*cap control authorization is required/);
 });

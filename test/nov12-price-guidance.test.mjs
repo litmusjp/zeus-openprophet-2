@@ -51,7 +51,7 @@ function runner(body, calls, extra = {}) {
   return vm.runInNewContext(`(async (args) => {${body}})`, {
     JSON, Number, normalizeOptionLimitPrice, sessionFields, openingGateDecision, parseMinOpeningMinutes, process: { env: {} },
     callTradingBot: async (...a) => { calls.push(a); return { status: 'accepted' }; },
-    capSyncAllowsOpening: async () => true, // the cap guard has its own tests (nov15-cap-unresolved)
+    capSyncRevision: async () => 1, // the cap guard has its own tests (nov15-cap-unresolved)
     isOpeningIntent: () => true, autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
     ...extra,
   });

@@ -49,8 +49,8 @@ test('credential: it is stripped from every agent and MCP child environment but 
 
 // ── saved and enforced cap stay equal ───────────────────────────────────────────────────────────────
 function backend({ effective = 8, failNext = null } = {}) {
-  const state = { effective, configured: true, invalid: false, log: [], failNext, reachable: true };
-  const body = () => ({ effective_pct: state.effective, configured: state.configured, invalid: state.invalid });
+  const state = { effective, configured: true, invalid: false, log: [], failNext, reachable: true, revision: 1 };
+  const body = () => ({ effective_pct: state.effective, configured: state.configured, invalid: state.invalid, revision: state.revision });
   return {
     state,
     client: {
@@ -61,6 +61,7 @@ function backend({ effective = 8, failNext = null } = {}) {
         const mode = state.failNext; state.failNext = null;
         if (!state.reachable) throw new Error('unreachable');
         if (mode === 'refuse') throw new Error('refused');
+        if (state.effective !== payload.pct || state.invalid) state.revision += 1; // the backend counts every change of the enforced value
         state.effective = payload.pct;
         state.invalid = false; // the backend clears an invalid start-up value when it is given a valid one
         if (mode === 'lose_response') throw new Error('response lost after the backend applied the value');

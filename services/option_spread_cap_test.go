@@ -414,6 +414,7 @@ func TestSpreadCapAppliesAtBothOrderGuardsAndFollowsTheRunningSetting(t *testing
 			}
 			audits := 0
 			order := evaluatorOrder(&audits)
+			order.CapRevision = confirmedRevision(service)
 			if err := service.requirePaperAdvisoryQualification(context.Background(), order); err != nil || audits != 1 {
 				t.Fatalf("9%% spread refused by a 10%% cap: %v", err)
 			}
@@ -424,6 +425,11 @@ func TestSpreadCapAppliesAtBothOrderGuardsAndFollowsTheRunningSetting(t *testing
 			if err := service.SetOptionSpreadCapPct(8.5); err != nil {
 				t.Fatal(err)
 			}
+			// The change invalidates the confirmation this opening carried; confirming the new cap shows the spread is now above it.
+			if err := service.validatePaperAdvisoryAtSubmission(context.Background(), order); spreadCapCode(err) != optionSpreadCapChanged {
+				t.Fatalf("an opening confirmed before the cap changed must be refused at the final guard: %v", err)
+			}
+			order.CapRevision = confirmedRevision(service)
 			if err := service.validatePaperAdvisoryAtSubmission(context.Background(), order); spreadCapCode(err) != optionSpreadAboveCapCode {
 				t.Fatalf("a 9%% spread above an 8.5%% cap should be refused at the final guard: %v", err)
 			}
@@ -440,6 +446,7 @@ func TestSpreadCapRefusesWideSpreadBeforeAuditAndAttachment(t *testing.T) {
 	}
 	audits := 0
 	order := evaluatorOrder(&audits)
+	order.CapRevision = confirmedRevision(service)
 	err := service.requirePaperAdvisoryQualification(context.Background(), order)
 	if spreadCapCode(err) != optionSpreadAboveCapCode || !IsPreSubmissionRejection(err) || audits != 0 || order.AlphaDeskAssessment != nil {
 		t.Fatalf("wide spread not refused cleanly: err=%v audits=%d", err, audits)

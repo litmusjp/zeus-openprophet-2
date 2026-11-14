@@ -711,6 +711,7 @@ export class AgentHarness {
     this.getHeldPositionSnapshot = getHeldPositionSnapshot;
     this.getSessionLock = getSessionLockFn;
     this._openingsBlocked = null;
+    this._capUnresolved = false;
     this.getMarketCalendar = getMarketCalendarFn;
     this.ensureBackendReady = ensureBackendReadyFn;
     this.ensureOptionSpreadCap = ensureOptionSpreadCapFn;
@@ -1417,7 +1418,14 @@ ${userBlock}`;
     const permStr = permLines.length ? '\n\nGUARDRAILS:\n' + permLines.join('\n') : '';
 
     // The backend must enforce the saved entry spread cap; correct any difference before the agent acts (never blocks the beat).
-    try { await this.ensureOptionSpreadCap(this.sandboxId); } catch { /* the backend keeps enforcing its current value */ }
+    // If the cap cannot be confirmed, new openings are refused (MCP guard) until a later beat confirms it; management and exits
+    // are never affected and the agent is told. A failing re-check counts as unresolved (fail closed). No backend means nothing to enforce.
+    let capState;
+    try { capState = (await this.ensureOptionSpreadCap(this.sandboxId))?.state; } catch { capState = 'unreconciled'; }
+    this._capUnresolved = capState === 'unreconciled';
+    const capContext = this._capUnresolved
+      ? '\n\nOP2 ENTRY SPREAD CAP UNCONFIRMED: OP2 could not confirm that its entry spread cap matches the saved setting, so new options openings are refused until it is confirmed (re-checked every heartbeat). Keep managing and exiting your positions under your rules; closing and reducing orders are not affected.'
+      : '';
     let managedReviewInput = '';
     const alphaDesk = this._resolveSandbox()?.plugins?.alphadesk;
     if (alphaDesk?.enabled && alphaDesk?.requireManagedApprovalGate === true) {
@@ -1437,7 +1445,7 @@ ${userBlock}`;
     }
     const exitPlanContext = await this._heldPositionPlanContext(beatAccountId);
     if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}${exitPlanContext}\nPerform your duties for this phase.`;
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}${capContext}${exitPlanContext}\nPerform your duties for this phase.`;
 
     let failedResult = null;
     let executionFailed = false;
@@ -1680,6 +1688,8 @@ ${userBlock}`;
           OPENPROPHET_HEARTBEAT_INTERVALS_FORCED: this.isHeartbeatIntervalsForced() ? 'true' : 'false',
           // Extra MCP guard; the Go order policy is the authority. Always set so nothing inherited can change it.
           OPENPROPHET_OPENINGS_BLOCKED: this._openingsBlocked ? '1' : '',
+          // Extra MCP guard while the entry spread cap is unconfirmed; always set so nothing inherited can change it.
+          OPENPROPHET_CAP_UNRESOLVED: this._capUnresolved ? '1' : '',
           // Always set (empty means no gate) so nothing inherited from the parent environment can switch it on or off.
           OPENPROPHET_MIN_OPENING_MINUTES: openingGateMinutesFor(this._agentConfig?.strategyId, getTradingGuidanceForSandbox(this.sandboxId)),
         },

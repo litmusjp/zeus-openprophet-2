@@ -76,8 +76,24 @@ func TestLegacyNonManagedCacheExceptionIsExplicitlyScoped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(source, "Explicit exception, limited to this branch") {
-			t.Fatal("the legacy cache exception lost its explicit scope comment")
+		source = strings.ReplaceAll(source, "\r", "")
+		// The comment sits on the legacy branch itself: the else of "if receiptManaged || c.RequireManagedApprovalGate",
+		// directly above the read-only freshness check, and not on the managed branch's matching-receipt path.
+		legacy := "\t\t\t} else {\n\t\t\t\t// Explicit exception, limited to this branch:"
+		if strings.Count(source, "Explicit exception, limited to this branch") != 1 || !strings.Contains(source, legacy) {
+			t.Fatal("the legacy cache exception is not documented on the legacy branch")
+		}
+		at := strings.Index(source, "Explicit exception, limited to this branch")
+		managedBranch := strings.LastIndex(source[:at], "if receiptManaged || c.RequireManagedApprovalGate {")
+		if managedBranch < 0 || strings.Contains(source[managedBranch:at], "found = false\n\t\t\t\t} else {\n\t\t\t\t\t// Explicit") {
+			t.Fatal("the comment is on the managed branch's matching-receipt path")
+		}
+		after := source[at:]
+		if end := strings.Index(after, "return standaloneDiagnostics(doc), nil"); end > 0 {
+			after = after[:end]
+		}
+		if !strings.Contains(after, "if err := c.standaloneFresh(ctx, doc); err != nil {") || strings.Contains(after, "standalonePolicyRead") {
+			t.Fatal("the commented branch is not the one that skips the policy read")
 		}
 	})
 }

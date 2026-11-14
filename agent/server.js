@@ -2400,7 +2400,7 @@ app.post('/api/auth/login', (req, res) => {
 
 app.post('/api/auth/logout', (req, res) => {
   try {
-    execSync('opencode auth logout 2>&1', { timeout: 10000, encoding: 'utf-8' });
+    execSync('opencode auth logout 2>&1', { timeout: 10000, encoding: 'utf-8', env: stripOperatorSecrets(process.env) });
     broadcast('agent_log', {
       message: 'OpenCode logged out.',
       level: 'info',

@@ -9,6 +9,18 @@ export const CAP_CONTROL_HEADER = 'X-OpenProphet-Cap-Control-Token';
 export const CAP_CONTROL_ENV = 'OPENPROPHET_CAP_CONTROL_TOKEN';
 
 const headers = token => ({ [CAP_CONTROL_HEADER]: token });
+
+/**
+ * Whether an entry spread cap can be in force for a sandbox: the cap is judged on AlphaDesk's quote in the standalone receipt, so
+ * only a sandbox whose AlphaDesk plugin is enabled with signal quality on, in a mode that takes that receipt, can apply it. This is
+ * exactly the condition under which the Go backend accepts an opening while a cap is configured; for any other sandbox no cap is
+ * configured (so nothing is claimed that cannot be enforced) and the backend still refuses a cap it cannot apply.
+ */
+export function optionSpreadCapApplies(alphaDesk, env = process.env) {
+  return alphaDesk?.enabled === true
+    && env?.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true'
+    && ['STANDALONE_OP2', 'PAPER_ADVISORY_OP2'].includes(env?.ALPHADESK_EXECUTION_MODE);
+}
 // The backend reports the enforced cap with its revision (every change of the enforced value moves it). A backend that does not
 // report a whole-number revision cannot be confirmed.
 const sameCap = (data, pct) => Number(data?.effective_pct) === Number(pct) && data?.configured === true && !data?.invalid && Number.isSafeInteger(data?.revision);
@@ -64,12 +76,17 @@ function createSerialQueue() {
  *  getSaved(sandboxId)   -> the saved cap in percent
  *  save(sandboxId, patch, { beforePersist }) -> persists the guidance (validates first; throws on a bad value or a failed write)
  */
-export function createOptionSpreadCapController({ getClient, getSaved, save, token = () => process.env[CAP_CONTROL_ENV] || '' }) {
+export function createOptionSpreadCapController({ getClient, getSaved, save, applies = () => true, token = () => process.env[CAP_CONTROL_ENV] || '' }) {
   const queue = createSerialQueue();
   const options = () => ({ token: token() });
   return {
     save(sandboxId, patch) {
       return queue(async () => {
+        if (!applies(sandboxId)) {
+          // No cap is in force for this sandbox: the guidance is saved as is and nothing is pushed.
+          const guidance = await save(sandboxId, patch, {});
+          return { guidance, capSync: 'not_applicable' };
+        }
         try {
           const guidance = await save(sandboxId, patch, {
             beforePersist: async next => { await pushOptionSpreadCap(getClient(sandboxId), next.maxOptionSpreadPct, options()); },
@@ -89,6 +106,7 @@ export function createOptionSpreadCapController({ getClient, getSaved, save, tok
     },
     // Called before every heartbeat; never throws.
     reconcile(sandboxId) {
+      if (!applies(sandboxId)) return Promise.resolve({ state: 'not_applicable' });
       return queue(async () => reconcileOptionSpreadCap(getClient(sandboxId), getSaved(sandboxId), options())).catch(() => ({ state: 'unreconciled' }));
     },
   };

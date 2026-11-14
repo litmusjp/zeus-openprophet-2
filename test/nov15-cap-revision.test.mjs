@@ -10,8 +10,8 @@ const mcpSource = await fs.readFile(new URL('../mcp-server.js', import.meta.url)
 
 // A fake Go backend that enforces what the real one does: it counts every change of the enforced cap and refuses an
 // opening whose confirmed revision is not the current one.
-function fakeGo({ effective = 10, revision = 1 } = {}) {
-  const go = { effective, revision, orders: [], refused: [], onSubmit: null };
+function fakeGo({ effective = 10, revision = 1, configured = true } = {}) {
+  const go = { effective, revision, configured, orders: [], refused: [], onSubmit: null };
   go.client = {
     get: async () => ({ data: { effective_pct: go.effective, configured: true, invalid: false, revision: go.revision } }),
     put: async (_url, payload) => { if (payload.pct !== go.effective) { go.effective = payload.pct; go.revision += 1; } return { data: { effective_pct: go.effective, configured: true, invalid: false, revision: go.revision } }; },
@@ -20,7 +20,7 @@ function fakeGo({ effective = 10, revision = 1 } = {}) {
     if (endpoint !== '/options/order') return { ok: true };
     if (go.onSubmit) await go.onSubmit(); // a concurrent change landing while the opening is in flight
     if (data.cap_revision !== undefined && data.cap_revision !== go.revision) { go.refused.push(data); return { status: 'rejected_before_submission', error: 'OPTION_SPREAD_CAP_CHANGED' }; }
-    if (data.position_intent.endsWith('_to_open') && data.cap_revision === undefined) { go.refused.push(data); return { status: 'rejected_before_submission', error: 'OPTION_SPREAD_CAP_REVISION_REQUIRED' }; }
+    if (go.configured && data.position_intent.endsWith('_to_open') && data.cap_revision === undefined) { go.refused.push(data); return { status: 'rejected_before_submission', error: 'OPTION_SPREAD_CAP_REVISION_REQUIRED' }; }
     go.orders.push(data);
     return { status: 'accepted' };
   };
@@ -111,4 +111,35 @@ test('revision: the controller refuses to confirm a backend that reports no whol
   assert.deepEqual(await reconcileOptionSpreadCap(ok.client, 10, { token: 't' }), { state: 'in_sync', revision: 9 });
   const corrected = fakeGo({ effective: 8, revision: 9 });
   assert.deepEqual(await reconcileOptionSpreadCap(corrected.client, 10, { token: 't' }), { state: 'in_sync', revision: 10 });
+});
+
+// ── sandboxes where no cap can be in force are left exactly as they were ───────────────────────────────────
+test('not applicable: the controller saves without pushing and re-checks nothing', async () => {
+  const calls = [];
+  const client = { get: async () => { calls.push('get'); return { data: {} }; }, put: async () => { calls.push('put'); return { data: {} }; } };
+  const saved = [];
+  const controller = createOptionSpreadCapController({ getClient: () => client, getSaved: () => 8, applies: () => false, token: () => 't',
+    save: async (id, patch, hooks) => { saved.push({ id, patch, hooks }); return { maxOptionSpreadPct: patch.maxOptionSpreadPct }; } });
+  const result = await controller.save('s', { maxOptionSpreadPct: 10 });
+  assert.equal(result.capSync, 'not_applicable');
+  assert.equal(result.guidance.maxOptionSpreadPct, 10);
+  assert.deepEqual(saved[0].hooks, {}, 'no push hook');
+  assert.deepEqual(await controller.reconcile('s'), { state: 'not_applicable' });
+  assert.deepEqual(calls, [], 'the backend was never contacted');
+});
+
+test('not applicable: the opening helper returns undefined, the order carries no revision and goes through', async () => {
+  const begin = mcpSource.indexOf('async function capSyncRevision() {');
+  const end = mcpSource.indexOf('async function enforcePermissions(', begin);
+  const source = mcpSource.slice(begin, end);
+  const build = reply => vm.runInNewContext(`${source}; capSyncRevision`, { AGENT_URL: 'http://agent.test', AGENT_QUERY: { sandboxId: 's' }, agentAxios: { get: async () => reply } });
+  assert.equal(await build({ data: { state: 'not_applicable', revision: null } })(), undefined);
+  assert.equal(await build({ data: { state: 'in_sync', revision: 4 } })(), 4);
+  assert.equal(await build({ data: { state: 'unknown' } })(), null);
+  const go = fakeGo({ revision: 3, configured: false }); // no cap is configured on a backend where none can be in force
+  const ctx = { ...ctxFor(go), capSyncRevision: async () => undefined };
+  const result = await run(placeBody(), ctx)({ ...optionOrder });
+  assert.equal(result.isError, undefined);
+  assert.equal(go.orders[0].cap_revision, undefined);
+  assert.doesNotMatch(placeBody(), /capRevision === undefined/, 'only null refuses');
 });

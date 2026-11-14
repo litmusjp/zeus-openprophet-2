@@ -26,7 +26,7 @@ import { shouldShowGoLogLine, createGoLogLineBuffer } from './go-log-filter.js';
 import { resolveApiAuthToken } from './auth.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
 import { getTradingGuidanceForSandbox } from './trading-guidance.js';
-import { CAP_CONTROL_ENV } from './option-spread-cap.js';
+import { CAP_CONTROL_ENV, optionSpreadCapApplies } from './option-spread-cap.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -108,7 +108,8 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     [CAP_CONTROL_ENV]: baseEnv?.[CAP_CONTROL_ENV] || '',
     ...tradingPolicyEnvironment(permissions),
     // OP2's entry spread cap is the sandbox's saved maxOptionSpreadPct; the backend also receives later changes through its risk endpoint.
-    ...(optionSpreadCapPct !== undefined && optionSpreadCapPct !== null && Number.isFinite(Number(optionSpreadCapPct)) ? { OPENPROPHET_MAX_OPTION_SPREAD_PCT: String(optionSpreadCapPct) } : {}),
+    // Always set so nothing inherited can configure a cap: the saved value when a cap can be in force for this sandbox, empty otherwise.
+    OPENPROPHET_MAX_OPTION_SPREAD_PCT: optionSpreadCapPct !== undefined && optionSpreadCapPct !== null && Number.isFinite(Number(optionSpreadCapPct)) && optionSpreadCapApplies(alphaDesk, baseEnv) ? String(optionSpreadCapPct) : '',
     ALPHADESK_ENABLED: alphaDesk?.enabled ? 'true' : 'false',
     ALPHADESK_SIGNAL_QUALITY_ENABLED: baseEnv?.ALPHADESK_SIGNAL_QUALITY_ENABLED === 'true' && alphaDesk?.enabled ? 'true' : 'false',
     ALPHADESK_EXECUTION_MODE: baseEnv?.ALPHADESK_EXECUTION_MODE || 'ACCOUNT_VERIFIED',

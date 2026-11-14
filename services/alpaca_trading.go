@@ -45,6 +45,7 @@ type AlpacaTradingService struct {
 	openingReservationPath  string
 	dailyLossLock           *DailyLossLockStore
 	optionSpreadCap         optionSpreadCapState
+	capLeaseHook            func() // test seam: runs just before the cap lease is taken (nil in production)
 	submissionMarker        func(string) error
 	managedSubmissionMarker func(string, string, string) error
 	alphaDesk               *AlphaDeskClient
@@ -900,6 +901,11 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	if err := checkRegularSession(s.clockReader); err != nil {
 		return nil, err
 	}
+	// Common options-opening boundary, for every execution mode: while an entry spread cap is in force an opening needs a
+	// mode that can apply it and the cap revision that was confirmed for it.
+	if err := s.checkOptionSpreadCapBoundary(order); err != nil {
+		return nil, err
+	}
 	if err := s.validateOptionsPolicy(ctx, order); err != nil {
 		return nil, err
 	}
@@ -1037,8 +1043,18 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 			return nil, preRPCAbort(err)
 		}
 	}
+	// Final cap validation and dispatch are one step with respect to cap changes: the lease re-validates the confirmed
+	// revision and keeps the enforced cap from changing until the broker call has returned (a setter waits for it).
+	releaseCap, capErr := s.leaseOptionSpreadCap(order)
+	if capErr != nil {
+		order.AlphaDeskAssessment = nil
+		return nil, preRPCAbort(capErr)
+	}
 	order.SubmissionAttempted = true
-	alpacaOrder, err := placeOrder(req)
+	alpacaOrder, err := func() (*alpaca.Order, error) {
+		defer releaseCap()
+		return placeOrder(req)
+	}()
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to place options order")
 		if rejection := classifyBrokerSubmissionError(err); rejection != nil {

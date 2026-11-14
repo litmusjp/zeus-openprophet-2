@@ -17,7 +17,7 @@ import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { registerPrecisionResolutionRoute } from './precision-resolution-route.js';
 import { DEFAULT_TRADING_GUIDANCE, loadTradingGuidance, getTradingGuidanceForSandbox, setTradingGuidanceForSandbox } from './trading-guidance.js';
-import { createOptionSpreadCapController } from './option-spread-cap.js';
+import { createOptionSpreadCapController, optionSpreadCapApplies } from './option-spread-cap.js';
 import { buildTradeLedger } from './trade-ledger.js';
 import { buildScorecard } from './trade-scorecard.js';
 import * as secretsStore from './secrets-store.js';
@@ -445,6 +445,7 @@ const orchestrator = new AgentOrchestrator({
 const optionSpreadCap = createOptionSpreadCapController({
   getClient: sandboxId => runningGoClientForSandbox(sandboxId),
   getSaved: sandboxId => getTradingGuidanceForSandbox(sandboxId).maxOptionSpreadPct,
+  applies: sandboxId => optionSpreadCapApplies(getPluginForSandbox(sandboxId, 'alphadesk'), process.env),
   save: (sandboxId, patch, hooks) => setTradingGuidanceForSandbox(sandboxId, patch, hooks),
 });
 let harness = createHarnessForActiveSandbox();

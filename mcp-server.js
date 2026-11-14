@@ -1499,11 +1499,13 @@ const agentAxios = EXECUTION_START_ENABLED ? axios.create({
 // Trusted cap state, read from the agent server at the moment of an options opening (never from a flag fixed when this process
 // started): the server reconciles and reports whether the running backend holds the saved entry spread cap, with the backend's
 // revision of that cap. Anything other than 'in_sync' with a whole-number revision, including an unreachable server or an unknown
-// answer, gives null and refuses the opening. The order carries the revision and the backend refuses it if the cap changed after
+// answer, gives null and refuses the opening; 'not_applicable' (no cap can be in force for this sandbox) gives undefined and the
+// order carries no revision. The order carries the revision and the backend refuses it if the cap changed after
 // this confirmation. Exits, cancels and reads never call this.
 async function capSyncRevision() {
   try {
     const resp = await agentAxios.get(`${AGENT_URL}/api/option-spread-cap/sync`, { timeout: 8000, params: AGENT_QUERY });
+    if (resp?.data?.state === 'not_applicable') return undefined; // no cap can be in force for this sandbox (no standalone AlphaDesk assessment)
     return resp?.data?.state === 'in_sync' && Number.isSafeInteger(resp?.data?.revision) ? resp.data.revision : null;
   } catch {
     return null;

@@ -22,16 +22,17 @@ import (
 // of the exact contract (the receipt's leg_N_quote value), so one sample and one number decide.
 
 const (
-	optionSpreadCapEnv       = "OPENPROPHET_MAX_OPTION_SPREAD_PCT"
-	MinOptionSpreadCapPct    = 2.0
-	MaxOptionSpreadCapPct    = 25.0
-	scoreProfileV1           = "catalyst_momentum_v1"
-	scoreProfileV2           = "catalyst_momentum_v2"
-	optionSpreadAboveCapCode = "OPTION_SPREAD_ABOVE_CAP"
-	optionSpreadEvidenceCode = "OPTION_SPREAD_EVIDENCE_INVALID"
-	optionSpreadCapConfigErr = "OPTION_SPREAD_CAP_INVALID"
-	optionSpreadCapChanged   = "OPTION_SPREAD_CAP_CHANGED"
-	optionSpreadCapRevision  = "OPTION_SPREAD_CAP_REVISION_REQUIRED"
+	optionSpreadCapEnv         = "OPENPROPHET_MAX_OPTION_SPREAD_PCT"
+	MinOptionSpreadCapPct      = 2.0
+	MaxOptionSpreadCapPct      = 25.0
+	scoreProfileV1             = "catalyst_momentum_v1"
+	scoreProfileV2             = "catalyst_momentum_v2"
+	optionSpreadAboveCapCode   = "OPTION_SPREAD_ABOVE_CAP"
+	optionSpreadEvidenceCode   = "OPTION_SPREAD_EVIDENCE_INVALID"
+	optionSpreadCapConfigErr   = "OPTION_SPREAD_CAP_INVALID"
+	optionSpreadCapChanged     = "OPTION_SPREAD_CAP_CHANGED"
+	optionSpreadCapRevision    = "OPTION_SPREAD_CAP_REVISION_REQUIRED"
+	optionSpreadCapUnsupported = "OPTION_SPREAD_CAP_UNSUPPORTED_MODE"
 )
 
 // optionSpreadCapState is the cap this backend enforces. `revision` counts every change of the enforced value (a new
@@ -226,6 +227,84 @@ func verifyOptionQuoteBlock(p StandaloneTradeProposal, doc map[string]any, ratio
 func (s *AlpacaTradingService) enforceOptionSpreadCap(p StandaloneTradeProposal, doc map[string]any) error {
 	capPct, configured, invalid, _ := s.optionSpreadCap.snapshot()
 	return enforceOptionSpreadCapAt(capPct, configured, invalid, p, doc)
+}
+
+func isOptionsOpening(order *interfaces.OptionsOrder) bool {
+	return order != nil && strings.HasSuffix(order.PositionIntent, "_to_open")
+}
+
+// optionSpreadCapRejection is a pre-submission rejection that never involves AlphaDesk's decision.
+func optionSpreadCapRejection(code, message string) error {
+	return &PreSubmissionRejectionError{Err: &OptionSpreadCapError{Code: code, Message: message}}
+}
+
+// optionSpreadCapModeSupported: the cap is judged on AlphaDesk's quote in the standalone receipt, so only the execution modes
+// that take that receipt can apply it.
+func (s *AlpacaTradingService) optionSpreadCapModeSupported() bool {
+	return s.alphaDesk != nil && s.alphaDesk.Enabled && s.alphaDesk.SignalQualityEnabled &&
+		(s.alphaDesk.ExecutionMode == "STANDALONE_OP2" || s.alphaDesk.ExecutionMode == "PAPER_ADVISORY_OP2")
+}
+
+// checkOptionSpreadCapBoundary is the common options-opening boundary, run before any mode-specific work. While a cap is in
+// force (or its configuration is invalid) an opening is refused unless the execution mode can apply the cap and the opening
+// carries the revision confirmed for it. The revision's value is validated again, under the cap lease, right before dispatch.
+// Exits and reducing orders never reach a refusal here.
+func (s *AlpacaTradingService) checkOptionSpreadCapBoundary(order *interfaces.OptionsOrder) error {
+	if !isOptionsOpening(order) {
+		return nil
+	}
+	_, configured, invalid, _ := s.optionSpreadCap.snapshot()
+	if invalid {
+		return optionSpreadCapRejection(optionSpreadCapConfigErr, "OP2's option spread cap setting is invalid, so new options entries are refused until it is corrected.")
+	}
+	if !configured {
+		return nil
+	}
+	if !s.optionSpreadCapModeSupported() {
+		return optionSpreadCapRejection(optionSpreadCapUnsupported, "an entry spread cap is in force but this execution mode cannot apply it (it needs the standalone or paper advisory AlphaDesk assessment), so new options entries are refused. Nothing was submitted.")
+	}
+	if order.CapRevision == nil {
+		return optionSpreadCapRejection(optionSpreadCapRevision, "this opening carries no confirmation of OP2's entry spread cap, so it is refused; confirm the cap and retry. Nothing was submitted.")
+	}
+	return nil
+}
+
+// leaseOptionSpreadCap validates the confirmed revision under a read lock on the cap state and returns a release function that
+// keeps the lock until the broker call has returned. SetOptionSpreadCapPct takes the write lock, so a cap change that arrives
+// after this final check waits for the dispatch to finish; one that arrived before it fails the revision comparison. Nothing
+// between the lease and the release may read the cap state (a waiting writer would block that read behind the lease).
+func (s *AlpacaTradingService) leaseOptionSpreadCap(order *interfaces.OptionsOrder) (func(), error) {
+	noop := func() {}
+	if !isOptionsOpening(order) {
+		return noop, nil
+	}
+	if s.capLeaseHook != nil {
+		s.capLeaseHook()
+	}
+	c := &s.optionSpreadCap
+	c.mu.RLock()
+	if c.invalid {
+		c.mu.RUnlock()
+		return noop, optionSpreadCapRejection(optionSpreadCapConfigErr, "OP2's option spread cap setting is invalid, so new options entries are refused until it is corrected.")
+	}
+	if !c.configured {
+		c.mu.RUnlock()
+		return noop, nil
+	}
+	if !s.optionSpreadCapModeSupported() {
+		c.mu.RUnlock()
+		return noop, optionSpreadCapRejection(optionSpreadCapUnsupported, "an entry spread cap is in force but this execution mode cannot apply it, so new options entries are refused. Nothing was submitted.")
+	}
+	if order.CapRevision == nil {
+		c.mu.RUnlock()
+		return noop, optionSpreadCapRejection(optionSpreadCapRevision, "this opening carries no confirmation of OP2's entry spread cap, so it is refused; confirm the cap and retry. Nothing was submitted.")
+	}
+	if *order.CapRevision != c.revision {
+		c.mu.RUnlock()
+		return noop, optionSpreadCapRejection(optionSpreadCapChanged, "OP2's entry spread cap changed after it was confirmed for this opening, so it is refused; confirm the cap again and retry. Nothing was submitted.")
+	}
+	var once sync.Once
+	return func() { once.Do(c.mu.RUnlock) }, nil
 }
 
 // enforceOptionSpreadCapForOrder is what the order guards call. It takes one snapshot of the enforced cap and its

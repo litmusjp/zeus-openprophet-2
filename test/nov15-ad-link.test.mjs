@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { AgentHarness } from '../agent/harness.js';
 import { buildGoBackendEnv } from '../agent/orchestrator.js';
-import { pushOptionSpreadCap } from '../agent/option-spread-cap.js';
+import { pushOptionSpreadCap, optionSpreadCapApplies } from '../agent/option-spread-cap.js';
 import {
   DEFAULT_TRADING_GUIDANCE, renderAlphaDeskPolicyFacts, renderTradingGuidance, setTradingGuidanceForSandbox,
   getTradingGuidanceForSandbox, resetTradingGuidanceStoreForTests,
@@ -13,18 +13,38 @@ import {
 
 const serverSource = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
 const account = { id: 'acct', publicKey: 'pk', secretKey: 'sk', brokerAccountId: 'broker', paper: true };
-const goEnv = extra => buildGoBackendEnv({}, { account, sandboxId: 'sbx', processNonce: 'n', port: 4555, databasePath: 'db', activityLogDir: 'logs', permissions: {}, ...extra });
+const APPLICABLE = { ALPHADESK_SIGNAL_QUALITY_ENABLED: 'true', ALPHADESK_EXECUTION_MODE: 'PAPER_ADVISORY_OP2' };
+const desk = { enabled: true, url: 'https://desk.example', apiKey: 'k' };
+const goEnv = (extra, base = APPLICABLE, alphaDesk = desk) => buildGoBackendEnv(base, { account, sandboxId: 'sbx', processNonce: 'n', port: 4555, databasePath: 'db', activityLogDir: 'logs', permissions: {}, alphaDesk, ...extra });
 
 // ── O1: the saved cap reaches the Go backend ─────────────────────────────────────────────────────
 test('O1: the backend environment carries the sandbox\'s saved spread cap, and only a real number', () => {
   assert.equal(goEnv({ optionSpreadCapPct: 10 }).OPENPROPHET_MAX_OPTION_SPREAD_PCT, '10');
   assert.equal(goEnv({ optionSpreadCapPct: 8.5 }).OPENPROPHET_MAX_OPTION_SPREAD_PCT, '8.5');
   for (const bad of [undefined, null, 'abc', NaN, Infinity]) {
-    assert.equal('OPENPROPHET_MAX_OPTION_SPREAD_PCT' in goEnv({ optionSpreadCapPct: bad }), false, `no value for ${String(bad)}`);
+    assert.equal(goEnv({ optionSpreadCapPct: bad }).OPENPROPHET_MAX_OPTION_SPREAD_PCT, '', `no value for ${String(bad)}`);
   }
   // An inherited value cannot stand in for the saved one.
-  const inherited = buildGoBackendEnv({ OPENPROPHET_MAX_OPTION_SPREAD_PCT: '25' }, { account, sandboxId: 'sbx', processNonce: 'n', port: 1, databasePath: 'db', activityLogDir: 'l', permissions: {}, optionSpreadCapPct: 10 });
-  assert.equal(inherited.OPENPROPHET_MAX_OPTION_SPREAD_PCT, '10');
+  assert.equal(goEnv({ optionSpreadCapPct: 10 }, { ...APPLICABLE, OPENPROPHET_MAX_OPTION_SPREAD_PCT: '25' }).OPENPROPHET_MAX_OPTION_SPREAD_PCT, '10');
+});
+
+test('O1: a cap is configured only where it can be applied; anywhere else the backend gets none (and an inherited one is blanked)', () => {
+  const cases = {
+    'AlphaDesk plugin disabled': [APPLICABLE, { ...desk, enabled: false }],
+    'no AlphaDesk plugin': [APPLICABLE, null],
+    'signal quality off': [{ ...APPLICABLE, ALPHADESK_SIGNAL_QUALITY_ENABLED: 'false' }, desk],
+    'account-verified mode': [{ ...APPLICABLE, ALPHADESK_EXECUTION_MODE: 'ACCOUNT_VERIFIED' }, desk],
+    'signal-quality OP2 mode': [{ ...APPLICABLE, ALPHADESK_EXECUTION_MODE: 'SIGNAL_QUALITY_OP2' }, desk],
+    'no mode set': [{ ALPHADESK_SIGNAL_QUALITY_ENABLED: 'true' }, desk],
+  };
+  for (const [name, [base, alphaDesk]] of Object.entries(cases)) {
+    const env = goEnv({ optionSpreadCapPct: 10 }, { ...base, OPENPROPHET_MAX_OPTION_SPREAD_PCT: '25' }, alphaDesk);
+    assert.equal(env.OPENPROPHET_MAX_OPTION_SPREAD_PCT, '', name);
+    assert.equal(optionSpreadCapApplies(alphaDesk, base), false, name);
+  }
+  for (const mode of ['STANDALONE_OP2', 'PAPER_ADVISORY_OP2']) {
+    assert.equal(optionSpreadCapApplies(desk, { ALPHADESK_SIGNAL_QUALITY_ENABLED: 'true', ALPHADESK_EXECUTION_MODE: mode }), true, mode);
+  }
 });
 
 test('O1: both backend start paths pass the saved guidance value', async () => {

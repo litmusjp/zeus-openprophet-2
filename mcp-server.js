@@ -1496,6 +1496,17 @@ const agentAxios = EXECUTION_START_ENABLED ? axios.create({
     ...(OPERATOR_TOKEN ? { 'X-OpenProphet-Operator-Token': OPERATOR_TOKEN } : {}),
   } : {},
 }) : unavailableBrokerClient();
+// Trusted cap state, read from the agent server at the moment of an options opening (never from a flag fixed when this process
+// started): the server reconciles and reports whether the running backend holds the saved entry spread cap. Anything other than
+// 'in_sync', including an unreachable server or an unknown answer, refuses the opening. Exits, cancels and reads never call this.
+async function capSyncAllowsOpening() {
+  try {
+    const resp = await agentAxios.get(`${AGENT_URL}/api/option-spread-cap/sync`, { timeout: 8000, params: AGENT_QUERY });
+    return resp?.data?.state === 'in_sync';
+  } catch {
+    return false;
+  }
+}
 async function enforcePermissions(toolName, args) {
   const perms = await verifyPermissions({
     toolName,
@@ -1575,7 +1586,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'place_buy_order': {
         if (typeof process !== 'undefined' && process.env.OPENPROPHET_OPENINGS_BLOCKED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'Daily loss limit reached earlier this session; new openings are blocked until the next session. Closing and reducing orders are not affected.', code: 'DAILY_LOSS_LIMIT_REACHED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
-        if (typeof process !== 'undefined' && process.env.OPENPROPHET_CAP_UNRESOLVED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'OP2 cannot confirm its entry spread cap right now, so new openings are refused until it is confirmed (it is re-checked every heartbeat). Closing and reducing orders are not affected.', code: 'OPTION_SPREAD_CAP_UNRESOLVED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
         // Transform quantity to qty for API compatibility
         const requestData = {
           symbol: args.symbol,
@@ -1606,7 +1616,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'place_managed_position': {
         if (typeof process !== 'undefined' && process.env.OPENPROPHET_OPENINGS_BLOCKED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'Daily loss limit reached earlier this session; new openings are blocked until the next session. Closing and reducing orders are not affected.', code: 'DAILY_LOSS_LIMIT_REACHED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
-        if (typeof process !== 'undefined' && process.env.OPENPROPHET_CAP_UNRESOLVED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'OP2 cannot confirm its entry spread cap right now, so new openings are refused until it is confirmed (it is re-checked every heartbeat). Closing and reducing orders are not affected.', code: 'OPTION_SPREAD_CAP_UNRESOLVED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
         const { thesis, market_context, ...requestData } = args;
         const data = await callTradingBot('/positions/managed', 'POST', requestData);
         void autoStoreSetup({ ...args, ...data, opening_entry: true }, args.side || 'buy');
@@ -2167,7 +2176,7 @@ ${allNews.map((article, i) =>
         // strategy from its own range length); it is never read from tool arguments. Reducing orders are unaffected.
         if (isOpeningIntent(args.position_intent)) {
           if (typeof process !== 'undefined' && process.env.OPENPROPHET_OPENINGS_BLOCKED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'Daily loss limit reached earlier this session; new openings are blocked until the next session. Closing and reducing orders are not affected.', code: 'DAILY_LOSS_LIMIT_REACHED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
-          if (typeof process !== 'undefined' && process.env.OPENPROPHET_CAP_UNRESOLVED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'OP2 cannot confirm its entry spread cap right now, so new openings are refused until it is confirmed (it is re-checked every heartbeat). Closing and reducing orders are not affected.', code: 'OPTION_SPREAD_CAP_UNRESOLVED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
+          if (!(await capSyncAllowsOpening())) return { content: [{ type: 'text', text: JSON.stringify({ error: 'OP2 cannot confirm that its entry spread cap matches the saved setting right now, so new options openings are refused until it is confirmed (checked at every opening). Closing and reducing orders are not affected.', code: 'OPTION_SPREAD_CAP_UNRESOLVED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
           const minOpening = parseMinOpeningMinutes(process.env.OPENPROPHET_MIN_OPENING_MINUTES);
           if (minOpening > 0) {
             let fields = sessionFields(null, null);

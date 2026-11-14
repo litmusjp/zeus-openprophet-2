@@ -62,6 +62,7 @@ test('MCP place_options_order preserves typed HTTP outcome diagnostics', async (
   const calls = [];
   const invoke = vm.runInNewContext(`(async (args) => {${body}})`, {
     callTradingBot: async (...args) => { calls.push(args); return { status: 'risk_blocked', assessment_decision: 'PASS', assessment_category: 'execution_blocked', assessment_stage: 'market_session' }; },
+    capSyncAllowsOpening: async () => true, // the cap guard has its own tests (nov15-cap-unresolved)
     isOpeningIntent: () => true, normalizeOptionLimitPrice, sessionFields, openingGateDecision, parseMinOpeningMinutes, process: { env: {} }, autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
   });
   const output = await invoke({ client_order_id: 'stable-id', symbol: 'AAPL261106C00200000', underlying: 'AAPL', quantity: 1, side: 'buy', position_intent: 'buy_to_open', order_type: 'limit', limit_price: 2, thesis: 'fixture' });

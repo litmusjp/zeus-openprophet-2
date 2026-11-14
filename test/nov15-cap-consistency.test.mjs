@@ -43,7 +43,7 @@ test('credential: it is stripped from every agent and MCP child environment but 
   } finally {
     if (previous === undefined) delete process.env[CAP_CONTROL_ENV]; else process.env[CAP_CONTROL_ENV] = previous;
   }
-  assert.doesNotMatch(mcpSource, /CAP_CONTROL|option-spread-cap/, 'no MCP tool uses or exposes the cap credential or endpoint');
+  assert.doesNotMatch(mcpSource, /CAP_CONTROL|risk\/option-spread-cap/, 'no MCP tool uses or exposes the cap credential or the cap-change endpoint');
   assert.match(serverSource, /if \(EXECUTION_START_ENABLED && !process\.env\.OPENPROPHET_CAP_CONTROL_TOKEN\)/);
 });
 

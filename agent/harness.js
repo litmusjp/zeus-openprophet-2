@@ -1418,8 +1418,8 @@ ${userBlock}`;
     const permStr = permLines.length ? '\n\nGUARDRAILS:\n' + permLines.join('\n') : '';
 
     // The backend must enforce the saved entry spread cap; correct any difference before the agent acts (never blocks the beat).
-    // If the cap cannot be confirmed, new openings are refused (MCP guard) until a later beat confirms it; management and exits
-    // are never affected and the agent is told. A failing re-check counts as unresolved (fail closed). No backend means nothing to enforce.
+    // If the cap cannot be confirmed the agent is told (the MCP server independently refuses options openings by checking the
+    // trusted cap state at each submission, so a change after this point is caught too). A failing re-check counts as unresolved.
     let capState;
     try { capState = (await this.ensureOptionSpreadCap(this.sandboxId))?.state; } catch { capState = 'unreconciled'; }
     this._capUnresolved = capState === 'unreconciled';
@@ -1688,8 +1688,6 @@ ${userBlock}`;
           OPENPROPHET_HEARTBEAT_INTERVALS_FORCED: this.isHeartbeatIntervalsForced() ? 'true' : 'false',
           // Extra MCP guard; the Go order policy is the authority. Always set so nothing inherited can change it.
           OPENPROPHET_OPENINGS_BLOCKED: this._openingsBlocked ? '1' : '',
-          // Extra MCP guard while the entry spread cap is unconfirmed; always set so nothing inherited can change it.
-          OPENPROPHET_CAP_UNRESOLVED: this._capUnresolved ? '1' : '',
           // Always set (empty means no gate) so nothing inherited from the parent environment can switch it on or off.
           OPENPROPHET_MIN_OPENING_MINUTES: openingGateMinutesFor(this._agentConfig?.strategyId, getTradingGuidanceForSandbox(this.sandboxId)),
         },

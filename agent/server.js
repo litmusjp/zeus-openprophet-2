@@ -1983,6 +1983,17 @@ function runningGoClientForSandbox(sandboxId) {
   return runtime?.goReady ? runtime.goAxios : null;
 }
 
+// Trusted cap state for the MCP server's opening guard: reconciles the running backend with the saved cap (serialized with
+// saves) and reports the result. Only 'in_sync' lets an options opening through.
+app.get('/api/option-spread-cap/sync', async (req, res) => {
+  try {
+    const sandboxId = req.query.sandboxId ? String(req.query.sandboxId) : getActiveSandbox()?.id;
+    if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ state: 'unknown', error: 'Sandbox not found' });
+    const result = await optionSpreadCap.reconcile(sandboxId);
+    res.json({ sandboxId, state: result.state, saved: getTradingGuidanceForSandbox(sandboxId).maxOptionSpreadPct });
+  } catch (err) { res.status(503).json({ state: 'unknown', error: 'cap state unavailable' }); }
+});
+
 app.put('/api/trading-guidance', operatorAuthMiddleware, async (req, res) => {
   try {
     const { sandboxId, ...patch } = req.body || {};

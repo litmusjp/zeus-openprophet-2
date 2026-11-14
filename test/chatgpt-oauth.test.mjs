@@ -77,9 +77,18 @@ test('headless login parses split ANSI output, reads native auth on exit, and cl
 
 test('real child chunks parse ANSI instructions and cancellation clears code and URL', async () => {
   const flow = createChatGPTAuthFlow({ dataDir: '/tmp/op2-fixture', spawn: (_bin, _args, options) => spawnChild(process.execPath, ['-e', "process.stdout.write('\\x1b[');setTimeout(()=>process.stderr.write('32mhttps://auth.openai.com/codex/device\\nEnter code: WXYZ-4321\\x1b[0m'),5);setTimeout(()=>{},500)"], options) });
-  const { id } = flow.start(); await new Promise(resolve => setTimeout(resolve, 80));
-  assert.equal((await flow.status(id)).code, 'WXYZ-4321');
-  flow.cancel(id); const state = await flow.status(id); assert.equal(state.code, null); assert.equal(state.url, null);
+  const { id } = flow.start();
+  try {
+    // Wait for the child's output with a bounded poll instead of a fixed delay (the child starts at its own speed).
+    const deadline = Date.now() + 5000;
+    let seen = await flow.status(id);
+    while (!seen.code && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 10)); seen = await flow.status(id); }
+    assert.equal(seen.code, 'WXYZ-4321');
+    assert.equal(seen.url, 'https://auth.openai.com/codex/device');
+  } finally {
+    flow.cancel(id); // always release the helper, even when the wait times out
+  }
+  const state = await flow.status(id); assert.equal(state.code, null); assert.equal(state.url, null);
 });
 
 test('duplicate start reuses the same pending flow without another spawn', () => {

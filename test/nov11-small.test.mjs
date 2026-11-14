@@ -90,6 +90,7 @@ test('openings above 10 contracts get a specific local error; closes and 10-cont
   const invoke = vm.runInNewContext(`(async (args) => {${body}})`, {
     JSON, Number, normalizeOptionLimitPrice, sessionFields, openingGateDecision, parseMinOpeningMinutes, process: { env: {} },
     callTradingBot: async (...a) => { calls.push(a); return { status: 'accepted' }; },
+    capSyncAllowsOpening: async () => true, // the cap guard has its own tests (nov15-cap-unresolved)
     isOpeningIntent: intent => typeof intent !== 'string' || !intent || intent.includes('open'),
     autoStoreSetup: () => {}, orderResponse: data => ({ content: [{ type: 'text', text: JSON.stringify(data) }] }),
   });

@@ -53,12 +53,12 @@ func snapshotWithLock(account *interfaces.Account, lock *interfaces.DailyLossLoc
 func TestDailyLossLockLatchesDuringTheOpenSessionAndSurvivesRecovery(t *testing.T) {
 	dir := t.TempDir()
 	s := lockTestService(t, dir, openClock("2026-11-16T15:00:00Z"), nil) // 10:00 ET, Monday
-	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-5.4))
+	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-5.4), true)
 	if err != nil || !status.Locked || !status.NewlyLocked || status.SessionDate != "2026-11-16" {
 		t.Fatalf("breach during the open session must latch: %+v %v", status, err)
 	}
 	// Marks recover: the lock stays, and is not "newly" set again.
-	status, err = s.evaluateDailyLossLock(context.Background(), true, lossAccount(-1.0))
+	status, err = s.evaluateDailyLossLock(context.Background(), true, lossAccount(-1.0), false)
 	if err != nil || !status.Locked || status.NewlyLocked || status.LossPct < 5 {
 		t.Fatalf("lock must survive a same-session recovery: %+v %v", status, err)
 	}
@@ -82,7 +82,7 @@ func TestDailyLossLockNeverLatchesOutsideTheOpenSession(t *testing.T) {
 	dir := t.TempDir()
 	closed := &alpaca.Clock{Timestamp: time.Date(2026, 11, 16, 14, 15, 0, 0, time.UTC), IsOpen: false} // 9:15 ET pre-market
 	s := lockTestService(t, dir, closed, nil)
-	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-9))
+	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-9), false)
 	if err != nil || status.Locked {
 		t.Fatalf("pre-market marks must not create a lock: %+v %v", status, err)
 	}
@@ -98,11 +98,11 @@ func TestDailyLossLockNeverLatchesOutsideTheOpenSession(t *testing.T) {
 func TestDailyLossLockClearsOnTheNextSessionDate(t *testing.T) {
 	dir := t.TempDir()
 	s := lockTestService(t, dir, openClock("2026-11-16T15:00:00Z"), nil)
-	if status, _ := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-6)); !status.Locked {
+	if status, _ := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-6), false); !status.Locked {
 		t.Fatal("expected a lock")
 	}
 	next := lockTestService(t, dir, openClock("2026-11-17T15:00:00Z"), nil)
-	status, err := next.evaluateDailyLossLock(context.Background(), true, lossAccount(-1))
+	status, err := next.evaluateDailyLossLock(context.Background(), true, lossAccount(-1), false)
 	if err != nil || status.Locked {
 		t.Fatalf("a new session date must clear the lock: %+v %v", status, err)
 	}
@@ -114,24 +114,84 @@ func TestDailyLossLockClearsOnTheNextSessionDate(t *testing.T) {
 	}
 }
 
-func TestDailyLossLockUnavailableClockFailsClosedForRecentLocksOnly(t *testing.T) {
+func TestDailyLossLockMissingClockBlocksOpeningsButNeverClosings(t *testing.T) {
 	dir := t.TempDir()
-	s := lockTestService(t, dir, openClock("2026-11-16T15:00:00Z"), nil)
-	if status, _ := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-6)); !status.Locked {
-		t.Fatal("expected a lock")
-	}
+	policy := *lockTestService(t, dir, nil, nil).policy
+	opening, closing := openingOption(), closingOption()
+
+	// No lock stored and the broker clock is unavailable: the session state cannot be verified, so openings are refused.
 	broken := lockTestService(t, dir, nil, fmt.Errorf("clock down"))
 	status, err := broken.DailyLossLockState(context.Background())
-	if err != nil || !status.Locked || status.ClockAvailable {
-		t.Fatalf("a recent lock must hold when the clock is unavailable: %+v %v", status, err)
+	if err != nil || !status.Enabled || status.ClockAvailable || status.Locked {
+		t.Fatalf("expected an enabled, clockless, unlocked status: %+v %v", status, err)
 	}
+	if _, err := policy.ValidateOptionsOrder(opening, snapshotWithLock(lossAccount(0), status, nil)); err == nil || !strings.Contains(err.Error(), "session clock is unavailable") {
+		t.Fatalf("opening must be refused without a valid broker clock, got %v", err)
+	}
+	if _, err := policy.ValidateOptionsOrder(closing, snapshotWithLock(lossAccount(0), status, nil)); err != nil {
+		t.Fatalf("closing must never depend on the clock, got %v", err)
+	}
+	// A zero timestamp is not a valid clock either.
+	zero := lockTestService(t, dir, &alpaca.Clock{IsOpen: true}, nil)
+	if status, _ = zero.DailyLossLockState(context.Background()); status.ClockAvailable {
+		t.Fatalf("a zero broker timestamp must count as unavailable: %+v", status)
+	}
+
+	// A stored lock of any age stays reported as locked while the clock is unavailable (no wall-clock expiry), and openings stay refused.
 	old := DailyLossLock{SessionDate: "2026-11-10", LossPct: 6, LimitPct: 5, LatchedAt: time.Now().Add(-72 * time.Hour)}
 	if err := broken.dailyLossLock.Save(old); err != nil {
 		t.Fatal(err)
 	}
 	status, err = broken.DailyLossLockState(context.Background())
-	if err != nil || status.Locked {
-		t.Fatalf("an old lock must not block forever: %+v %v", status, err)
+	if err != nil || !status.Locked || status.ClockAvailable {
+		t.Fatalf("an old lock must not be forgotten on elapsed time alone: %+v %v", status, err)
+	}
+	if _, err := policy.ValidateOptionsOrder(opening, snapshotWithLock(lossAccount(0), status, nil)); err == nil {
+		t.Fatal("opening must stay refused with an old lock and no clock")
+	}
+	if _, err := policy.ValidateOptionsOrder(closing, snapshotWithLock(lossAccount(0), status, nil)); err != nil {
+		t.Fatalf("closing must stay allowed, got %v", err)
+	}
+
+	// A valid clock on a later session date restores normal evaluation: the old lock is cleared and an opening is allowed.
+	recovered := lockTestService(t, dir, openClock("2026-11-16T15:00:00Z"), nil)
+	status, err = recovered.DailyLossLockState(context.Background())
+	if err != nil || status.Locked || !status.ClockAvailable {
+		t.Fatalf("a valid next-session clock must clear the old lock: %+v %v", status, err)
+	}
+	if _, err := policy.ValidateOptionsOrder(opening, snapshotWithLock(lossAccount(0), status, nil)); err != nil {
+		t.Fatalf("opening must be allowed again, got %v", err)
+	}
+
+	// With the limit switched off the rule is not enabled, so the missing clock is not what refuses an opening.
+	noLimit := lockTestService(t, t.TempDir(), nil, fmt.Errorf("clock down"))
+	noLimit.policy.MaxDailyLoss = 0
+	if status, _ = noLimit.DailyLossLockState(context.Background()); status.Enabled {
+		t.Fatalf("no limit means the session rule is not enabled: %+v", status)
+	}
+}
+
+func TestDailyLossLockIsReportedAsNewOnlyOnceEvenWhenAnOrderCheckLatchedIt(t *testing.T) {
+	dir := t.TempDir()
+	s := lockTestService(t, dir, openClock("2026-11-16T15:00:00Z"), nil)
+	// An order-policy check (snapshot path) latches the lock first: that path never reports it as new.
+	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-6), false)
+	if err != nil || !status.Locked || status.NewlyLocked {
+		t.Fatalf("snapshot path latches without announcing: %+v %v", status, err)
+	}
+	// The beat-end evaluate then announces it exactly once.
+	status, err = s.EvaluateDailyLossLock(context.Background())
+	if err != nil || !status.Locked || !status.NewlyLocked {
+		t.Fatalf("evaluate must report the lock as new once: %+v %v", status, err)
+	}
+	status, _ = s.EvaluateDailyLossLock(context.Background())
+	if !status.Locked || status.NewlyLocked {
+		t.Fatalf("second evaluate must not announce again: %+v", status)
+	}
+	// Restart: still not announced again.
+	again := lockTestService(t, dir, openClock("2026-11-16T17:00:00Z"), nil)
+	if status, _ = again.EvaluateDailyLossLock(context.Background()); !status.Locked || status.NewlyLocked {
+		t.Fatalf("a restart must not announce again: %+v", status)
 	}
 }
 
@@ -141,7 +201,7 @@ func TestDailyLossLockUnreadableStateBlocksOpeningsButNotClosings(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(dir, "daily-loss-lock.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(0))
+	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(0), false)
 	if err == nil || status != nil {
 		t.Fatalf("a corrupt lock file must be an error, got %+v %v", status, err)
 	}
@@ -156,13 +216,13 @@ func TestDailyLossLockUnreadableStateBlocksOpeningsButNotClosings(t *testing.T) 
 
 func TestDailyLossLockIsOffWithoutAStoreOrALimit(t *testing.T) {
 	s := &AlpacaTradingService{logger: logrus.New(), clockReader: fakeMarketClock{clock: openClock("2026-11-16T15:00:00Z")}, policy: &TradingPolicy{MaxDailyLoss: 5}}
-	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-9))
+	status, err := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-9), false)
 	if err != nil || status.Locked || status.Enabled {
 		t.Fatalf("no store means no lock: %+v %v", status, err)
 	}
 	noLimit := lockTestService(t, t.TempDir(), openClock("2026-11-16T15:00:00Z"), nil)
 	noLimit.policy.MaxDailyLoss = 0
-	status, err = noLimit.evaluateDailyLossLock(context.Background(), true, lossAccount(-9))
+	status, err = noLimit.evaluateDailyLossLock(context.Background(), true, lossAccount(-9), false)
 	if err != nil || status.Locked {
 		t.Fatalf("no limit means no lock: %+v %v", status, err)
 	}
@@ -170,15 +230,15 @@ func TestDailyLossLockIsOffWithoutAStoreOrALimit(t *testing.T) {
 
 func TestDailyLossLockIgnoresLossBelowTheLimitAndInvalidPnL(t *testing.T) {
 	s := lockTestService(t, t.TempDir(), openClock("2026-11-16T15:00:00Z"), nil)
-	if status, _ := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-4.9)); status.Locked {
+	if status, _ := s.evaluateDailyLossLock(context.Background(), true, lossAccount(-4.9), false); status.Locked {
 		t.Fatalf("4.9%% is below the 5%% limit: %+v", status)
 	}
 	invalid := lossAccount(-9)
 	invalid.DailyPnLValid = false
-	if status, _ := s.evaluateDailyLossLock(context.Background(), true, invalid); status.Locked {
+	if status, _ := s.evaluateDailyLossLock(context.Background(), true, invalid, false); status.Locked {
 		t.Fatalf("invalid daily P&L must not latch: %+v", status)
 	}
-	if status, _ := s.evaluateDailyLossLock(context.Background(), true, lossAccount(+3)); status.Locked {
+	if status, _ := s.evaluateDailyLossLock(context.Background(), true, lossAccount(+3), false); status.Locked {
 		t.Fatalf("a gain must not latch: %+v", status)
 	}
 }

@@ -142,19 +142,24 @@ function persistedOrderReceipt(value) {
   return {};
 }
 
-// The current agent's own latest ADOPT decision for a lot opened by another agent (recorded after the entry).
-function latestAdoption({ evidence, accountId, symbol, currentAgentId, entryAt }) {
-  const root = (symbol.match(/^[A-Z.]+/) || [''])[0];
+// The current agent's own latest ADOPT decision for exactly this contract and this opening entry, recorded after the entry.
+// It must name the exact OCC contract as symbol and cite the entry order id (or client order id) in market_data.entry_order_id.
+// An underlying-only or uncited ADOPT never counts, and so does one with a missing or invalid timestamp.
+function latestAdoption({ evidence, accountId, symbol, entryBrokerId, entryClientId, currentAgentId, entryAt }) {
+  if (!Number.isFinite(entryAt)) return null;
+  const entryIds = new Set([entryBrokerId, entryClientId].filter(Boolean).map(String));
   let best = null;
   for (const session of evidence) {
     if (session.accountId && session.accountId !== accountId) continue;
     for (const row of session.adoptions || []) {
-      const named = String(row.args?.symbol || '').trim().toUpperCase();
-      if (!named || (named !== symbol && named !== root)) continue;
+      if (String(row.args?.symbol || '').trim().toUpperCase() !== symbol) continue;
+      const data = row.args?.market_data;
+      const cited = String((data && typeof data === 'object' ? (data.entry_order_id ?? data.entry_client_order_id) : '') || '').trim();
+      if (!cited || !entryIds.has(cited)) continue;
       const actor = actorOf(row, session);
       if (!actor || actor.agentId !== currentAgentId) continue;
       const at = Date.parse(row.timestamp);
-      if (Number.isFinite(entryAt) && Number.isFinite(at) && at < entryAt) continue;
+      if (!Number.isFinite(at) || at < entryAt) continue;
       const plan = String(row.args?.reasoning || '').trim();
       if (plan && (!best || at > best.at)) best = { at, plan };
     }
@@ -166,8 +171,9 @@ function latestAdoption({ evidence, accountId, symbol, currentAgentId, entryAt }
 // agent's plan) or opener-not-confirmed; an adopted lot shows the plan the current agent recorded.
 export function planContextText(plans, unmatchedSymbols = []) {
   const lines = plans.map(plan => {
-    if (plan.openerStatus === 'other' && plan.adopted) return `${plan.symbol} (opened by ${plan.opener.agentName}, adopted by you): ${plan.adoptionPlan}`;
-    if (plan.openerStatus === 'other') return `${plan.symbol} (opened by ${plan.opener.agentName}, another agent; history, not your plan): ${plan.thesis}`;
+    const entryTag = plan.entryBrokerId ? ` [entry order ${plan.entryBrokerId}]` : '';
+    if (plan.openerStatus === 'other' && plan.adopted) return `${plan.symbol}${entryTag} (opened by ${plan.opener.agentName}, adopted by you): ${plan.adoptionPlan}`;
+    if (plan.openerStatus === 'other') return `${plan.symbol}${entryTag} (opened by ${plan.opener.agentName}, another agent; history, not your plan): ${plan.thesis}`;
     if (plan.openerStatus === 'unknown') return `${plan.symbol} (opener not confirmed): ${plan.thesis}`;
     return `${plan.symbol}: ${plan.thesis}`;
   }).concat(unmatchedSymbols.map(symbol => `${symbol} (opener not confirmed; no matching entry receipt)`));
@@ -178,7 +184,7 @@ export function planContextText(plans, unmatchedSymbols = []) {
   return `\n\nORIGINAL EXIT PLAN CONTEXT (historical entry receipts; matched to current broker-held lots in this account/sandbox; not fresh authorization):\n${lines.join('\n')}\n`
     + (anyOwn ? 'Preserve the original rules and timeframe verbatim. ' : '')
     + (anyAdopted ? 'For a position you adopted, keep the plan you recorded when you adopted it. ' : '')
-    + (anyOther ? 'For a position another agent opened, follow the Trading Guidance rule for positions another agent opened: at your first regular-session heartbeat decide under your own Strategy Rules whether to adopt it (record ADOPT with your own plan) or exit it. ' : '')
+    + (anyOther ? 'For a position another agent opened, follow the Trading Guidance rule for positions another agent opened: at your first regular-session heartbeat decide under your own Strategy Rules whether to adopt it (record ADOPT with your own plan, the exact contract symbol and the entry order id shown above) or exit it. ' : '')
     + (anyUnknown ? 'For a position whose opener is not confirmed, reconcile and record the uncertainty; do not exit it only because its origin or receipt is missing, and your risk limits and exit rules still apply. ' : '')
     + 'Reconcile live broker positions/fills before acting; never treat historical prices or pending receipts as current market evidence.\n';
 }
@@ -247,7 +253,7 @@ export function recoverHeldPositionPlans({ accountId, sandboxId, positions, orde
       // Opener comes from the matched entry's persisted actor evidence (never from the current agent, client-ID naming or prose).
       const opener = actorOf(record, session);
       const openerStatus = !opener || !currentAgentId ? 'unknown' : opener.agentId === currentAgentId ? 'own' : 'other';
-      const adoption = openerStatus === 'other' ? latestAdoption({ evidence, accountId, symbol, currentAgentId, entryAt: Date.parse(record.timestamp) }) : null;
+      const adoption = openerStatus === 'other' ? latestAdoption({ evidence, accountId, symbol, entryBrokerId: String(liveBrokerId), entryClientId: String(liveClientId), currentAgentId, entryAt: Date.parse(record.timestamp) }) : null;
       out.push({ symbol, thesis: record.args.thesis.trim(), entryBrokerId: String(liveBrokerId), opener, openerStatus, adopted: Boolean(adoption), ...(adoption ? { adoptionPlan: adoption.plan } : {}) });
     }
   }

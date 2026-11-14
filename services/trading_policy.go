@@ -232,6 +232,9 @@ func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot Bro
 	if snapshot.LockErr != nil {
 		return fmt.Errorf("daily loss lock state is unavailable; opening order blocked")
 	}
+	if snapshot.Lock != nil && snapshot.Lock.Enabled && !snapshot.Lock.ClockAvailable {
+		return fmt.Errorf("broker session clock is unavailable; the daily loss session state cannot be verified; opening order blocked")
+	}
 	if snapshot.Lock != nil && snapshot.Lock.Locked {
 		return fmt.Errorf("daily loss limit reached earlier this session (%.2f%%); new openings are blocked until the next session", snapshot.Lock.LossPct)
 	}

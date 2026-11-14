@@ -335,7 +335,7 @@ func (s *AlpacaTradingService) brokerRiskSnapshot(ctx context.Context, excludeCl
 	}
 	snapshot := BrokerRiskSnapshot{Account: account, Positions: positions, PendingOrders: pendingOrders}
 	// The lock check never fails the snapshot: closing and reducing orders must stay possible. Opening paths fail closed on LockErr.
-	lock, lockErr := s.evaluateDailyLossLock(ctx, true, account)
+	lock, lockErr := s.evaluateDailyLossLock(ctx, true, account, false)
 	snapshot.Lock, snapshot.LockErr = lock, lockErr
 	return snapshot, nil
 }

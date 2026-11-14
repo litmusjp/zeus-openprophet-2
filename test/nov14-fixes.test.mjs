@@ -160,7 +160,7 @@ const entryRecord = (extra = {}) => ({
   result: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ broker_account_id: position.BrokerAccountID, paper_live: 'paper', tenant_id: position.TenantID, sandbox_id: position.SandboxID, order_id: liveOrder.ID, client_order_id: liveOrder.ClientOrderID, status: 'filled', filled_qty: 2, symbol: position.Symbol }) }] }),
   ...extra,
 });
-const adoptRecord = (extra = {}) => ({ kind: 'tool_call', eventType: 'tool_call', tool: 'log_decision', status: 'completed', timestamp: '2026-11-16T14:20:00.000Z', args: { action: 'ADOPT', symbol: 'DE', reasoning: 'Adopted: my own stop 660, target 33, exit Nov 24.' }, ...extra });
+const adoptRecord = (extra = {}) => ({ kind: 'tool_call', eventType: 'tool_call', tool: 'log_decision', status: 'completed', timestamp: '2026-11-16T14:20:00.000Z', args: { action: 'ADOPT', symbol: 'DE261204C00700000', market_data: { entry_order_id: 'order-de-1' }, reasoning: 'Adopted: my own stop 660, target 33, exit Nov 24.' }, ...extra });
 const session = (agentId, messages, adoptions = [], createdAt = '2026-11-11T14:00:00.000Z') => ({ id: `s-${agentId || 'none'}-${messages.length}${adoptions.length}`, accountId: '956ff9e4', createdAt, metadata: agentId ? { agentId, agentName: agentId === 'long-vol' ? 'Vega' : 'Guardian' } : {}, messages, adoptions });
 const recover = (evidence, currentAgentId) => recoverHeldPositionPlans({ accountId: '956ff9e4', sandboxId: position.SandboxID, positions: [position], orders: [liveOrder], ordersComplete: true, evidence, currentAgentId });
 
@@ -189,8 +189,59 @@ test('C2: an ADOPT decision by the current agent sticks; others and earlier ones
   assert.match(adopted.adoptionPlan, /my own stop 660/);
   assert.equal(recover([entry, session('mean-reversion', [], [adoptRecord()])], 'conservative')[0].adopted, false, 'another agent\'s ADOPT does not count');
   assert.equal(recover([entry, session('conservative', [], [adoptRecord({ timestamp: '2026-11-10T00:00:00.000Z' })])], 'conservative')[0].adopted, false, 'an adoption before the entry does not count');
-  const later = adoptRecord({ timestamp: '2026-11-17T14:20:00.000Z', args: { action: 'ADOPT', symbol: 'DE261204C00700000', reasoning: 'Newer plan.' } });
+  const later = adoptRecord({ timestamp: '2026-11-17T14:20:00.000Z', args: { action: 'ADOPT', symbol: 'DE261204C00700000', market_data: { entry_order_id: 'order-de-1' }, reasoning: 'Newer plan.' } });
   assert.match(recover([entry, session('conservative', [], [adoptRecord(), later])], 'conservative')[0].adoptionPlan, /Newer plan/);
+});
+
+// Two inherited contracts on the same underlying, both opened by Vega.
+const positionB = { ...position, Symbol: 'DE261218C00700000', AvgEntryPrice: 31.1 };
+const liveOrderB = { ...liveOrder, Symbol: positionB.Symbol, FilledAvgPrice: 31.1, ID: 'order-de-2', ClientOrderID: 'vega-de-2' };
+const entryRecordB = () => entryRecord({
+  timestamp: '2026-11-11T15:30:00.000Z',
+  args: { client_order_id: liveOrderB.ClientOrderID, symbol: positionB.Symbol, position_intent: 'buy_to_open', thesis: 'Buy DE December 18 calls: different plan.' },
+  result: JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ broker_account_id: position.BrokerAccountID, paper_live: 'paper', tenant_id: position.TenantID, sandbox_id: position.SandboxID, order_id: liveOrderB.ID, client_order_id: liveOrderB.ClientOrderID, status: 'filled', filled_qty: 2, symbol: positionB.Symbol }) }] }),
+});
+const recoverTwo = (evidence, currentAgentId = 'conservative') => recoverHeldPositionPlans({ accountId: '956ff9e4', sandboxId: position.SandboxID, positions: [position, positionB], orders: [liveOrder, liveOrderB], ordersComplete: true, evidence, currentAgentId });
+const byContract = plans => Object.fromEntries(plans.map(p => [p.symbol, p]));
+const adoption = (args, extra = {}) => adoptRecord({ args: { action: 'ADOPT', reasoning: 'Plan for this contract.', ...args }, ...extra });
+const twoEntries = session('long-vol', [entryRecord(), entryRecordB()]);
+const adopter = (...adoptions) => session('conservative', [], adoptions, '2026-11-16T14:00:00.000Z');
+
+test('C2: ADOPT binds to the exact contract and its opening entry, never to every contract on the underlying', () => {
+  // an underlying-only ADOPT counts for neither contract
+  let plans = byContract(recoverTwo([twoEntries, adopter(adoption({ symbol: 'DE', market_data: { entry_order_id: 'order-de-1' } }))]));
+  assert.equal(plans.DE261204C00700000.adopted, false);
+  assert.equal(plans.DE261218C00700000.adopted, false);
+  // an exact-contract ADOPT citing its own entry adopts only that contract
+  plans = byContract(recoverTwo([twoEntries, adopter(adoption({ symbol: 'DE261204C00700000', market_data: { entry_order_id: 'order-de-1' } }))]));
+  assert.equal(plans.DE261204C00700000.adopted, true);
+  assert.equal(plans.DE261218C00700000.adopted, false, 'the other contract on the same underlying is not adopted');
+  assert.equal(plans.DE261218C00700000.openerStatus, 'other');
+  // each contract keeps its own plan
+  plans = byContract(recoverTwo([twoEntries, adopter(
+    adoption({ symbol: 'DE261204C00700000', market_data: { entry_order_id: 'order-de-1' }, reasoning: 'Plan A.' }),
+    adoption({ symbol: 'DE261218C00700000', market_data: { entry_order_id: 'order-de-2' }, reasoning: 'Plan B.' }),
+  )]));
+  assert.match(plans.DE261204C00700000.adoptionPlan, /Plan A/);
+  assert.match(plans.DE261218C00700000.adoptionPlan, /Plan B/);
+});
+
+test('C2: an ADOPT must cite the matching entry id, with a valid timestamp after the entry', () => {
+  const adopted = (args, extra) => recover([session('long-vol', [entryRecord()]), adopter(adoption({ symbol: 'DE261204C00700000', ...args }, extra))], 'conservative')[0].adopted;
+  const good = { market_data: { entry_order_id: 'order-de-1' } };
+  assert.equal(adopted(good), true);
+  assert.equal(adopted({ market_data: { entry_client_order_id: 'vega-de-1' } }), true, 'the entry client order id is accepted too');
+  assert.equal(adopted({}), false, 'no cited entry id');
+  assert.equal(adopted({ market_data: {} }), false);
+  assert.equal(adopted({ market_data: 'order-de-1' }), false, 'market_data must be an object');
+  assert.equal(adopted({ market_data: { entry_order_id: 'order-de-2' } }), false, 'another contract\'s entry id');
+  assert.equal(adopted(good, { timestamp: undefined }), false, 'undated');
+  assert.equal(adopted(good, { timestamp: 'not a date' }), false, 'invalid date');
+  assert.equal(adopted(good, { timestamp: '2026-11-10T00:00:00.000Z' }), false, 'before the entry');
+  // an entry with an invalid timestamp cannot order anything
+  const badEntry = recover([session('long-vol', [entryRecord({ timestamp: 'garbage' })]), adopter(adoption({ symbol: 'DE261204C00700000', ...good }))], 'conservative')[0];
+  assert.equal(badEntry.openerStatus, 'other');
+  assert.equal(badEntry.adopted, false);
 });
 
 test('C2: plan context text for own, other, adopted and unknown lots', () => {
@@ -198,12 +249,12 @@ test('C2: plan context text for own, other, adopted and unknown lots', () => {
   const text = planContextText([own]);
   assert.match(text, /^\n\nORIGINAL EXIT PLAN CONTEXT \(historical entry receipts; matched to current broker-held lots in this account\/sandbox; not fresh authorization\):\nAAA: T1\nPreserve the original rules and timeframe verbatim\. Reconcile live broker positions\/fills before acting/);
   assert.doesNotMatch(text, /another agent|not confirmed/);
-  const other = planContextText([{ symbol: 'DE261204C00700000', thesis: 'T2', openerStatus: 'other', adopted: false, opener: { agentName: 'Vega' } }]);
-  assert.match(other, /DE261204C00700000 \(opened by Vega, another agent; history, not your plan\): T2/);
-  assert.match(other, /decide under your own Strategy Rules whether to adopt it \(record ADOPT with your own plan\) or exit it/);
+  const other = planContextText([{ symbol: 'DE261204C00700000', entryBrokerId: 'order-de-1', thesis: 'T2', openerStatus: 'other', adopted: false, opener: { agentName: 'Vega' } }]);
+  assert.match(other, /DE261204C00700000 \[entry order order-de-1\] \(opened by Vega, another agent; history, not your plan\): T2/);
+  assert.match(other, /decide under your own Strategy Rules whether to adopt it \(record ADOPT with your own plan, the exact contract symbol and the entry order id shown above\) or exit it/);
   assert.doesNotMatch(other, /Preserve the original rules/);
-  const adopted = planContextText([{ symbol: 'DE', thesis: 'T2', openerStatus: 'other', adopted: true, adoptionPlan: 'Plan B', opener: { agentName: 'Vega' } }]);
-  assert.match(adopted, /DE \(opened by Vega, adopted by you\): Plan B/);
+  const adopted = planContextText([{ symbol: 'DE', entryBrokerId: 'order-de-1', thesis: 'T2', openerStatus: 'other', adopted: true, adoptionPlan: 'Plan B', opener: { agentName: 'Vega' } }]);
+  assert.match(adopted, /DE \[entry order order-de-1\] \(opened by Vega, adopted by you\): Plan B/);
   assert.match(adopted, /keep the plan you recorded when you adopted it/);
   const unknown = planContextText([{ symbol: 'X', thesis: 'T3', openerStatus: 'unknown', adopted: false, opener: null }], ['LOW261204C00230000']);
   assert.match(unknown, /X \(opener not confirmed\): T3/);

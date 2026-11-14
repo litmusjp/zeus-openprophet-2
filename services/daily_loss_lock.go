@@ -12,9 +12,6 @@ import (
 	"prophet-trader/interfaces"
 )
 
-// dailyLossLockStaleAfter bounds how long a stored lock is trusted when the broker clock is unavailable.
-const dailyLossLockStaleAfter = 36 * time.Hour
-
 // DailyLossLock is the persisted record that the daily-loss limit was reached during a regular session.
 // While it matches the current broker session date, new openings are refused; closing and reducing orders,
 // research and reconciliation are never affected. It is cleared only by a new broker session date.
@@ -25,6 +22,9 @@ type DailyLossLock struct {
 	LatchedAt   time.Time `json:"latched_at"`
 	AccountID   string    `json:"account_id,omitempty"`
 	SandboxID   string    `json:"sandbox_id,omitempty"`
+	// Notified is set once the evaluate endpoint has reported the lock as new, so the operator message is sent once
+	// even when the lock was first latched by an order-policy check.
+	Notified bool `json:"notified"`
 }
 
 type dailyLossLockFile struct {
@@ -94,7 +94,12 @@ func NewYorkSessionDate(t time.Time) string {
 // evaluateDailyLossLock reads the stored lock and, when set is true and the regular session is open,
 // latches a new lock if the account's loss has reached the policy limit. A nil account is fetched only when needed.
 // It reuses the broker equity fields the policy already reads; there is no second percentage calculation.
-func (s *AlpacaTradingService) evaluateDailyLossLock(ctx context.Context, set bool, account *interfaces.Account) (*interfaces.DailyLossLockStatus, error) {
+//
+// When the policy is enabled but the broker clock is unavailable, ClockAvailable is false and the opening policy
+// refuses new openings (validateCaps); a stored lock is then reported as locked whatever its age, because elapsed
+// wall-clock time is never used as permission to forget it. A valid clock on a later session date clears it normally.
+// markNotified is set only by the evaluate endpoint: it reports a lock as new until the operator message went out.
+func (s *AlpacaTradingService) evaluateDailyLossLock(ctx context.Context, set bool, account *interfaces.Account, markNotified bool) (*interfaces.DailyLossLockStatus, error) {
 	if s.dailyLossLock == nil {
 		return &interfaces.DailyLossLockStatus{Enabled: false, ClockAvailable: true}, nil
 	}
@@ -114,51 +119,45 @@ func (s *AlpacaTradingService) evaluateDailyLossLock(ctx context.Context, set bo
 		sessionDate = NewYorkSessionDate(clock.Timestamp)
 		status.SessionDate = sessionDate
 	}
-	if lock != nil {
-		stored := lock.SessionDate == sessionDate
-		unknownClockRecent := !status.ClockAvailable && time.Since(lock.LatchedAt) < dailyLossLockStaleAfter
-		if stored || unknownClockRecent {
+	if lock != nil && (!status.ClockAvailable || lock.SessionDate == sessionDate) {
+		status.Locked = true
+		status.LossPct = lock.LossPct
+		status.LatchedAt = lock.LatchedAt
+		if status.SessionDate == "" {
+			status.SessionDate = lock.SessionDate
+		}
+	}
+	if !status.Locked && set && limit > 0 && status.ClockAvailable && clock.IsOpen {
+		if account == nil {
+			account, _ = s.GetAccount(ctx)
+		}
+		if account != nil && account.DailyPnLValid && account.DailyPnL < 0 && -account.DailyPnLPercent >= limit {
+			lock = &DailyLossLock{SessionDate: sessionDate, LossPct: -account.DailyPnLPercent, LimitPct: limit, LatchedAt: time.Now().UTC(), AccountID: s.expectedAccountID, SandboxID: s.expectedSandboxID}
+			if err := s.dailyLossLock.Save(*lock); err != nil {
+				return nil, fmt.Errorf("daily loss lock could not be saved: %w", err)
+			}
 			status.Locked = true
 			status.LossPct = lock.LossPct
 			status.LatchedAt = lock.LatchedAt
-			if status.SessionDate == "" {
-				status.SessionDate = lock.SessionDate
-			}
 		}
 	}
-	if status.Locked || !set || limit <= 0 || !status.ClockAvailable || !clock.IsOpen {
-		return status, nil
-	}
-	if account == nil {
-		account, err = s.GetAccount(ctx)
-		if err != nil {
-			return status, nil
+	if markNotified && status.Locked && lock != nil && !lock.Notified {
+		lock.Notified = true
+		if err := s.dailyLossLock.Save(*lock); err != nil {
+			return nil, fmt.Errorf("daily loss lock could not be saved: %w", err)
 		}
+		status.NewlyLocked = true
 	}
-	if account == nil || !account.DailyPnLValid || account.DailyPnL >= 0 {
-		return status, nil
-	}
-	lossPct := -account.DailyPnLPercent
-	if lossPct < limit {
-		return status, nil
-	}
-	record := DailyLossLock{SessionDate: sessionDate, LossPct: lossPct, LimitPct: limit, LatchedAt: time.Now().UTC(), AccountID: s.expectedAccountID, SandboxID: s.expectedSandboxID}
-	if err := s.dailyLossLock.Save(record); err != nil {
-		return nil, fmt.Errorf("daily loss lock could not be saved: %w", err)
-	}
-	status.Locked = true
-	status.NewlyLocked = true
-	status.LossPct = lossPct
-	status.LatchedAt = record.LatchedAt
 	return status, nil
 }
 
-// EvaluateDailyLossLock checks the limit during the open session and latches the lock when it is reached.
+// EvaluateDailyLossLock checks the limit during the open session, latches the lock when it is reached and reports
+// it as new once so the operator is told (the beat-end breaker calls this).
 func (s *AlpacaTradingService) EvaluateDailyLossLock(ctx context.Context) (*interfaces.DailyLossLockStatus, error) {
-	return s.evaluateDailyLossLock(ctx, true, nil)
+	return s.evaluateDailyLossLock(ctx, true, nil, true)
 }
 
 // DailyLossLockState reports the stored lock without ever setting one.
 func (s *AlpacaTradingService) DailyLossLockState(ctx context.Context) (*interfaces.DailyLossLockStatus, error) {
-	return s.evaluateDailyLossLock(ctx, false, nil)
+	return s.evaluateDailyLossLock(ctx, false, nil, false)
 }

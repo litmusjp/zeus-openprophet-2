@@ -184,6 +184,7 @@ func main() {
 		accountHash := sha256.Sum256([]byte(accountKey))
 		lockPath := filepath.Join(filepath.Dir(filepath.Dir(cfg.DatabasePath)), "account-"+hex.EncodeToString(accountHash[:])[:24]+".opening.lock")
 		tradingService.SetOpeningReservationLock(lockPath)
+		tradingService.SetDailyLossLockStore(services.NewDailyLossLockStore(filepath.Join(filepath.Dir(cfg.DatabasePath), "daily-loss-lock.json")))
 	}
 
 	// Create order controller
@@ -441,6 +442,8 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		api.GET("/orders", orderController.HandleGetOrders)
 		api.GET("/clock", orderController.HandleGetMarketClock)
 		api.GET("/calendar", orderController.HandleGetMarketCalendar)
+		api.POST("/risk/daily-loss/evaluate", orderController.HandleEvaluateDailyLossLock)
+		api.GET("/risk/session-lock", orderController.HandleGetSessionLock)
 
 		// Position and account endpoints
 		api.GET("/positions", orderController.HandleGetPositions)

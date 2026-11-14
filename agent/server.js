@@ -46,7 +46,6 @@ import {
 import { redactSecrets } from './redaction.js';
 import { formatSlackNotification } from './slack-format.js';
 import { createSlackDailyCollector, formatTradeSlackNotification, nextDailySummaryAt, runDailySummaryTick, sanitizeSlackFailure, shouldNotifyTradeLifecycle } from './slack-notifications.js';
-import { accountDailyPnl } from './daily-pnl.js';
 import { createAuthMiddleware, createBasicAuthMiddleware, createBasicOperatorOnlyMiddleware, resolveApiAuthToken } from './auth.js';
 import { createManagedGateProxy, registerManagedGateProxy, createManagedQualityProxy, registerManagedQualityProxy } from './managed-gate-proxy.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
@@ -472,6 +471,11 @@ function createHarnessForActiveSandbox() {
       ]);
       return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true };
     },
+    getSessionLockFn: async sandboxId => {
+      const client = getGoClientForSandbox(sandboxId);
+      if (!client) throw new Error('sandbox trading backend unavailable');
+      return (await client.get('/api/v1/risk/session-lock', { timeout: 4000 })).data;
+    },
     ensureBackendReadyFn: async sandboxId => {
       if (isActiveSandbox(sandboxId) && !goReady) {
         const selected = getSandbox(sandboxId);
@@ -730,13 +734,11 @@ function bindOperationalHooks(targetHarness) {
       if (!perms.maxDailyLoss || perms.maxDailyLoss <= 0) return;
       const client = getGoClientForSandbox(sandboxId);
       if (!client) return;
-      const { data: acc } = await client.get('/api/v1/account', { timeout: 3000 });
-      const daily = accountDailyPnl(acc);
-      if (!daily) return;
-      const dayLossPct = daily.percent;
-      if (dayLossPct <= -perms.maxDailyLoss && !targetHarness.state.paused) {
-        targetHarness.pause();
-        const msg = `CIRCUIT BREAKER: Daily loss ${dayLossPct.toFixed(2)}% exceeds -${perms.maxDailyLoss}% limit. Agent auto-paused.`;
+      // The Go order policy owns the daily-loss calculation and the per-session lock on new openings.
+      // This only asks it to evaluate; nothing here ever pauses an agent.
+      const { data: status } = await client.post('/api/v1/risk/daily-loss/evaluate', {}, { timeout: 5000 });
+      if (status?.newly_locked === true) {
+        const msg = `DAILY LOSS LIMIT: ${Number(status.loss_pct).toFixed(2)}% reached (limit ${status.limit_pct}%). New openings are blocked for the rest of the session; management and exits continue.`;
         broadcast('agent_log', { message: msg, level: 'error', sandboxId, timestamp: new Date().toISOString() });
         if (slackEnabled('errors', sandboxId)) notifySlack(`:rotating_light: ${msg}`, sandboxId);
       }

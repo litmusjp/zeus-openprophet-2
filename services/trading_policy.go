@@ -35,6 +35,9 @@ type BrokerRiskSnapshot struct {
 	Account       *interfaces.Account
 	Positions     []*interfaces.Position
 	PendingOrders []*interfaces.Order
+	// Lock is the persisted per-session daily-loss lock; LockErr is set when it could not be read.
+	Lock    *interfaces.DailyLossLockStatus
+	LockErr error
 }
 
 // IsRiskRelevantLocalOrder excludes application records that never crossed
@@ -225,6 +228,12 @@ func optionPrice(order *interfaces.OptionsOrder) (float64, error) {
 func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot BrokerRiskSnapshot, symbol string) error {
 	if !opening {
 		return nil
+	}
+	if snapshot.LockErr != nil {
+		return fmt.Errorf("daily loss lock state is unavailable; opening order blocked")
+	}
+	if snapshot.Lock != nil && snapshot.Lock.Locked {
+		return fmt.Errorf("daily loss limit reached earlier this session (%.2f%%); new openings are blocked until the next session", snapshot.Lock.LossPct)
 	}
 	if !isPositiveFinite(notional) {
 		return fmt.Errorf("order notional is unavailable or invalid")

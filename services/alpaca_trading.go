@@ -43,6 +43,7 @@ type AlpacaTradingService struct {
 	localOrderProvider      func(context.Context) ([]*interfaces.Order, error)
 	openingReservationMu    sync.Mutex
 	openingReservationPath  string
+	dailyLossLock           *DailyLossLockStore
 	submissionMarker        func(string) error
 	managedSubmissionMarker func(string, string, string) error
 	alphaDesk               *AlphaDeskClient
@@ -332,7 +333,11 @@ func (s *AlpacaTradingService) brokerRiskSnapshot(ctx context.Context, excludeCl
 		}
 		pendingOrders = filtered
 	}
-	return BrokerRiskSnapshot{Account: account, Positions: positions, PendingOrders: pendingOrders}, nil
+	snapshot := BrokerRiskSnapshot{Account: account, Positions: positions, PendingOrders: pendingOrders}
+	// The lock check never fails the snapshot: closing and reducing orders must stay possible. Opening paths fail closed on LockErr.
+	lock, lockErr := s.evaluateDailyLossLock(ctx, true, account)
+	snapshot.Lock, snapshot.LockErr = lock, lockErr
+	return snapshot, nil
 }
 
 func (s *AlpacaTradingService) openingCapsActive() bool {

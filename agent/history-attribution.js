@@ -14,7 +14,7 @@ export function isSubmittingOrderToolCall(record) {
   return SUBMITTING_TOOLS.has(tool);
 }
 
-function actorOf(message, session) {
+export function actorOf(message, session) {
   const snapshot = message?.actorSnapshot;
   const explicit = snapshot && (Object.hasOwn(snapshot, 'agentId') || Object.hasOwn(snapshot, 'agentName'));
   const value = explicit ? snapshot : session?.metadata;

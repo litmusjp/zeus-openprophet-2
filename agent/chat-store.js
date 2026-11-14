@@ -9,6 +9,13 @@ import { isSubmittingOrderToolCall } from './history-attribution.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
+function isAdoptionDecisionCall(row) {
+  if (row?.kind !== 'tool_call' && row?.eventType !== 'tool_call') return false;
+  if (String(row.tool || '').replace(/^prophet_/, '') !== 'log_decision') return false;
+  if (row.status && !['completed', 'success'].includes(String(row.status).toLowerCase())) return false;
+  return String(row.args?.action || '').toUpperCase() === 'ADOPT' && typeof row.args?.symbol === 'string' && row.args.symbol.trim() !== '';
+}
+
 export function isValidHistoryAccountId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value); }
 
 function hasStructuredFailure(record) {
@@ -295,6 +302,89 @@ export class ChatStore {
       if (err.code === 'ENOENT') return [];
       throw err;
     }
+  }
+
+  _orderEvidenceCacheFile(accountId) {
+    return path.join(this._chatDir(accountId), 'order-evidence-cache.json');
+  }
+
+  async _scanSessionOrderEvidence(accountId, sessionId) {
+    const input = fsSync.createReadStream(this._sessionFile(accountId, sessionId), { encoding: 'utf8' });
+    const lines = readline.createInterface({ input, crlfDelay: Infinity });
+    const messages = [];
+    const adoptions = [];
+    try {
+      for await (const line of lines) {
+        if (!line) continue;
+        try {
+          const row = JSON.parse(line);
+          if (isSubmittingOrderToolCall(row)) messages.push(row);
+          else if (isAdoptionDecisionCall(row)) adoptions.push(row);
+        } catch { /* Ignore malformed/truncated JSONL records. */ }
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+    return { messages, adoptions };
+  }
+
+  /**
+   * Order-submission and ADOPT-decision evidence for the last `sinceDays` calendar days.
+   * The session index keeps only the newest 100 sessions, but older session files stay on disk, so files the index no
+   * longer lists are read too (their actor comes from the per-message actorSnapshot, or from the metadata cached while
+   * the index still listed them). A per-session cache means a long window is scanned once; a session is rescanned only
+   * when its message count or last activity changed.
+   */
+  async listRecentOrderEvidence(accountId, { sinceDays = 30 } = {}) {
+    const cutoff = Date.now() - sinceDays * 86400000;
+    const indexed = await this.listSessions(accountId, Number.MAX_SAFE_INTEGER);
+    const known = new Set(indexed.map(session => session.id));
+    let cache = { sessions: {} };
+    try {
+      const parsed = JSON.parse(await fs.readFile(this._orderEvidenceCacheFile(accountId), 'utf8'));
+      if (parsed && typeof parsed.sessions === 'object' && parsed.sessions) cache = parsed;
+    } catch { /* no cache yet */ }
+    const candidates = indexed
+      .filter(session => { const created = Date.parse(session.createdAt); return Number.isFinite(created) ? created >= cutoff : true; })
+      .map(session => ({ session, signature: `${session.messageCount ?? 0}:${session.lastActiveAt || ''}` }));
+    let names = [];
+    try { names = await fs.readdir(this._chatDir(accountId)); } catch { /* no chat history yet */ }
+    for (const name of names) {
+      const match = /^session-(.+)\.jsonl$/.exec(name);
+      if (!match || known.has(match[1])) continue;
+      let stat;
+      try { stat = await fs.stat(path.join(this._chatDir(accountId), name)); } catch { continue; }
+      if (stat.mtimeMs < cutoff) continue;
+      const cached = cache.sessions[match[1]];
+      candidates.push({
+        session: { id: match[1], createdAt: cached?.createdAt || stat.birthtime.toISOString(), lastActiveAt: new Date(stat.mtimeMs).toISOString(), metadata: cached?.metadata || {} },
+        signature: `file:${stat.size}:${Math.round(stat.mtimeMs)}`,
+      });
+    }
+    const next = {};
+    const result = [];
+    let changed = Object.keys(cache.sessions).length !== candidates.length;
+    for (const { session, signature } of candidates) {
+      let entry = cache.sessions[session.id];
+      if (!entry || entry.signature !== signature) {
+        entry = { signature, createdAt: session.createdAt, metadata: session.metadata || {}, ...(await this._scanSessionOrderEvidence(accountId, session.id)) };
+        changed = true;
+      }
+      next[session.id] = entry;
+      result.push({ ...session, accountId, messages: entry.messages, adoptions: entry.adoptions });
+    }
+    if (changed) {
+      try {
+        await this._ensureDirs(accountId);
+        const target = this._orderEvidenceCacheFile(accountId);
+        await fs.writeFile(`${target}.tmp`, JSON.stringify({ sessions: next }));
+        await fs.rename(`${target}.tmp`, target);
+      } catch { /* the cache is an optimisation only */ }
+    }
+    return result;
   }
 
   async listOrderActorEvidence(accountId, { sessionLimit = 100, recordLimit = Infinity } = {}) {

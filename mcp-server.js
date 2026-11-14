@@ -1574,6 +1574,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'place_buy_order': {
+        if (typeof process !== 'undefined' && process.env.OPENPROPHET_OPENINGS_BLOCKED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'Daily loss limit reached earlier this session; new openings are blocked until the next session. Closing and reducing orders are not affected.', code: 'DAILY_LOSS_LIMIT_REACHED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
         // Transform quantity to qty for API compatibility
         const requestData = {
           symbol: args.symbol,
@@ -1603,6 +1604,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'place_managed_position': {
+        if (typeof process !== 'undefined' && process.env.OPENPROPHET_OPENINGS_BLOCKED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'Daily loss limit reached earlier this session; new openings are blocked until the next session. Closing and reducing orders are not affected.', code: 'DAILY_LOSS_LIMIT_REACHED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
         const { thesis, market_context, ...requestData } = args;
         const data = await callTradingBot('/positions/managed', 'POST', requestData);
         void autoStoreSetup({ ...args, ...data, opening_entry: true }, args.side || 'buy');
@@ -2162,6 +2164,7 @@ ${allNews.map((article, i) =>
         // Opening-range backstop. The minimum comes only from the harness environment (set for the news-catalyst
         // strategy from its own range length); it is never read from tool arguments. Reducing orders are unaffected.
         if (isOpeningIntent(args.position_intent)) {
+          if (typeof process !== 'undefined' && process.env.OPENPROPHET_OPENINGS_BLOCKED === '1') return { content: [{ type: 'text', text: JSON.stringify({ error: 'Daily loss limit reached earlier this session; new openings are blocked until the next session. Closing and reducing orders are not affected.', code: 'DAILY_LOSS_LIMIT_REACHED', category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
           const minOpening = parseMinOpeningMinutes(process.env.OPENPROPHET_MIN_OPENING_MINUTES);
           if (minOpening > 0) {
             let fields = sessionFields(null, null);
@@ -2288,6 +2291,29 @@ ${allNews.map((article, i) =>
 
       case 'get_daily_features': {
         const symbols = Array.isArray(args.symbols) ? args.symbols : [];
+        // The backend takes at most 25 symbols per request. Longer lists are split into batches of 25 and merged here,
+        // so an agent never meets that limit (Herald hit it 12 times on Nov 12-13).
+        const unique = [];
+        const seenSymbols = new Set();
+        for (const raw of symbols) {
+          const name = String(raw).trim();
+          if (name && !seenSymbols.has(name.toUpperCase())) { seenSymbols.add(name.toUpperCase()); unique.push(name); }
+        }
+        if (unique.length > 25) {
+          const parts = [];
+          for (let start = 0; start < unique.length; start += 25) {
+            const batch = unique.slice(start, start + 25);
+            try { parts.push({ batch, data: await callTradingBot(`/market/daily-features?symbols=${encodeURIComponent(batch.join(','))}`) }); }
+            catch (error) { parts.push({ batch, error: error.message }); }
+          }
+          const base = parts.find(part => Array.isArray(part.data?.features))?.data || {};
+          const features = [];
+          for (const part of parts) {
+            if (Array.isArray(part.data?.features)) features.push(...part.data.features);
+            else for (const symbol of part.batch) features.push({ symbol, error: `daily features batch failed: ${part.error || 'unreadable reply'}` });
+          }
+          return { content: [{ type: 'text', text: JSON.stringify({ ...base, features, count: features.length, batches: parts.length }) }] };
+        }
         const data = await callTradingBot(`/market/daily-features?symbols=${encodeURIComponent(symbols.join(','))}`);
         // Compact JSON on purpose: a 25-symbol reply with indentation can exceed the runtime's inline
         // output cap (about 50 KB), which sends the agent to a helper to read a spilled file.

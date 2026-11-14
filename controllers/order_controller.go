@@ -1197,6 +1197,42 @@ func (oc *OrderController) HandleGetMarketCalendar(c *gin.Context) {
 	c.JSON(200, gin.H{"clock": clock, "sessions": rows})
 }
 
+type dailyLossLockService interface {
+	EvaluateDailyLossLock(context.Context) (*interfaces.DailyLossLockStatus, error)
+	DailyLossLockState(context.Context) (*interfaces.DailyLossLockStatus, error)
+}
+
+// HandleEvaluateDailyLossLock checks the daily-loss limit during the open session and latches the per-session
+// lock on new openings when it is reached. It never pauses anything and never restricts reducing orders.
+func (oc *OrderController) HandleEvaluateDailyLossLock(c *gin.Context) {
+	service, ok := oc.tradingService.(dailyLossLockService)
+	if !ok {
+		c.JSON(503, gin.H{"error": "daily loss lock is unavailable"})
+		return
+	}
+	status, err := service.EvaluateDailyLossLock(c.Request.Context())
+	if err != nil {
+		c.JSON(503, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, status)
+}
+
+// HandleGetSessionLock reports the stored daily-loss lock without ever setting one.
+func (oc *OrderController) HandleGetSessionLock(c *gin.Context) {
+	service, ok := oc.tradingService.(dailyLossLockService)
+	if !ok {
+		c.JSON(503, gin.H{"error": "daily loss lock is unavailable"})
+		return
+	}
+	status, err := service.DailyLossLockState(c.Request.Context())
+	if err != nil {
+		c.JSON(503, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, status)
+}
+
 func orderIdentityKeys(order *interfaces.Order) []string {
 	if order == nil {
 		return nil

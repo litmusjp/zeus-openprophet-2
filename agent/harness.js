@@ -8,6 +8,7 @@ import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelV
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
+import { actorOf } from './history-attribution.js';
 import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, getTradingGuidanceForSandbox, strategyFamilyOf, openingGateMinutesFor } from './trading-guidance.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
@@ -141,9 +142,50 @@ function persistedOrderReceipt(value) {
   return {};
 }
 
+// The current agent's own latest ADOPT decision for a lot opened by another agent (recorded after the entry).
+function latestAdoption({ evidence, accountId, symbol, currentAgentId, entryAt }) {
+  const root = (symbol.match(/^[A-Z.]+/) || [''])[0];
+  let best = null;
+  for (const session of evidence) {
+    if (session.accountId && session.accountId !== accountId) continue;
+    for (const row of session.adoptions || []) {
+      const named = String(row.args?.symbol || '').trim().toUpperCase();
+      if (!named || (named !== symbol && named !== root)) continue;
+      const actor = actorOf(row, session);
+      if (!actor || actor.agentId !== currentAgentId) continue;
+      const at = Date.parse(row.timestamp);
+      if (Number.isFinite(entryAt) && Number.isFinite(at) && at < entryAt) continue;
+      const plan = String(row.args?.reasoning || '').trim();
+      if (plan && (!best || at > best.at)) best = { at, plan };
+    }
+  }
+  return best;
+}
+
+// Text for the ORIGINAL EXIT PLAN CONTEXT block. Each held lot is own, another agent's (history, not the current
+// agent's plan) or opener-not-confirmed; an adopted lot shows the plan the current agent recorded.
+export function planContextText(plans, unmatchedSymbols = []) {
+  const lines = plans.map(plan => {
+    if (plan.openerStatus === 'other' && plan.adopted) return `${plan.symbol} (opened by ${plan.opener.agentName}, adopted by you): ${plan.adoptionPlan}`;
+    if (plan.openerStatus === 'other') return `${plan.symbol} (opened by ${plan.opener.agentName}, another agent; history, not your plan): ${plan.thesis}`;
+    if (plan.openerStatus === 'unknown') return `${plan.symbol} (opener not confirmed): ${plan.thesis}`;
+    return `${plan.symbol}: ${plan.thesis}`;
+  }).concat(unmatchedSymbols.map(symbol => `${symbol} (opener not confirmed; no matching entry receipt)`));
+  const anyOwn = plans.some(plan => plan.openerStatus === 'own');
+  const anyAdopted = plans.some(plan => plan.openerStatus === 'other' && plan.adopted);
+  const anyOther = plans.some(plan => plan.openerStatus === 'other' && !plan.adopted);
+  const anyUnknown = plans.some(plan => plan.openerStatus === 'unknown') || unmatchedSymbols.length > 0;
+  return `\n\nORIGINAL EXIT PLAN CONTEXT (historical entry receipts; matched to current broker-held lots in this account/sandbox; not fresh authorization):\n${lines.join('\n')}\n`
+    + (anyOwn ? 'Preserve the original rules and timeframe verbatim. ' : '')
+    + (anyAdopted ? 'For a position you adopted, keep the plan you recorded when you adopted it. ' : '')
+    + (anyOther ? 'For a position another agent opened, follow the Trading Guidance rule for positions another agent opened: at your first regular-session heartbeat decide under your own Strategy Rules whether to adopt it (record ADOPT with your own plan) or exit it. ' : '')
+    + (anyUnknown ? 'For a position whose opener is not confirmed, reconcile and record the uncertainty; do not exit it only because its origin or receipt is missing, and your risk limits and exit rules still apply. ' : '')
+    + 'Reconcile live broker positions/fills before acting; never treat historical prices or pending receipts as current market evidence.\n';
+}
+
 // Join a persisted entry thesis to a currently held, broker-confirmed lot.
 // Ambiguous or incompletely scoped evidence intentionally produces no plan.
-export function recoverHeldPositionPlans({ accountId, sandboxId, positions, orders, ordersComplete = false, evidence }) {
+export function recoverHeldPositionPlans({ accountId, sandboxId, positions, orders, ordersComplete = false, evidence, currentAgentId = '' }) {
   if (ordersComplete !== true) return [];
   const held = listPayload(positions).filter(position =>
     String(field(position, 'SandboxID', 'sandbox_id') || '') === sandboxId
@@ -152,7 +194,7 @@ export function recoverHeldPositionPlans({ accountId, sandboxId, positions, orde
     && Number(field(position, 'Qty', 'qty', 'quantity')) > 0
     && String(field(position, 'Side', 'side') || '').toLowerCase() === 'long');
   const liveOrders = listPayload(orders);
-  const records = evidence.flatMap(session => (session.accountId && session.accountId !== accountId ? [] : session.messages || []));
+  const records = evidence.flatMap(session => (session.accountId && session.accountId !== accountId ? [] : (session.messages || []).map(record => ({ record, session }))));
   const out = [];
   for (const position of held) {
     const symbol = String(field(position, 'Symbol', 'symbol') || '').toUpperCase();
@@ -178,7 +220,7 @@ export function recoverHeldPositionPlans({ accountId, sandboxId, positions, orde
     const liveBrokerId = brokerOrderId(liveEntry);
     const liveClientId = clientOrderId(liveEntry);
     if (!liveBrokerId || !liveClientId) continue;
-    const matches = records.filter(record => {
+    const matches = records.filter(({ record }) => {
       if (record.accountId && record.accountId !== accountId || record.resultTruncated || record.error) return false;
       if (!['completed', 'success'].includes(String(record.status || '').toLowerCase())) return false;
       if (String(record.tool || '').replace(/^prophet_/, '') !== 'place_options_order') return false;
@@ -200,7 +242,14 @@ export function recoverHeldPositionPlans({ accountId, sandboxId, positions, orde
         && String(argsClientId) === String(receiptClientId)
         && typeof args.thesis === 'string' && args.thesis.trim());
     });
-    if (matches.length === 1) out.push({ symbol, thesis: matches[0].args.thesis.trim(), entryBrokerId: String(liveBrokerId) });
+    if (matches.length === 1) {
+      const { record, session } = matches[0];
+      // Opener comes from the matched entry's persisted actor evidence (never from the current agent, client-ID naming or prose).
+      const opener = actorOf(record, session);
+      const openerStatus = !opener || !currentAgentId ? 'unknown' : opener.agentId === currentAgentId ? 'own' : 'other';
+      const adoption = openerStatus === 'other' ? latestAdoption({ evidence, accountId, symbol, currentAgentId, entryAt: Date.parse(record.timestamp) }) : null;
+      out.push({ symbol, thesis: record.args.thesis.trim(), entryBrokerId: String(liveBrokerId), opener, openerStatus, adopted: Boolean(adoption), ...(adoption ? { adoptionPlan: adoption.plan } : {}) });
+    }
   }
   return out;
 }
@@ -627,6 +676,7 @@ export class AgentHarness {
       getPermissions = () => ({}),
       getManagedReviewPolicy = async () => { throw new Error('managed policy unavailable'); },
       getHeldPositionSnapshot = async () => { throw new Error('position snapshot unavailable'); },
+      getSessionLockFn = async () => null,
       chatStore = null,
       opencodeEnv = {},
       spawnFn = spawn,
@@ -652,6 +702,8 @@ export class AgentHarness {
     this.getPermissions = getPermissions;
     this.getManagedReviewPolicy = getManagedReviewPolicy;
     this.getHeldPositionSnapshot = getHeldPositionSnapshot;
+    this.getSessionLock = getSessionLockFn;
+    this._openingsBlocked = null;
     this.getMarketCalendar = getMarketCalendarFn;
     this.ensureBackendReady = ensureBackendReadyFn;
     this.now = nowFn;
@@ -737,7 +789,26 @@ export class AgentHarness {
     return `\n\n## Prior Session Context (persisted)\nThese are compact excerpts from earlier sessions for this same account. Use them for continuity, but verify current prices, positions, and order status with live tools. Do not repeat old orders merely because they appear here.\n${JSON.stringify(sessions)}\n## End Prior Session Context\n`;
   }
 
+  // Plan context plus the daily-loss lock line. The lock itself is enforced by the Go order policy; this only tells the agent.
   async _heldPositionPlanContext(accountId = this.state.activeAccountId) {
+    const plans = await this._heldPositionPlanContextCore(accountId);
+    return plans + await this._sessionLockContext();
+  }
+
+  async _sessionLockContext() {
+    this._openingsBlocked = null;
+    try {
+      const lock = await this.getSessionLock(this.sandboxId);
+      if (lock?.locked === true) {
+        const pct = Number(lock.loss_pct);
+        this._openingsBlocked = { sessionDate: lock.session_date || null, lossPct: Number.isFinite(pct) ? pct : null };
+        return `\n\nDAILY LOSS LIMIT REACHED${Number.isFinite(pct) ? ` (${pct.toFixed(1)}%)` : ''}: OP2 refuses new openings until the next session. Keep managing and exiting your positions under your rules.\n`;
+      }
+    } catch { /* the Go order policy still enforces the lock */ }
+    return '';
+  }
+
+  async _heldPositionPlanContextCore(accountId = this.state.activeAccountId) {
     this.state.positionPlanContext = { status: 'unavailable', accountId: accountId || null, sandboxId: this.sandboxId || null, matches: [] };
     if (!accountId || !this.sandboxId || !this.chatStore) {
       this.state.positionPlanContext.status = 'missing';
@@ -748,7 +819,9 @@ export class AgentHarness {
       const sandboxId = this.sandboxId;
       const agentId = this.state.activeAgentId;
       const snapshot = await this.getHeldPositionSnapshot(this.sandboxId);
-      const evidence = await this.chatStore.listOrderActorEvidence(accountId);
+      const evidence = typeof this.chatStore.listRecentOrderEvidence === 'function'
+        ? await this.chatStore.listRecentOrderEvidence(accountId, { sinceDays: 30 })
+        : await this.chatStore.listOrderActorEvidence(accountId);
       if (sessionEpoch !== this._sessionEpoch || accountId !== this.state.activeAccountId
         || sandboxId !== this.sandboxId || sandboxId !== this.state.activeSandboxId
         || agentId !== this.state.activeAgentId) {
@@ -780,15 +853,19 @@ export class AgentHarness {
         orders: snapshot?.orders,
         ordersComplete: snapshot?.ordersComplete === true,
         evidence,
+        currentAgentId: agentId,
       });
       if (!plans.length) {
         const positions = listPayload(snapshot?.positions).filter(position => Number(field(position, 'Qty', 'qty', 'quantity')) > 0
           && String(field(position, 'Side', 'side') || '').toLowerCase() === 'long');
         this.state.positionPlanContext.status = positions.length === 0 && snapshot?.ordersComplete === true ? 'flat' : 'missing';
-        return `\n\nORIGINAL EXIT PLAN CONTEXT: ${this.state.positionPlanContext.status === 'flat' ? 'no held option lot in this account/sandbox.' : 'no unique original entry receipt and thesis matched a currently held broker-confirmed options lot in this account/sandbox.'} Do not invent or apply a historical plan. Reconcile current holdings and use only a verifiable current thesis.\n`;
+        return `\n\nORIGINAL EXIT PLAN CONTEXT: ${this.state.positionPlanContext.status === 'flat' ? 'no held option lot in this account/sandbox.' : 'no unique original entry receipt and thesis matched a currently held broker-confirmed options lot in this account/sandbox.'} Do not invent or apply a historical plan. Reconcile current holdings and use only a verifiable current thesis.${this.state.positionPlanContext.status === 'missing' ? ' The opener of these positions is not confirmed: reconcile and record the uncertainty; do not exit a position only because its origin or receipt is missing, and your risk limits and exit rules still apply.' : ''}\n`;
       }
       this.state.positionPlanContext = { status: 'matched', accountId, sandboxId: this.sandboxId, matches: plans };
-      return `\n\nORIGINAL EXIT PLAN CONTEXT (historical entry receipts; matched to current broker-held lots in this account/sandbox; not fresh authorization):\n${plans.map(plan => `${plan.symbol}: ${plan.thesis}`).join('\n')}\nPreserve the original rules and timeframe verbatim. Reconcile live broker positions/fills before acting; never treat historical prices or pending receipts as current market evidence.\n`;
+      const heldSymbols = listPayload(snapshot?.positions).filter(position => Number(field(position, 'Qty', 'qty', 'quantity')) > 0
+        && String(field(position, 'Side', 'side') || '').toLowerCase() === 'long').map(position => String(field(position, 'Symbol', 'symbol') || '').toUpperCase());
+      const unmatched = heldSymbols.filter(held => held && !plans.some(plan => plan.symbol === held));
+      return planContextText(plans, unmatched);
     } catch {
       this.state.positionPlanContext = { status: 'unavailable', accountId, sandboxId: this.sandboxId, matches: [] };
       return '\n\nORIGINAL EXIT PLAN CONTEXT: unavailable because live positions/orders or retained account-scoped receipt history could not be verified. Do not infer a prior plan or invent levels.\n';
@@ -1325,7 +1402,7 @@ ${userBlock}`;
     if (!perms.allow0DTE) permLines.push('0DTE options are NOT allowed.');
     if (perms.maxPositionPct) permLines.push(`Max position size: ${perms.maxPositionPct}% of portfolio.`);
     if (perms.maxDeployedPct) permLines.push(`Max deployed capital: ${perms.maxDeployedPct}%.`);
-    if (perms.maxDailyLoss) permLines.push(`Max daily loss: ${perms.maxDailyLoss}% — auto-pause if exceeded.`);
+    if (perms.maxDailyLoss) permLines.push(`Max daily loss: ${perms.maxDailyLoss}% — when it is exceeded, OP2 refuses new openings for the rest of that session; keep managing and exiting positions under your rules.`);
     if (perms.maxOpenPositions) permLines.push(`Max open positions: ${perms.maxOpenPositions}.`);
     if (perms.maxOrderValue > 0) permLines.push(`Max single order value: $${perms.maxOrderValue}.`);
     if (perms.blockedTools?.length) permLines.push(`Blocked tools (do NOT call): ${perms.blockedTools.join(', ')}.`);
@@ -1591,6 +1668,8 @@ ${userBlock}`;
           OPENPROPHET_SANDBOX_ID: this.sandboxId || '',
           OPENPROPHET_ACCOUNT_ID: this.state.activeAccountId || this.accountId || '',
           OPENPROPHET_HEARTBEAT_INTERVALS_FORCED: this.isHeartbeatIntervalsForced() ? 'true' : 'false',
+          // Extra MCP guard; the Go order policy is the authority. Always set so nothing inherited can change it.
+          OPENPROPHET_OPENINGS_BLOCKED: this._openingsBlocked ? '1' : '',
           // Always set (empty means no gate) so nothing inherited from the parent environment can switch it on or off.
           OPENPROPHET_MIN_OPENING_MINUTES: openingGateMinutesFor(this._agentConfig?.strategyId, getTradingGuidanceForSandbox(this.sandboxId)),
         },

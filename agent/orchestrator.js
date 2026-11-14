@@ -204,6 +204,11 @@ export class AgentOrchestrator extends EventEmitter {
         ]);
         return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true };
       },
+      getSessionLockFn: async id => {
+        const client = this.getSandboxRuntime(id)?.goAxios;
+        if (!client) throw new Error('sandbox trading backend unavailable');
+        return (await client.get('/api/v1/risk/session-lock', { timeout: 4000 })).data;
+      },
       ensureBackendReadyFn: async id => {
         let current = this.getSandboxRuntime(id);
         if (!current?.goReady && !(await this.startGoBackend(id))) throw new Error('Trading backend readiness/reconciliation unavailable');

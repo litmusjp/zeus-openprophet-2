@@ -252,7 +252,7 @@ type OptionsOrder struct {
 	TimeInForce             string // "day", "gtc"
 	LimitPrice              *float64
 	SubmissionAttempted     bool
-	CapRevision             *int64 `json:"-"` // the entry spread cap revision confirmed for this opening (checked by the order guards)
+	CapRevision             *int64                           `json:"-"` // the entry spread cap revision confirmed for this opening (checked by the order guards)
 	MarketScannerFeatures   any                              `json:"-"`
 	AlphaDeskAssessment     *AlphaDeskAssessment             `json:"-"`
 	SignalQualityAssessment *AlphaDeskAssessment             `json:"-"`

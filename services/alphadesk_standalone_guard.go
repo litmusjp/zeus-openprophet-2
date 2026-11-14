@@ -361,6 +361,7 @@ func (c *AlphaDeskClient) standaloneFresh(ctx context.Context, doc map[string]an
 	}
 	return nil
 }
+
 // standalonePolicyReading is the current policy state: the policy version, the managed gate and the evaluator
 // version (score profile). A receipt is usable only while all of them still match.
 type standalonePolicyReading struct {

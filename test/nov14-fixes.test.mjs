@@ -350,7 +350,9 @@ test('guidance: the new lines appear once per agent, only the news-event line is
   assert.doesNotMatch(renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: 'default' }), /Same news event/);
 });
 
-test('guidance: the spread cap follows the saved setting (8% trial) and a tighter strategy cap still wins', () => {
+test('guidance: the spread cap is OP2\'s (follows the saved setting); the agent adds no second veto and a tighter strategy cap still wins', () => {
   const text = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, maxOptionSpreadPct: 8 }, { strategyId: 'default' });
-  assert.match(text, /Skip a contract whose spread is above 8% unless your Strategy Rules set a tighter cap, in which case the tighter cap applies/);
+  assert.match(text, /The platform's spread cap is applied by OP2 itself: it refuses an opening whose spread, measured on AlphaDesk's own quote of that exact contract, is above 8%/);
+  assert.match(text, /do not add a second spread veto of your own\. A tighter spread cap written in your Strategy Rules still applies, and a stricter rule of your strategy always wins/);
+  assert.doesNotMatch(text, /Skip a contract whose spread is above/);
 });

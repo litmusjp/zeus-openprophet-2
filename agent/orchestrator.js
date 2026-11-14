@@ -26,6 +26,7 @@ import { shouldShowGoLogLine, createGoLogLineBuffer } from './go-log-filter.js';
 import { resolveApiAuthToken } from './auth.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
 import { getTradingGuidanceForSandbox } from './trading-guidance.js';
+import { CAP_CONTROL_ENV } from './option-spread-cap.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -103,6 +104,8 @@ export function buildGoBackendEnv(baseEnv, { account, sandboxId, processNonce, p
     OPENPROPHET_SANDBOX_ID: sandboxId,
     OPENPROPHET_ACCOUNT_ID: account.id,
     OPENPROPHET_PROCESS_NONCE: processNonce,
+    // Only the Go backend receives the credential that changes the entry spread cap.
+    [CAP_CONTROL_ENV]: baseEnv?.[CAP_CONTROL_ENV] || '',
     ...tradingPolicyEnvironment(permissions),
     // OP2's entry spread cap is the sandbox's saved maxOptionSpreadPct; the backend also receives later changes through its risk endpoint.
     ...(optionSpreadCapPct !== undefined && optionSpreadCapPct !== null && Number.isFinite(Number(optionSpreadCapPct)) ? { OPENPROPHET_MAX_OPTION_SPREAD_PCT: String(optionSpreadCapPct) } : {}),
@@ -122,6 +125,7 @@ export class AgentOrchestrator extends EventEmitter {
     this.agentUrl = options.agentUrl || process.env.AGENT_URL || 'http://localhost:3737';
     this.tradingBotBasePort = Number(options.tradingBotBasePort || process.env.TRADING_BOT_PORT || 4534);
     this.chatStore = options.chatStore || null;
+    this.ensureOptionSpreadCap = options.ensureOptionSpreadCap || (async () => ({ state: 'no_backend' }));
     this.runtimes = new Map();
     this.portOwners = new Map();
     this._binaryReady = false;
@@ -212,6 +216,7 @@ export class AgentOrchestrator extends EventEmitter {
         if (!client) throw new Error('sandbox trading backend unavailable');
         return (await client.get('/api/v1/risk/session-lock', { timeout: 4000 })).data;
       },
+      ensureOptionSpreadCapFn: id => this.ensureOptionSpreadCap(id),
       ensureBackendReadyFn: async id => {
         let current = this.getSandboxRuntime(id);
         if (!current?.goReady && !(await this.startGoBackend(id))) throw new Error('Trading backend readiness/reconciliation unavailable');

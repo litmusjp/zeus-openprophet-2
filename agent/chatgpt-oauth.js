@@ -35,7 +35,8 @@ export function nativeOpenCodeEnv({ dataDir = path.resolve('data'), env = proces
 export function stripOperatorSecrets(env = process.env) {
   const childEnv = { ...env };
   for (const key of Object.keys(childEnv)) {
-    if (key.startsWith('ALPHADESK_CONTROL_') || ['BASIC_AUTH_USER', 'BASIC_AUTH_PASS'].includes(key)) delete childEnv[key];
+    // OPENPROPHET_CAP_CONTROL_* is the server-only credential that changes OP2's entry spread cap; no agent or MCP child gets it.
+    if (key.startsWith('ALPHADESK_CONTROL_') || key.startsWith('OPENPROPHET_CAP_CONTROL_') || ['BASIC_AUTH_USER', 'BASIC_AUTH_PASS'].includes(key)) delete childEnv[key];
   }
   return childEnv;
 }

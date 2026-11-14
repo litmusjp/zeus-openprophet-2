@@ -422,12 +422,6 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 					return
 				}
 			}
-			if c.Request.Method == http.MethodPut && c.Request.URL.Path == "/api/v1/risk/option-spread-cap" {
-				if config.AppConfig.OperatorToken == "" || c.GetHeader("X-OpenProphet-Operator-Token") != config.AppConfig.OperatorToken {
-					c.AbortWithStatusJSON(403, gin.H{"error": "operator authorization is required to change the option spread cap"})
-					return
-				}
-			}
 			if c.Request.Method == http.MethodDelete && (strings.HasPrefix(c.Request.URL.Path, "/api/v1/orders/") || strings.HasPrefix(c.Request.URL.Path, "/api/v1/positions/managed/")) {
 				if config.AppConfig.OperatorToken == "" || c.GetHeader("X-OpenProphet-Operator-Token") != config.AppConfig.OperatorToken {
 					c.AbortWithStatusJSON(403, gin.H{"error": "operator authorization is required for cancellation"})

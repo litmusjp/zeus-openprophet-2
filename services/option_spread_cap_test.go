@@ -141,7 +141,7 @@ func TestOptionSpreadCapUsesTheWorstLegOfAVertical(t *testing.T) {
 func v2Quotes(rows ...[3]string) []any {
 	out := make([]any, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, map[string]any{"symbol": row[0], "bid": row[1], "ask": row[2], "bid_size": "10", "ask_size": "10"})
+		out = append(out, map[string]any{"symbol": row[0], "side": "buy", "bid": row[1], "ask": row[2], "bid_size": "10", "ask_size": "10"})
 	}
 	return out
 }
@@ -308,7 +308,7 @@ func newEvaluatorServer(t *testing.T, f *evaluatorFixture, now time.Time) (*http
 		quotes := []any{}
 		for i, leg := range echoed.Legs {
 			checks = append(checks, map[string]any{"code": "leg_" + string(rune('0'+i)) + "_quote", "passed": true, "actual": f.ratio, "threshold": "0.50"})
-			quotes = append(quotes, map[string]any{"symbol": leg.Symbol, "bid": "9.55", "ask": "10.45"})
+			quotes = append(quotes, map[string]any{"symbol": leg.Symbol, "side": leg.Side, "bid": "9.55", "ask": "10.45"})
 		}
 		receipt["checks"] = checks
 		if f.receiptProfile == scoreProfileV2 {

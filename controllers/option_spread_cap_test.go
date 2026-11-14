@@ -25,6 +25,7 @@ func (s *spreadCapStub) OptionSpreadCapPct() (float64, bool, bool) {
 
 func TestOptionSpreadCapEndpointsReportAndApplyTheCap(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	t.Setenv("OPENPROPHET_CAP_CONTROL_TOKEN", "cap-token")
 	stub := &spreadCapStub{service: &services.AlpacaTradingService{}}
 	controller := NewOrderController(stub, nil, nil)
 	router := gin.New()
@@ -34,6 +35,9 @@ func TestOptionSpreadCapEndpointsReportAndApplyTheCap(t *testing.T) {
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(method, "/risk/option-spread-cap", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
+		if method == http.MethodPut {
+			request.Header.Set("X-OpenProphet-Cap-Control-Token", "cap-token")
+		}
 		router.ServeHTTP(response, request)
 		return response
 	}
@@ -58,13 +62,16 @@ func TestOptionSpreadCapEndpointsReportAndApplyTheCap(t *testing.T) {
 
 func TestOptionSpreadCapEndpointsUnavailableWithoutSupport(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	t.Setenv("OPENPROPHET_CAP_CONTROL_TOKEN", "cap-token")
 	controller := NewOrderController(&standaloneOnlyService{}, nil, nil)
 	router := gin.New()
 	router.GET("/risk/option-spread-cap", controller.HandleGetOptionSpreadCap)
 	router.PUT("/risk/option-spread-cap", controller.HandlePutOptionSpreadCap)
 	for _, method := range []string{http.MethodGet, http.MethodPut} {
 		response := httptest.NewRecorder()
-		router.ServeHTTP(response, httptest.NewRequest(method, "/risk/option-spread-cap", strings.NewReader(`{"pct":10}`)))
+		request := httptest.NewRequest(method, "/risk/option-spread-cap", strings.NewReader(`{"pct":10}`))
+		request.Header.Set("X-OpenProphet-Cap-Control-Token", "cap-token")
+		router.ServeHTTP(response, request)
 		if response.Code != 503 {
 			t.Fatalf("%s without support returned %d", method, response.Code)
 		}

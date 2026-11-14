@@ -254,6 +254,11 @@ func (c *AlphaDeskClient) cachedStandalone(ctx context.Context, identity models.
 				if !receiptManaged || !sameManagedApprovalGate(receiptGate, *currentGate) || version != doc["policy_version"] || evaluator != receiptEvaluator(doc) {
 					found = false
 				} else {
+					// Explicit exception, limited to this branch: the legacy non-managed contract on the read-only assessment
+					// path (verifyPolicy false, no managed gate required). It never reads the policy, so it cannot compare the
+					// policy version or the evaluator version; a cached receipt here lives only until its own expiry (at most
+					// the 2-minute evidence window). It is unreachable when RequireManagedApprovalGate is set (the live
+					// configuration) and it is never used by an order guard: every opening path calls with verifyPolicy true.
 					if err := c.standaloneFresh(ctx, doc); err != nil {
 						return nil, err
 					}

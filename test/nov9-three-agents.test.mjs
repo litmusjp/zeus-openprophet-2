@@ -78,7 +78,10 @@ test('Prophet follows its live rules (mainly calls, scalp or swing) and its expi
 test('every family gets the spread cap, pricing and AlphaDesk-record lines; a stricter strategy rule wins', () => {
   for (const strategyId of ['catalyst-news', 'long-premium-volatility', 'default', 'equity-momentum', 'etf-mean-reversion', 'capital-preservation']) {
     const text = guidance(strategyId, { maxOptionSpreadPct: 7 });
-    assert.match(text, /Skip a contract whose spread is above 7% unless your Strategy Rules set a tighter cap, in which case the tighter cap applies; a stricter rule of your strategy always wins/, strategyId);
+    // The platform cap is OP2's (on AlphaDesk's quote); the agent adds no second veto, and a tighter strategy cap still wins.
+    assert.match(text, /The platform's spread cap is applied by OP2 itself: it refuses an opening whose spread, measured on AlphaDesk's own quote of that exact contract, is above 7%/, strategyId);
+    assert.match(text, /do not add a second spread veto of your own\. A tighter spread cap written in your Strategy Rules still applies, and a stricter rule of your strategy always wins/, strategyId);
+    assert.doesNotMatch(text, /Skip a contract whose spread is above/, strategyId);
     assert.match(text, /Start an entry limit at the mid and never above the ask/, strategyId);
     assert.match(text, /marketable limit at or just below the current bid/, strategyId);
     assert.match(text, /a price is never changed to obtain a PASS/, strategyId);

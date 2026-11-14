@@ -690,6 +690,7 @@ export class AgentHarness {
       getCurrentPhaseFn = getCurrentPhase,
       getMarketCalendarFn = async () => { throw new Error('market calendar unavailable'); },
       ensureBackendReadyFn = async () => true,
+      ensureOptionSpreadCapFn = async () => ({ state: 'no_backend' }),
       nowFn = () => Date.now(),
       setTimeoutFn = (fn, ms) => setTimeout(fn, ms),
       clearTimeoutFn = timer => clearTimeout(timer),
@@ -712,6 +713,7 @@ export class AgentHarness {
     this._openingsBlocked = null;
     this.getMarketCalendar = getMarketCalendarFn;
     this.ensureBackendReady = ensureBackendReadyFn;
+    this.ensureOptionSpreadCap = ensureOptionSpreadCapFn;
     this.now = nowFn;
     this.setTimeoutFn = setTimeoutFn;
     this.clearTimeoutFn = clearTimeoutFn;
@@ -1414,6 +1416,8 @@ ${userBlock}`;
     if (perms.blockedTools?.length) permLines.push(`Blocked tools (do NOT call): ${perms.blockedTools.join(', ')}.`);
     const permStr = permLines.length ? '\n\nGUARDRAILS:\n' + permLines.join('\n') : '';
 
+    // The backend must enforce the saved entry spread cap; correct any difference before the agent acts (never blocks the beat).
+    try { await this.ensureOptionSpreadCap(this.sandboxId); } catch { /* the backend keeps enforcing its current value */ }
     let managedReviewInput = '';
     const alphaDesk = this._resolveSandbox()?.plugins?.alphadesk;
     if (alphaDesk?.enabled && alphaDesk?.requireManagedApprovalGate === true) {

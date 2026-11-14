@@ -37,16 +37,17 @@ function fakeClient(reply, record = []) {
   return { put: async (url, body, options) => { record.push({ url, body, options }); if (reply instanceof Error) throw reply; return { data: reply }; } };
 }
 
-test('O1: a running backend receives the cap with the operator token; the answer must match', async () => {
+test('O1: a running backend receives the cap with the server-only credential; the answer must match', async () => {
   const calls = [];
-  assert.equal(await pushOptionSpreadCap(fakeClient({ effective_pct: 10, configured: true, invalid: false }, calls), 10, { operatorToken: 'op-token' }), true);
+  assert.equal(await pushOptionSpreadCap(fakeClient({ effective_pct: 10, configured: true, invalid: false }, calls), 10, { token: 'cap-token' }), true);
   assert.equal(calls[0].url, '/api/v1/risk/option-spread-cap');
   assert.deepEqual(calls[0].body, { pct: 10 });
-  assert.equal(calls[0].options.headers['X-OpenProphet-Operator-Token'], 'op-token');
+  assert.equal(calls[0].options.headers['X-OpenProphet-Cap-Control-Token'], 'cap-token');
+  assert.equal('X-OpenProphet-Operator-Token' in calls[0].options.headers, false, 'the operator token is not used for cap changes');
   assert.equal(await pushOptionSpreadCap(null, 10), false, 'no running backend: nothing to push');
-  await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 8, invalid: false }), 10), /different option spread cap/);
-  await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 10, invalid: true }), 10), /different option spread cap/);
-  await assert.rejects(() => pushOptionSpreadCap(fakeClient(Object.assign(new Error('boom'), { response: { data: { error: 'operator authorization is required' } } })), 10), /did not accept.*operator authorization is required/);
+  await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 8, configured: true, invalid: false }), 10), /different option spread cap/);
+  await assert.rejects(() => pushOptionSpreadCap(fakeClient({ effective_pct: 10, configured: true, invalid: true }), 10), /different option spread cap/);
+  await assert.rejects(() => pushOptionSpreadCap(fakeClient(Object.assign(new Error('boom'), { response: { data: { error: 'cap control authorization is required' } } })), 10), /did not accept.*cap control authorization is required/);
 });
 
 test('O1: a save whose push fails changes nothing; a save whose write fails is rolled back by the handler', async () => {
@@ -73,10 +74,10 @@ test('O1: a save whose push fails changes nothing; a save whose write fails is r
     if (previousDir === undefined) delete process.env.OPENPROPHET_DATA_DIR; else process.env.OPENPROPHET_DATA_DIR = previousDir;
     await fs.rm(dir, { recursive: true, force: true });
   }
-  // The save handler pushes before it persists and puts the old value back if the write fails afterwards.
+  // The save handler goes through the one controller that pushes, confirms and re-checks (tested below).
   const handler = serverSource.slice(serverSource.indexOf("app.put('/api/trading-guidance'"), serverSource.indexOf('// ── Plugins'));
-  assert.match(handler, /beforePersist: async next => \{ pushed = await pushOptionSpreadCap\(runningGoClientForSandbox\(sandboxId\), next\.maxOptionSpreadPct\)/);
-  assert.match(handler, /if \(pushed\) await pushOptionSpreadCap\(runningGoClientForSandbox\(sandboxId\), previous\.maxOptionSpreadPct\)/);
+  assert.match(handler, /await optionSpreadCap\.save\(sandboxId, patch\)/);
+  assert.doesNotMatch(handler, /setTradingGuidanceForSandbox\(/);
 });
 
 // ── O2 / O4: the agent sees the live thresholds, and only what is known ───────────────────────────
@@ -140,7 +141,9 @@ test('O4: the heartbeat block carries the facts read in that beat, and none when
 test('O4: the saved prompt states the cap rule once, carries no symbols or dates, and keeps the existing rules', () => {
   for (const strategyId of ['catalyst-news', 'default', 'etf-mean-reversion', 'equity-momentum', 'capital-preservation', 'long-premium-volatility']) {
     const text = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, maxOptionSpreadPct: 10 }, { strategyId });
-    assert.equal((text.match(/OP2 also refuses an opening whose spread, measured on AlphaDesk's own quote of that exact contract, is above 10%/g) || []).length, 1, strategyId);
+    assert.equal((text.match(/it refuses an opening whose spread, measured on AlphaDesk's own quote of that exact contract, is above 10%/g) || []).length, 1, strategyId);
+    assert.doesNotMatch(text, /Skip a contract whose spread is above/, 'the old generic agent-quote veto is gone');
+    assert.doesNotMatch(text, /the spread setting/, 'no separate spread-setting veto either');
     assert.match(text, /Do not add your own cost, edge or spread-versus-target veto/);
     assert.match(text, /record them too \(information only\)/);
     assert.doesNotMatch(text, /\b20\d\d-\d\d-\d\d\b|\bNov(ember)? \d/);
@@ -152,5 +155,5 @@ test('O4: the saved prompt states the cap rule once, carries no symbols or dates
 });
 
 test('O4: the spread line follows the saved setting', () => {
-  assert.match(renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, maxOptionSpreadPct: 7.5 }, { strategyId: 'default' }), /Skip a contract whose spread is above 7\.5%.*is above 7\.5%; that quote can be wider/s);
+  assert.match(renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, maxOptionSpreadPct: 7.5 }, { strategyId: 'default' }), /spread cap is applied by OP2 itself.*is above 7\.5%\. That quote can be wider/s);
 });

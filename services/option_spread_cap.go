@@ -7,7 +7,6 @@ import (
 	"math"
 	"os"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -151,28 +150,30 @@ func optionSpreadRatios(p StandaloneTradeProposal, doc map[string]any) ([]decima
 
 var spreadAgreement = decimal.New(1, -9)
 
-// verifyOptionQuoteBlock cross-checks a v2 receipt's explicit per-leg quote block against the check values:
-// the symbols are exactly the proposal's contracts and the recomputed spreads equal the check values.
+// verifyOptionQuoteBlock cross-checks a v2 receipt's explicit per-leg quote block against the check values, leg by leg:
+// quote N is the quote behind the leg_N_quote check, so its recomputed spread must equal that check's value (never a
+// comparison of sorted values). Its symbol and side must be one of the proposal's legs, each used exactly once.
 func verifyOptionQuoteBlock(p StandaloneTradeProposal, doc map[string]any, ratios []decimal.Decimal) error {
 	quotes, ok := doc["option_quotes"].([]any)
-	if !ok || len(quotes) != len(p.Legs) {
+	if !ok || len(quotes) != len(p.Legs) || len(ratios) != len(quotes) {
 		return errors.New("the receipt has no per-leg quote block")
 	}
-	want := map[string]bool{}
+	want := map[string]string{}
 	for _, leg := range p.Legs {
-		want[leg.Symbol] = true
+		want[leg.Symbol] = leg.Side
 	}
-	recomputed := make([]decimal.Decimal, 0, len(quotes))
 	got := map[string]bool{}
 	two := decimal.NewFromInt(2)
-	for _, entry := range quotes {
+	for index, entry := range quotes {
 		quote, ok := entry.(map[string]any)
 		if !ok {
 			return errors.New("the per-leg quote block is malformed")
 		}
 		symbol, _ := quote["symbol"].(string)
-		if !want[symbol] || got[symbol] {
-			return errors.New("the per-leg quote block does not match the proposed contracts")
+		side, _ := quote["side"].(string)
+		wantSide, known := want[symbol]
+		if !known || got[symbol] || side != wantSide {
+			return errors.New("the per-leg quote block does not match the proposed contracts and sides")
 		}
 		got[symbol] = true
 		bid, bidErr := spreadDecimal(quote["bid"])
@@ -180,17 +181,9 @@ func verifyOptionQuoteBlock(p StandaloneTradeProposal, doc map[string]any, ratio
 		if bidErr != nil || askErr != nil || !bid.IsPositive() || ask.LessThan(bid) {
 			return errors.New("the per-leg quote block has a crossed or non-positive quote")
 		}
-		recomputed = append(recomputed, ask.Sub(bid).Div(ask.Add(bid).Div(two)))
-	}
-	byValue := func(values []decimal.Decimal) []decimal.Decimal {
-		out := append([]decimal.Decimal(nil), values...)
-		sort.Slice(out, func(i, j int) bool { return out[i].LessThan(out[j]) })
-		return out
-	}
-	a, b := byValue(recomputed), byValue(ratios)
-	for i := range a {
-		if a[i].Sub(b[i]).Abs().GreaterThan(spreadAgreement) {
-			return errors.New("the per-leg quote block disagrees with the receipt's quote checks")
+		recomputed := ask.Sub(bid).Div(ask.Add(bid).Div(two))
+		if recomputed.Sub(ratios[index]).Abs().GreaterThan(spreadAgreement) {
+			return fmt.Errorf("quote %d disagrees with the receipt's leg_%d_quote check", index, index)
 		}
 	}
 	return nil

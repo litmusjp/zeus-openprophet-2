@@ -1238,8 +1238,20 @@ func (oc *OrderController) HandleGetOptionSpreadCap(c *gin.Context) {
 	c.JSON(200, optionSpreadCapBody(pct, configured, invalid))
 }
 
-// HandlePutOptionSpreadCap applies the sandbox's saved cap to the running backend (operator token required).
+// capControlAuthorized reports whether the request carries the server-only credential that changes the cap. It is a
+// separate credential (not the operator or API token) that the agent and MCP child processes never receive.
+func capControlAuthorized(provided string) bool {
+	configured := strings.TrimSpace(os.Getenv("OPENPROPHET_CAP_CONTROL_TOKEN"))
+	provided = strings.TrimSpace(provided)
+	return configured != "" && provided != "" && subtle.ConstantTimeCompare([]byte(configured), []byte(provided)) == 1
+}
+
+// HandlePutOptionSpreadCap applies the sandbox's saved cap to the running backend (server-only credential required).
 func (oc *OrderController) HandlePutOptionSpreadCap(c *gin.Context) {
+	if !capControlAuthorized(c.GetHeader("X-OpenProphet-Cap-Control-Token")) {
+		c.JSON(403, gin.H{"error": "cap control authorization is required to change the option spread cap"})
+		return
+	}
 	service, ok := oc.tradingService.(optionSpreadCapService)
 	if !ok {
 		c.JSON(503, gin.H{"error": "option spread cap is unavailable"})

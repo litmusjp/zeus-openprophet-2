@@ -17,7 +17,7 @@ import Database from 'better-sqlite3';
 import { AgentHarness, buildSystemPrompt, getOpenCodeEnvCredential, hasOpenCodeCredential } from './harness.js';
 import { registerPrecisionResolutionRoute } from './precision-resolution-route.js';
 import { DEFAULT_TRADING_GUIDANCE, loadTradingGuidance, getTradingGuidanceForSandbox, setTradingGuidanceForSandbox } from './trading-guidance.js';
-import { pushOptionSpreadCap } from './option-spread-cap.js';
+import { createOptionSpreadCapController } from './option-spread-cap.js';
 import { buildTradeLedger } from './trade-ledger.js';
 import { buildScorecard } from './trade-scorecard.js';
 import * as secretsStore from './secrets-store.js';
@@ -73,6 +73,11 @@ if (EXECUTION_START_ENABLED && !process.env.TRADING_BOT_TOKEN) {
 
 if (EXECUTION_START_ENABLED && !process.env.TRADING_BOT_OPERATOR_TOKEN) {
   process.env.TRADING_BOT_OPERATOR_TOKEN = randomBytes(32).toString('hex');
+}
+// Server-only credential for changing OP2's entry spread cap on a running backend. Unlike the operator token it is
+// stripped from every agent and MCP child environment (stripOperatorSecrets) and only the Go backend receives it.
+if (EXECUTION_START_ENABLED && !process.env.OPENPROPHET_CAP_CONTROL_TOKEN) {
+  process.env.OPENPROPHET_CAP_CONTROL_TOKEN = randomBytes(32).toString('hex');
 }
 
 const PORT = EXECUTION_START_ENABLED ? (process.env.AGENT_PORT || 3737) : 3737;
@@ -434,6 +439,13 @@ const orchestrator = new AgentOrchestrator({
   chatStore,
   agentUrl: `http://localhost:${PORT}`,
   tradingBotBasePort: Number(TRADING_BOT_PORT),
+  ensureOptionSpreadCap: sandboxId => optionSpreadCap.reconcile(sandboxId),
+});
+// One owner for every change of the saved spread cap (see option-spread-cap.js). The closures are read at call time.
+const optionSpreadCap = createOptionSpreadCapController({
+  getClient: sandboxId => runningGoClientForSandbox(sandboxId),
+  getSaved: sandboxId => getTradingGuidanceForSandbox(sandboxId).maxOptionSpreadPct,
+  save: (sandboxId, patch, hooks) => setTradingGuidanceForSandbox(sandboxId, patch, hooks),
 });
 let harness = createHarnessForActiveSandbox();
 const sseClients = new Set();
@@ -478,6 +490,7 @@ function createHarnessForActiveSandbox() {
       if (!client) throw new Error('sandbox trading backend unavailable');
       return (await client.get('/api/v1/risk/session-lock', { timeout: 4000 })).data;
     },
+    ensureOptionSpreadCapFn: sandboxId => optionSpreadCap.reconcile(sandboxId),
     ensureBackendReadyFn: async sandboxId => {
       if (isActiveSandbox(sandboxId) && !goReady) {
         const selected = getSandbox(sandboxId);
@@ -1974,20 +1987,10 @@ app.put('/api/trading-guidance', operatorAuthMiddleware, async (req, res) => {
   try {
     const { sandboxId, ...patch } = req.body || {};
     if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
-    const previous = getTradingGuidanceForSandbox(sandboxId);
-    let pushed = false;
-    let guidance;
-    try {
-      guidance = await setTradingGuidanceForSandbox(sandboxId, patch, {
-        beforePersist: async next => { pushed = await pushOptionSpreadCap(runningGoClientForSandbox(sandboxId), next.maxOptionSpreadPct); },
-      });
-    } catch (error) {
-      // The save failed after the backend accepted the new cap: put the saved value back so the two cannot differ.
-      if (pushed) await pushOptionSpreadCap(runningGoClientForSandbox(sandboxId), previous.maxOptionSpreadPct).catch(() => {});
-      throw error;
-    }
+    // Saves run one at a time; the cap reaches a running backend before it is stored and is confirmed by reading it back.
+    const { guidance, capSync } = await optionSpreadCap.save(sandboxId, patch);
     await refreshHarnessConfigForSandbox(sandboxId, { resetSession: true });
-    res.json({ ok: true, sandboxId, guidance });
+    res.json({ ok: true, sandboxId, guidance, capSync });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 

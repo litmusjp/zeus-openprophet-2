@@ -308,10 +308,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_orders',
-        description: 'Get orders with an optional status filter. Defaults to all so planned intents and unresolved states remain visible.',
+        description: 'Get orders with an optional status filter. Defaults to all so planned intents and unresolved states remain visible. Pass symbol to check one contract or stock.',
         inputSchema: {
           type: 'object',
           properties: {
+            symbol: {
+              type: 'string',
+              description: 'Optional. An exact OCC option symbol or an underlying ticker; returns only the orders of that symbol (an option matches by its OCC symbol or by its underlying). Use it whenever you check one contract or one stock, for example a fill, an exit or an unfilled opening; the unfiltered history can be too long to read in full. A filtered empty list does not prove the broker history is complete; read broker_state and complete.',
+            },
             status: {
               type: 'string',
               description: 'Defaults to all. active/open aggregate broker working statuses (new, accepted, pending and partial); planned intents and uncertain submissions remain separate application records. complete=false means broker history is unavailable.',
@@ -958,7 +962,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place one single-leg OCC options order (openings: 1-10 contracts). Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. Reconcile option positions first; long entries use buy_to_open and reductions use sell_to_close on the same OCC contract for the broker-reconciled remaining quantity. Supply exact-contract timestamped bid/ask and sizes from the chain; missing evidence blocks entry. Managed-position tools are equities-only and do not provide broker-held option stops or OCO. AlphaDesk assessment applies only to new exposure; FAIL/UNAVAILABLE blocks openings but not reducing a long. Backend controls still apply. Accepted/new/open acknowledge only; positive filled quantity confirms execution.',
+        description: 'Place one single-leg OCC options order (openings: 1-10 contracts). Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. Reconcile option positions first; long entries use buy_to_open and reductions use sell_to_close on the same OCC contract for the broker-reconciled remaining quantity. Supply exact-contract timestamped bid/ask and sizes from the chain; missing evidence blocks entry. Managed-position tools are equities-only and do not provide broker-held option stops or OCO. AlphaDesk assessment applies only to new exposure; FAIL/UNAVAILABLE blocks openings but not reducing a long. Backend controls still apply. Accepted/new/open acknowledge only; positive filled quantity confirms execution. A PASS response also carries assessment_signal_score, assessment_catalyst_confidence (the 0-1 confidence itself, not its weighted share of the score), assessment_observed_spread_pct (AlphaDesk worst-leg spread) and assessment_score_profile; record these values instead of looking them up. They describe the assessment, not a fill.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1527,6 +1531,20 @@ async function enforcePermissions(toolName, args) {
   checkPermissions(toolName, args, perms);
 }
 
+// get_orders symbol filter. undefined or null means no filter (the answer is then exactly what it always was). Anything else must be
+// a ticker or an OCC option symbol, or the call is refused before the backend is asked. The symbol is only compared in memory; it is
+// never part of a backend URL.
+function parseOrdersSymbolFilter(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') return null;
+  const symbol = value.trim().toUpperCase();
+  return /^[A-Z0-9.]{1,21}$/.test(symbol) ? symbol : null;
+}
+function filterOrdersBySymbol(orders, symbol) {
+  return orders.filter(order => String(order.symbol || order.Symbol || '').toUpperCase() === symbol
+    || String(order.underlying || order.Underlying || '').toUpperCase() === symbol);
+}
+
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
@@ -1565,6 +1583,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_orders': {
         const status = args?.status || 'all';
+        const symbolFilter = parseOrdersSymbolFilter(args?.symbol);
+        if (symbolFilter === null) return { content: [{ type: 'text', text: JSON.stringify({ error: 'symbol must be an OCC option symbol or a ticker; omit it for all orders', category: 'local_validation' }) }], isError: true };
         const data = await callTradingBot(`/orders?status=${encodeURIComponent(status)}`);
         const rawOrders = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : []);
         const orders = rawOrders.map((order) => ({
@@ -1577,7 +1597,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           position_intent: order.position_intent || order.PositionIntent,
           next_eligible_at: order.next_eligible_at || order.NextEligibleAt,
         }));
-        const response = Array.isArray(data) ? orders : { ...data, orders };
+        const shown = symbolFilter ? filterOrdersBySymbol(orders, symbolFilter) : orders;
+        const response = symbolFilter
+          ? (Array.isArray(data) ? shown : { ...data, orders: shown, symbol_filter: symbolFilter })
+          : (Array.isArray(data) ? orders : { ...data, orders });
         return {
           content: [
             {

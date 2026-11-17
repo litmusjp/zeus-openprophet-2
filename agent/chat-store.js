@@ -76,8 +76,102 @@ function isReconciledPositionNotFound(record, records) {
     const orders = Array.isArray(body?.orders) ? body.orders : Array.isArray(body) ? body : [];
     return orders.some(order => String(order?.Symbol || order?.symbol || '') === symbol
       && String(order?.Status || order?.status || '').toLowerCase() === 'filled'
-      && Number(order?.FilledQty ?? order?.filled_qty ?? 0) > 0);
+      && Number(order?.FilledQty ?? order?.filled_qty ?? 0) > 0
+      // A filled opening is not a close: only a closing fill can confirm that a position is gone.
+      && ['sell_to_close', 'buy_to_close'].includes(String(order?.PositionIntent || order?.position_intent || '').toLowerCase()));
   });
+}
+// An acknowledged opening order that has not filled yet has no position, so the single-position lookup answers 404. That is
+// only a warning when the activity itself proves it: the one acknowledgement of the contract (order id and client order id,
+// still working, filled quantity exactly 0) and a later, successful, complete broker read showing the same order, identified by
+// both ids, still working with exactly 0 filled. Missing, unreadable, incomplete or contradictory evidence leaves the 404 an
+// essential failure, and a missing or invalid quantity never counts as zero.
+const UNFILLED_OPENING_WARNING = 'get_options_position not found while opening order unfilled';
+const WORKING_ORDER_STATUSES = new Set(['new', 'accepted', 'pending_new']);
+const isToolCallRecord = record => !!record && (record.kind === 'tool_call' || record.eventType === 'tool_call');
+const toolNameOf = record => String(record?.tool || '').replace(/^prophet_/, '');
+const trimmedText = value => (typeof value === 'string' ? value.trim() : '');
+const isExactZero = value => typeof value === 'number' && Number.isFinite(value) && value === 0;
+function isPositionNotFoundRecord(record) {
+  if (!isToolCallRecord(record) || toolNameOf(record) !== 'get_options_position') return false;
+  const text = String(record.error || '') + ' ' + (typeof record.result === 'string' ? record.result : JSON.stringify(record.result || ''));
+  return /no open position found|options position not found|"status":\s*404|\b404\b/i.test(text);
+}
+function ordersFromRead(record) {
+  const body = parseJsonish(record.result);
+  const orders = Array.isArray(body?.orders) ? body.orders : Array.isArray(body) ? body : null;
+  return { body, orders };
+}
+function isUnfilledOpeningPositionNotFound(record, records) {
+  if (!isPositionNotFoundRecord(record)) return false;
+  const symbol = trimmedText(record.args?.symbol ?? record.input?.symbol);
+  const at = records.indexOf(record);
+  if (!symbol || at < 0) return false;
+  // Exactly one acknowledgement of this contract before the lookup: a guarded buy_to_open that did not fail.
+  const placed = records.slice(0, at).filter(r => isToolCallRecord(r) && toolNameOf(r) === 'place_options_order' && trimmedText(r.args?.symbol) === symbol);
+  if (placed.length !== 1) return false;
+  const [ack] = placed;
+  if (hasStructuredFailure(ack) || String(ack.args?.position_intent || '').toLowerCase() !== 'buy_to_open') return false;
+  const ackBody = parseJsonish(ack.result);
+  if (!ackBody || typeof ackBody !== 'object' || Array.isArray(ackBody)) return false;
+  const orderId = trimmedText(ackBody.order_id);
+  const clientId = trimmedText(ackBody.client_order_id);
+  if (!orderId || !clientId) return false;
+  if (ackBody.symbol !== undefined && trimmedText(ackBody.symbol) !== symbol) return false;
+  if (!WORKING_ORDER_STATUSES.has(String(ackBody.status || '').toLowerCase())) return false;
+  if (!isExactZero(ackBody.filled_qty)) return false;
+  const sameOrder = orders => orders.filter(order => trimmedText(order?.ID ?? order?.order_id) === orderId);
+  const consistent = order => trimmedText(order.ClientOrderID ?? order.client_order_id) === clientId
+    && trimmedText(order.Symbol ?? order.symbol) === symbol
+    && ['', 'buy_to_open'].includes(String(order.PositionIntent ?? order.position_intent ?? '').toLowerCase())
+    && isExactZero(order.FilledQty ?? order.filled_qty)
+    && !['filled', 'partially_filled'].includes(String(order.Status ?? order.status ?? '').toLowerCase());
+  let confirmed = false;
+  const reads = records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_orders' && !hasStructuredFailure(r));
+  for (const read of reads) {
+    const { body, orders } = ordersFromRead(read);
+    if (!orders) continue;
+    const mine = sameOrder(orders);
+    // A contradiction anywhere in the activity (another client id, a fill, a bad quantity) rules the warning out.
+    if (mine.some(order => !consistent(order))) return false;
+    const complete = body && !Array.isArray(body) && body.broker_state === 'available' && body.complete === true;
+    const working = mine.length === 1 && WORKING_ORDER_STATUSES.has(String(mine[0].Status ?? mine[0].status ?? '').toLowerCase());
+    if (records.indexOf(read) > at && complete && working) confirmed = true;
+  }
+  if (!confirmed) return false;
+  // The contract must not be held, and every successful positions read must be readable.
+  for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_options_positions' && !hasStructuredFailure(r))) {
+    const rows = parseJsonish(read.result);
+    if (!Array.isArray(rows)) return false;
+    if (rows.some(row => trimmedText(row?.Symbol ?? row?.symbol) === symbol)) return false;
+  }
+  return true;
+}
+// get_options_chain answers HTTP 503 with category market_closed before the regular session. Only that exact structured answer (read
+// through the same content/result/data wrappers as hasStructuredFailure, never from prose) is a warning; every other chain failure
+// (authentication, transport, provider, contradictory) stays essential.
+const MARKET_CLOSED_CHAIN_WARNING = 'get_options_chain unavailable while market closed';
+function marketClosedPayload(value, depth = 0) {
+  if (depth > 5 || value == null) return null;
+  if (typeof value === 'string') {
+    try { return marketClosedPayload(JSON.parse(value), depth + 1); } catch { return null; }
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) { const found = marketClosedPayload(item, depth + 1); if (found) return found; }
+    return null;
+  }
+  if (typeof value !== 'object') return null;
+  if (value.category === 'market_closed') return value;
+  return marketClosedPayload(value.content, depth + 1) || marketClosedPayload(value.result, depth + 1)
+    || marketClosedPayload(value.data, depth + 1) || marketClosedPayload(value.text, depth + 1);
+}
+function isMarketClosedChain(record) {
+  if (!isToolCallRecord(record) || toolNameOf(record) !== 'get_options_chain' || record.isError === true) return false;
+  const payload = marketClosedPayload(record.result);
+  if (!payload || payload.isError === true) return false;
+  // An error field on the record itself may not tell a different story.
+  if (record.error != null && record.error !== '' && !marketClosedPayload(record.error)) return false;
+  return true;
 }
 // A guarded opening order that AlphaDesk refused (FAIL or UNAVAILABLE) before anything reached the broker, or that
 // OP2 refused locally for its contract limit, is a normal outcome, not a failed heartbeat. Anything else about an
@@ -103,23 +197,31 @@ function classifyFailures(records) {
     if (optional) warnings.push(optional);
     else if (isReconciledPositionNotFound(record, records)) warnings.push(POSITION_NOT_FOUND_WARNING);
     else if (adPreBrokerBlock(record)) warnings.push(adPreBrokerBlock(record));
+    else if (isUnfilledOpeningPositionNotFound(record, records)) warnings.push(UNFILLED_OPENING_WARNING);
+    else if (isMarketClosedChain(record)) warnings.push(MARKET_CLOSED_CHAIN_WARNING);
     else essential.push(record);
   }
   return { essential, warnings: [...new Set(warnings)] };
 }
+const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, MARKET_CLOSED_CHAIN_WARNING]);
 function activityOutcome({ recovery, status, essential, warnings }) {
-  // An optional-research warning is appended to whichever outcome applies, so it is never hidden by a
-  // recorded order status or a recovery. An essential failure keeps the plain Failed outcome.
+  // A warning is appended to a Recorded or Recovered outcome, so it is never hidden by a recorded order status or a recovery.
+  // An essential failure that was not recovered is never hidden: a recorded status or a recovery marker does not erase it, and
+  // warnings are not shown next to a Failed outcome. Only a heartbeat_failure is recovered by a heartbeat_recovery of the same
+  // activity; any other essential failure (a cancel, an account read, an order) stays a failure.
   const adBlocks = warnings.filter(w => w.startsWith(AD_BLOCK_PREFIX));
-  const unavailable = warnings.filter(w => w !== POSITION_NOT_FOUND_WARNING && !w.startsWith(AD_BLOCK_PREFIX));
+  const unavailable = warnings.filter(w => !EXACT_WARNINGS.has(w) && !w.startsWith(AD_BLOCK_PREFIX));
   const parts = [];
   if (unavailable.length) parts.push(`${unavailable.join(', ')} unavailable`);
   if (adBlocks.length) parts.push(adBlocks.join('; '));
   if (warnings.includes(POSITION_NOT_FOUND_WARNING)) parts.push(POSITION_NOT_FOUND_WARNING);
+  if (warnings.includes(UNFILLED_OPENING_WARNING)) parts.push(UNFILLED_OPENING_WARNING);
+  if (warnings.includes(MARKET_CLOSED_CHAIN_WARNING)) parts.push(MARKET_CLOSED_CHAIN_WARNING);
   const warning = parts.length ? ` (warning: ${parts.join('; ')})` : '';
+  const residual = recovery ? essential.filter(record => record?.kind !== 'heartbeat_failure') : essential;
+  if (residual.length) return status ? `Failed (recorded: ${status})` : 'Failed';
   if (recovery) return `Recovered${warning}`;
   if (status) return `Recorded: ${status}${warning}`;
-  if (essential.length) return 'Failed';
   return `Recorded${warning}`;
 }
 

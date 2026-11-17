@@ -158,6 +158,10 @@ type OrderResult struct {
 	AssessmentExpiresAt          *time.Time                  `json:"assessment_expires_at,omitempty"`
 	AssessmentEvidenceObservedAt *time.Time                  `json:"assessment_evidence_observed_at,omitempty"`
 	AssessmentBlockingReasons    []string                    `json:"assessment_blocking_reasons,omitempty"`
+	AssessmentSignalScore        *float64                    `json:"assessment_signal_score,omitempty"`
+	AssessmentCatalystConfidence *float64                    `json:"assessment_catalyst_confidence,omitempty"`
+	AssessmentObservedSpreadPct  *float64                    `json:"assessment_observed_spread_pct,omitempty"`
+	AssessmentScoreProfile       string                      `json:"assessment_score_profile,omitempty"`
 }
 
 type AssessmentCheckDiagnostic struct {

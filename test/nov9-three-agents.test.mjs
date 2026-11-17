@@ -199,7 +199,8 @@ async function activityFor(records) {
 const SYMBOL = 'BA261204C00170000';
 const notFound = { kind: 'tool_call', tool: 'get_options_position', args: { symbol: SYMBOL }, status: 'error', error: 'Single options-position lookup: no open position found; options position not found: ' + SYMBOL + ' status 404' };
 const emptyPositions = { kind: 'tool_call', tool: 'get_options_positions', status: 'completed', result: '[]' };
-const filledOrder = { kind: 'tool_call', tool: 'get_orders', status: 'completed', result: JSON.stringify({ orders: [{ Symbol: SYMBOL, Status: 'filled', FilledQty: 6 }] }) };
+// Nov 17: a confirmed close needs a closing fill, so the fixture carries the intent real exit orders carry (PositionIntent sell_to_close).
+const filledOrder = { kind: 'tool_call', tool: 'get_orders', status: 'completed', result: JSON.stringify({ orders: [{ Symbol: SYMBOL, Status: 'filled', FilledQty: 6, PositionIntent: 'sell_to_close' }] }) };
 
 test('a position 404 is only a warning when the same activity reconciled zero positions and a filled order', async () => {
   const warned = await activityFor([emptyPositions, filledOrder, notFound]);
@@ -210,6 +211,8 @@ test('a position 404 is only a warning when the same activity reconciled zero po
     'no filled order': [emptyPositions, notFound],
     'position still listed': [{ ...emptyPositions, result: JSON.stringify([{ Symbol: SYMBOL, Qty: 6 }]) }, filledOrder, notFound],
     'filled order for another symbol': [emptyPositions, { ...filledOrder, result: JSON.stringify({ orders: [{ Symbol: 'AAPL261204C00200000', Status: 'filled', FilledQty: 1 }] }) }, notFound],
+    'filled opening (not a close)': [emptyPositions, { ...filledOrder, result: JSON.stringify({ orders: [{ Symbol: SYMBOL, Status: 'filled', FilledQty: 6, PositionIntent: 'buy_to_open' }] }) }, notFound],
+    'filled order without an intent': [emptyPositions, { ...filledOrder, result: JSON.stringify({ orders: [{ Symbol: SYMBOL, Status: 'filled', FilledQty: 6 }] }) }, notFound],
     'unfilled order': [emptyPositions, { ...filledOrder, result: JSON.stringify({ orders: [{ Symbol: SYMBOL, Status: 'canceled', FilledQty: 0 }] }) }, notFound],
   })) {
     const failed = await activityFor(records);

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 )
@@ -713,8 +714,94 @@ func (oc *OrderController) optionsResponseWithIdentity(intent *interfaces.Order,
 	}
 	if intent != nil && intent.Metadata != "" && len(intent.Metadata) <= 262144 {
 		result.AssessmentDecision = assessmentDecisionFromAudit(intent.Metadata)
+		if result.AssessmentDecision == "PASS" {
+			applyAssessmentSummary(result, intent.Metadata)
+		}
 	}
 	return result
+}
+
+// applyAssessmentSummary adds AlphaDesk's own numbers to a response whose audited decision is PASS, so the agent can record them
+// without fetching the order again. It reads only the stored receipt that assessmentDecisionFromAudit has already accepted: the
+// audit's signal_score and score_profile, the real catalyst confidence in evidence.catalyst_confidence (never the weighted
+// evidence.score_components share) and the worst-leg spread from evidence.option_quotes[].spread_ratio. Each value is set
+// independently, only when valid and finite. It never fails, never fetches anything and never touches any other field.
+func applyAssessmentSummary(result *interfaces.OrderResult, metadata string) {
+	var audit map[string]any
+	decoder := json.NewDecoder(strings.NewReader(metadata))
+	decoder.UseNumber()
+	if decoder.Decode(&audit) != nil {
+		return
+	}
+	if score, ok := auditNumber(audit["signal_score"], 0, 100); ok {
+		result.AssessmentSignalScore = &score
+	}
+	if profile, ok := audit["score_profile"].(string); ok && profile != "" && len(profile) <= 64 {
+		result.AssessmentScoreProfile = profile
+	}
+	evidence, _ := audit["evidence"].(map[string]any)
+	if confidence, ok := auditNumber(evidence["catalyst_confidence"], 0, 1); ok {
+		result.AssessmentCatalystConfidence = &confidence
+	}
+	if spread, ok := auditWorstLegSpreadPct(evidence["option_quotes"]); ok {
+		result.AssessmentObservedSpreadPct = &spread
+	}
+}
+
+func auditNumber(value any, low, high float64) (float64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := number.Float64()
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < low || parsed > high {
+		return 0, false
+	}
+	return parsed, true
+}
+
+// auditWorstLegSpreadPct is the largest leg spread ratio as a percentage rounded to two decimals. One missing or invalid leg
+// makes the whole value unavailable rather than understating the spread.
+func auditWorstLegSpreadPct(value any) (float64, bool) {
+	quotes, ok := value.([]any)
+	if !ok || len(quotes) == 0 {
+		return 0, false
+	}
+	worst := decimal.Zero
+	for _, entry := range quotes {
+		quote, ok := entry.(map[string]any)
+		if !ok {
+			return 0, false
+		}
+		var ratio decimal.Decimal
+		switch raw := quote["spread_ratio"].(type) {
+		case string:
+			parsed, err := decimal.NewFromString(raw)
+			if err != nil {
+				return 0, false
+			}
+			ratio = parsed
+		case json.Number:
+			parsed, err := decimal.NewFromString(raw.String())
+			if err != nil {
+				return 0, false
+			}
+			ratio = parsed
+		default:
+			return 0, false
+		}
+		if ratio.IsNegative() {
+			return 0, false
+		}
+		if ratio.GreaterThan(worst) {
+			worst = ratio
+		}
+	}
+	pct, _ := worst.Mul(decimal.NewFromInt(100)).Round(2).Float64()
+	if math.IsNaN(pct) || math.IsInf(pct, 0) {
+		return 0, false
+	}
+	return pct, true
 }
 
 func assessmentDecisionFromAudit(metadata string) string {
@@ -815,6 +902,8 @@ func attachAssessmentError(result *interfaces.OrderResult, err error) {
 		decision = "UNAVAILABLE"
 	}
 	result.AssessmentDecision = decision
+	// A final FAIL or UNAVAILABLE supersedes an audited PASS, so the PASS summary goes with it.
+	result.AssessmentSignalScore, result.AssessmentCatalystConfidence, result.AssessmentObservedSpreadPct, result.AssessmentScoreProfile = nil, nil, nil, ""
 	result.AssessmentCategory = safeAssessmentCategory(assessmentErr.Category)
 	result.AssessmentStage = safeAssessmentStage(assessmentErr.Stage)
 	if decision == "FAIL" {

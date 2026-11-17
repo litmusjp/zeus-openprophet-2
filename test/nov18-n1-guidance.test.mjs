@@ -40,8 +40,10 @@ test('N1-a range: window is defined by bar start times, validated, recorded once
   assert.doesNotMatch(catalyst, /store_trade_setup/); // that tool is for completed trades, not an open event
 });
 
+// NOTE: this arithmetic test uses local constants; it documents the written rule, and the wording assertions above are what pin the rendered text.
 test('N1-a reference calculation: the saved three opening bars give one range, and the 4th bar and the in-window close cannot confirm', () => {
   const bars = [ // start, high, low, close (the saved opening bars of one catalyst day; completed, one feed)
+    // The first three rows are the saved opening bars; the 14:45 row is ADAPTED scaffolding (only its low, 497.96, is the saved value).
     ['14:30', 511.43, 504.62, 504.62], ['14:35', 509.31, 503.81, 507.83], ['14:40', 510.8, 500.71, 501.2], ['14:45', 506.0, 497.96, 499.0],
   ];
   // Herald's saved settings (not the repo defaults): a 15-minute range, stop at 0.5 of the range, target 3 x the range height.
@@ -69,10 +71,28 @@ test('N1-b target: once per position, quantity at first touch, a pending order r
 
 test('N1-c stop: direction by side, post-entry bar only, cited; other exits unaffected', () => {
   assert.match(catalyst, /for a call the wrong side is below the level, for a put it is above the level/);
-  assert.match(catalyst, /The bar must have completed after your entry fill \(compare its start time with the fill time\)/);
-  assert.match(catalyst, /a bar inside the range window or from before your entry never triggers the stop/);
+  assert.match(catalyst, /The bar must have completed after your entry fill: compare the bar's end time \(a bar is stamped with its start, so its end is the start plus 5 minutes\) with the fill time/);
+  assert.doesNotMatch(catalyst, /compare its start time with the fill time/); // the start-vs-fill predicate was a contradiction
+  assert.match(catalyst, /A bar that had already completed before your fill, and any bar inside the range window, never triggers the stop; a bar that was in progress at your fill and completes after it can/);
   assert.match(catalyst, /Cite the bar's start time, its close, the level and the feed when you exit on the stop/);
   assert.match(catalyst, /Target, time and invalidating-news exits are separate and are not affected by this/);
+});
+
+test('N1-c reference: a stop bar is eligible on its COMPLETION after the fill (fill inside a bar, wholly pre-entry bar, formation bar; put and call mirror)', () => {
+  const minutes = (h, m, s = 0) => h * 60 + m + s / 60;
+  const BAR = 5; const windowEnd = minutes(14, 45); const fill = minutes(15, 22, 30);
+  // Written rule: eligible only if the bar completed after the fill (start + 5 minutes > fill) and is not inside the range window.
+  const eligible = (start, fillTime = fill) => start + BAR > fillTime && start >= windowEnd;
+  const wrongSide = (side, close, level) => (side === 'put' ? close > level : close < level);
+  const stops = (side, start, close, level) => eligible(start) && wrongSide(side, close, level);
+  assert.equal(stops('put', minutes(15, 20), 506.5, 506.07), true);   // fill inside the 15:20 bar: it completes at 15:25, after the fill
+  assert.equal(stops('call', minutes(15, 20), 505.0, 506.07), true);  // mirror for a call
+  assert.equal(stops('put', minutes(15, 15), 506.5, 506.07), false);  // wholly pre-entry (completed 15:20, before the fill)
+  assert.equal(stops('put', minutes(14, 40), 506.5, 506.07), false); // formation-window bar
+  assert.equal(stops('put', minutes(15, 25), 504.0, 506.07), false);  // post-entry bar but the right side for a put: no stop
+  // The contradictory predicate would wrongly suppress the straddling bar:
+  const startAfterFill = start => start > fill;
+  assert.equal(startAfterFill(minutes(15, 20)), false);
 });
 
 test('N1-d close-time exit: only when due, 30-minute window, catch-up, reconciliation, no invented price', () => {

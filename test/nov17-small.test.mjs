@@ -303,3 +303,48 @@ test('N17-B03: an exact structured market_closed answer is a warning from the re
   for (const [name, record] of Object.entries(good)) await expectOutcome(name, [record], CHAIN_WARNING, false);
   await expectOutcome('error-only positive next to a failed get_account stays Failed', [chainRec({ result: '{}', error: CLOSED }), failed('get_account')], 'Failed', true);
 });
+
+// ───────────────────────── Round 3 (Hermes N17-B02-R2) ─────────────────────────
+// A payload that says market_closed is only the exact shape the backend produces (controllers/order_controller.go, options chain while the
+// market is closed: status, category, endpoint, next_open, error, plus the http_status the MCP server adds). Anything else inside or beside
+// it, at any depth, keeps the answer essential. Cases R2-* are the records of Hermes's HERMES-ROUND2-EXTRA-PROBE.json.
+
+const AUTH_DESCENDANT = { category: 'authentication', http_status: 401, error: 'unauthorized' };
+
+test('N17-B02-R2: a market_closed object that carries any other property is not a market-closed answer', async () => {
+  const bad = {
+    'R2-authentication-in-data-descendant': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, data: AUTH_DESCENDANT }) }),
+    'R2-transport-text-in-content': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, content: [{ type: 'text', text: 'transport error: ECONNREFUSED' }] }) }),
+    'R2-result-isError': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, result: { isError: true, error: 'broker unavailable' } }) }),
+    'R2-second-market-closed-under-data': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, data: MARKET_CLOSED }) }),
+    'R2-contradictory-payload-under-benign-wrapper': chainRec({ result: JSON.stringify({ data: { ...MARKET_CLOSED, data: AUTH_DESCENDANT } }) }),
+    'R2-structural-error-object-authentication': chainRec({ result: CLOSED, error: JSON.stringify({ category: 'authentication', error: 'unauthorized' }) }),
+    'R2-second-source-contradictory-payload': chainRec({ result: CLOSED, error: JSON.stringify({ data: AUTH_DESCENDANT }) }),
+    'same hybrid inside the error instead of the result': chainRec({ result: '{}', error: JSON.stringify({ ...MARKET_CLOSED, data: AUTH_DESCENDANT }) }),
+    'hybrid inside an MCP content part': chainRec({ result: JSON.stringify({ content: [textPart({ ...MARKET_CLOSED, data: AUTH_DESCENDANT })] }) }),
+    'hybrid inside a result wrapper': chainRec({ result: JSON.stringify({ result: { ...MARKET_CLOSED, result: { isError: true } } }) }),
+    'hybrid two wrappers deep': chainRec({ result: JSON.stringify({ result: { data: { ...MARKET_CLOSED, text: 'ECONNREFUSED' } } }) }),
+    'payload with an isError flag of any value': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, isError: false }) }),
+    'payload with an unknown extra key': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, message: 'also: provider returned 500' }) }),
+    'payload with a retry flag': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, retryable: true }) }),
+    'payload whose error is an object': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, error: { category: 'authentication' } }) }),
+    'payload whose error text is not the market-closed text': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, error: 'unauthorized' }) }),
+    'payload whose status is an object': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, status: { code: 'error' } }) }),
+    'payload for another endpoint': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, endpoint: 'orders' }) }),
+    'payload whose next_open is an object': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, next_open: { error: 'x' } }) }),
+  };
+  for (const [name, record] of Object.entries(bad)) await expectOutcome(name, [record], 'Failed', true);
+});
+
+test('N17-B02-R2: the exact backend payload, in any permitted place, is still a warning', async () => {
+  const good = {
+    'C0 direct payload (the real Nov 16 shape)': chainRec({ result: CLOSED }),
+    'C4 error only, result {}': chainRec({ result: '{}', error: CLOSED }),
+
+    'next_open null': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, next_open: null }) }),
+    'in data': chainRec({ result: JSON.stringify({ data: MARKET_CLOSED }) }),
+    'in an MCP content part': chainRec({ result: JSON.stringify({ content: [textPart(MARKET_CLOSED)], isError: false }) }),
+    'result and error agree': chainRec({ result: CLOSED, error: CLOSED }),
+  };
+  for (const [name, record] of Object.entries(good)) await expectOutcome(name, [record], CHAIN_WARNING, false);
+});

@@ -175,6 +175,21 @@ function isUnfilledOpeningPositionNotFound(record, records) {
 // market_closed fragment somewhere inside a failure is never enough.
 const MARKET_CLOSED_CHAIN_WARNING = 'get_options_chain unavailable while market closed';
 const CHAIN_WRAPPER_KEYS = new Set(['content', 'result', 'data', 'text', 'type', 'isError']);
+// The payload itself is exactly what the backend produces for the options chain while the market is closed (controllers/order_controller.go:
+// status, category, endpoint, next_open, error) plus the http_status the MCP server adds. A payload that carries any other property (a nested
+// data, content or result, an isError flag, a message) or any other value is not a market-closed answer: it is checked as a whole, never
+// recognised by its category alone, so nothing nested inside it can escape the checks.
+const CHAIN_PAYLOAD_KEYS = new Set(['category', 'endpoint', 'error', 'next_open', 'status', 'http_status']);
+const CHAIN_CLOSED_TEXT = 'options chain is unavailable while the regular market is closed';
+function isExactMarketClosedPayload(value) {
+  return Object.keys(value).every(key => CHAIN_PAYLOAD_KEYS.has(key))
+    && value.category === 'market_closed'
+    && (value.endpoint === undefined || value.endpoint === 'options_chain')
+    && (value.status === undefined || value.status === 'market_closed')
+    && (value.http_status === undefined || value.http_status === 503)
+    && (value.error === undefined || value.error === CHAIN_CLOSED_TEXT)
+    && (value.next_open === undefined || value.next_open === null || typeof value.next_open === 'string');
+}
 function scanChainAnswer(value, found, depth = 0) {
   if (value == null || value === '') return;
   if (depth > 5) { found.bad = true; return; }
@@ -187,10 +202,7 @@ function scanChainAnswer(value, found, depth = 0) {
   if (Array.isArray(value)) { for (const item of value) scanChainAnswer(item, found, depth + 1); return; }
   if (typeof value !== 'object') { found.bad = true; return; }
   if (value.category === 'market_closed') {
-    const clean = value.isError !== true
-      && (value.status === undefined || value.status === 'market_closed')
-      && (value.http_status === undefined || value.http_status === 503);
-    if (clean) found.payloads += 1; else found.bad = true;
+    if (isExactMarketClosedPayload(value)) found.payloads += 1; else found.bad = true;
     return;
   }
   for (const [key, child] of Object.entries(value)) {

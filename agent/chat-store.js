@@ -77,8 +77,8 @@ function isReconciledPositionNotFound(record, records) {
     return orders.some(order => String(order?.Symbol || order?.symbol || '') === symbol
       && String(order?.Status || order?.status || '').toLowerCase() === 'filled'
       && Number(order?.FilledQty ?? order?.filled_qty ?? 0) > 0
-      // A filled opening is not a close: only a closing fill can confirm that a position is gone.
-      && ['sell_to_close', 'buy_to_close'].includes(String(order?.PositionIntent || order?.position_intent || '').toLowerCase()));
+      // A filled opening is not a close: only a closing fill can confirm that a position is gone. The intent must be unambiguous.
+      && isClosingIntent(order));
   });
 }
 // An acknowledged opening order that has not filled yet has no position, so the single-position lookup answers 404. That is
@@ -92,6 +92,18 @@ const isToolCallRecord = record => !!record && (record.kind === 'tool_call' || r
 const toolNameOf = record => String(record?.tool || '').replace(/^prophet_/, '');
 const trimmedText = value => (typeof value === 'string' ? value.trim() : '');
 const isExactZero = value => typeof value === 'number' && Number.isFinite(value) && value === 0;
+const trimNormal = value => (typeof value === 'string' ? value.trim() : value);
+const lowerNormal = value => (typeof value === 'string' ? value.trim().toLowerCase() : value);
+// An order row may spell a field two ways (the Go name and the snake_case name). Both present and different is ambiguous: neither
+// spelling is trusted and nothing falls through from one to the other. One spelling, or two equal spellings, is fine.
+function fieldOf(row, names, normalise = value => value) {
+  const values = names.map(name => row?.[name]).filter(value => value !== undefined).map(normalise);
+  return { present: values.length > 0, ambiguous: values.some(value => value !== values[0]), value: values[0] };
+}
+function isClosingIntent(order) {
+  const intent = fieldOf(order, ['PositionIntent', 'position_intent'], lowerNormal);
+  return !intent.ambiguous && ['sell_to_close', 'buy_to_close'].includes(intent.value);
+}
 function isPositionNotFoundRecord(record) {
   if (!isToolCallRecord(record) || toolNameOf(record) !== 'get_options_position') return false;
   const text = String(record.error || '') + ' ' + (typeof record.result === 'string' ? record.result : JSON.stringify(record.result || ''));
@@ -120,12 +132,21 @@ function isUnfilledOpeningPositionNotFound(record, records) {
   if (ackBody.symbol !== undefined && trimmedText(ackBody.symbol) !== symbol) return false;
   if (!WORKING_ORDER_STATUSES.has(String(ackBody.status || '').toLowerCase())) return false;
   if (!isExactZero(ackBody.filled_qty)) return false;
-  const sameOrder = orders => orders.filter(order => trimmedText(order?.ID ?? order?.order_id) === orderId);
-  const consistent = order => trimmedText(order.ClientOrderID ?? order.client_order_id) === clientId
-    && trimmedText(order.Symbol ?? order.symbol) === symbol
-    && ['', 'buy_to_open'].includes(String(order.PositionIntent ?? order.position_intent ?? '').toLowerCase())
-    && isExactZero(order.FilledQty ?? order.filled_qty)
-    && !['filled', 'partially_filled'].includes(String(order.Status ?? order.status ?? '').toLowerCase());
+  // A row belongs to the order when either spelling of its id matches; it is then consistent only if no field is ambiguous.
+  const sameOrder = orders => orders.filter(order => [order?.ID, order?.order_id].some(value => trimmedText(value) === orderId));
+  const consistent = order => {
+    const id = fieldOf(order, ['ID', 'order_id'], trimNormal);
+    const client = fieldOf(order, ['ClientOrderID', 'client_order_id'], trimNormal);
+    const sym = fieldOf(order, ['Symbol', 'symbol'], trimNormal);
+    const intent = fieldOf(order, ['PositionIntent', 'position_intent'], lowerNormal);
+    const filled = fieldOf(order, ['FilledQty', 'filled_qty']);
+    const state = fieldOf(order, ['Status', 'status'], lowerNormal);
+    return [id, client, sym, intent, filled, state].every(field => !field.ambiguous)
+      && id.value === orderId && client.value === clientId && sym.value === symbol
+      && (!intent.present || intent.value === 'buy_to_open')
+      && filled.present && isExactZero(filled.value)
+      && !['filled', 'partially_filled'].includes(state.value);
+  };
   let confirmed = false;
   const reads = records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_orders' && !hasStructuredFailure(r));
   for (const read of reads) {
@@ -135,7 +156,7 @@ function isUnfilledOpeningPositionNotFound(record, records) {
     // A contradiction anywhere in the activity (another client id, a fill, a bad quantity) rules the warning out.
     if (mine.some(order => !consistent(order))) return false;
     const complete = body && !Array.isArray(body) && body.broker_state === 'available' && body.complete === true;
-    const working = mine.length === 1 && WORKING_ORDER_STATUSES.has(String(mine[0].Status ?? mine[0].status ?? '').toLowerCase());
+    const working = mine.length === 1 && WORKING_ORDER_STATUSES.has(fieldOf(mine[0], ['Status', 'status'], lowerNormal).value);
     if (records.indexOf(read) > at && complete && working) confirmed = true;
   }
   if (!confirmed) return false;
@@ -143,35 +164,52 @@ function isUnfilledOpeningPositionNotFound(record, records) {
   for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_options_positions' && !hasStructuredFailure(r))) {
     const rows = parseJsonish(read.result);
     if (!Array.isArray(rows)) return false;
-    if (rows.some(row => trimmedText(row?.Symbol ?? row?.symbol) === symbol)) return false;
+    if (rows.some(row => [row?.Symbol, row?.symbol].some(value => trimmedText(value) === symbol))) return false;
   }
   return true;
 }
-// get_options_chain answers HTTP 503 with category market_closed before the regular session. Only that exact structured answer (read
-// through the same content/result/data wrappers as hasStructuredFailure, never from prose) is a warning; every other chain failure
-// (authentication, transport, provider, contradictory) stays essential.
+// get_options_chain answers HTTP 503 with category market_closed before the regular session. Only that exact structured answer is a
+// warning, and only when NOTHING else in the evidence says otherwise: the answer (the result or the error, or both) may be the payload
+// itself or the payload inside the content/result/data wrappers, and every other key, part or string beside it (an authentication or
+// transport category, an error, an isError flag, a status, prose, a second payload) makes the whole answer essential. Finding a
+// market_closed fragment somewhere inside a failure is never enough.
 const MARKET_CLOSED_CHAIN_WARNING = 'get_options_chain unavailable while market closed';
-function marketClosedPayload(value, depth = 0) {
-  if (depth > 5 || value == null) return null;
+const CHAIN_WRAPPER_KEYS = new Set(['content', 'result', 'data', 'text', 'type', 'isError']);
+function scanChainAnswer(value, found, depth = 0) {
+  if (value == null || value === '') return;
+  if (depth > 5) { found.bad = true; return; }
   if (typeof value === 'string') {
-    try { return marketClosedPayload(JSON.parse(value), depth + 1); } catch { return null; }
+    let parsed;
+    try { parsed = JSON.parse(value); } catch { found.bad = true; return; } // prose is not structured evidence
+    scanChainAnswer(parsed, found, depth + 1);
+    return;
   }
-  if (Array.isArray(value)) {
-    for (const item of value) { const found = marketClosedPayload(item, depth + 1); if (found) return found; }
-    return null;
+  if (Array.isArray(value)) { for (const item of value) scanChainAnswer(item, found, depth + 1); return; }
+  if (typeof value !== 'object') { found.bad = true; return; }
+  if (value.category === 'market_closed') {
+    const clean = value.isError !== true
+      && (value.status === undefined || value.status === 'market_closed')
+      && (value.http_status === undefined || value.http_status === 503);
+    if (clean) found.payloads += 1; else found.bad = true;
+    return;
   }
-  if (typeof value !== 'object') return null;
-  if (value.category === 'market_closed') return value;
-  return marketClosedPayload(value.content, depth + 1) || marketClosedPayload(value.result, depth + 1)
-    || marketClosedPayload(value.data, depth + 1) || marketClosedPayload(value.text, depth + 1);
+  for (const [key, child] of Object.entries(value)) {
+    if (!CHAIN_WRAPPER_KEYS.has(key)) { found.bad = true; continue; }
+    if (key === 'isError') { if (child !== false) found.bad = true; continue; }
+    if (key === 'type') { if (child !== 'text') found.bad = true; continue; }
+    scanChainAnswer(child, found, depth + 1);
+  }
 }
 function isMarketClosedChain(record) {
   if (!isToolCallRecord(record) || toolNameOf(record) !== 'get_options_chain' || record.isError === true) return false;
-  const payload = marketClosedPayload(record.result);
-  if (!payload || payload.isError === true) return false;
-  // An error field on the record itself may not tell a different story.
-  if (record.error != null && record.error !== '' && !marketClosedPayload(record.error)) return false;
-  return true;
+  let payloads = 0;
+  for (const source of [record.result, record.error]) {
+    const found = { payloads: 0, bad: false };
+    scanChainAnswer(source, found);
+    if (found.bad || found.payloads > 1) return false;
+    payloads += found.payloads;
+  }
+  return payloads >= 1;
 }
 // A guarded opening order that AlphaDesk refused (FAIL or UNAVAILABLE) before anything reached the broker, or that
 // OP2 refused locally for its contract limit, is a normal outcome, not a failed heartbeat. Anything else about an

@@ -225,3 +225,81 @@ test('essential failures are never hidden by a warning, a recorded status or a r
   await expectOutcome('failed cancel alone', [failed('cancel_order')], 'Failed', true);
   await expectOutcome('failed place_options_order alone', [{ kind: 'tool_call', tool: 'place_options_order', args: { symbol: SYM, position_intent: 'buy_to_open' }, status: 'error', error: '{"error":"order rejected by broker"}' }], 'Failed', true);
 });
+
+// ───────────────────────── Round 2 (Hermes N17-B01, B02, B03) ─────────────────────────
+// Every case goes through the public ChatStore list AND detail paths (expectOutcome checks both, and the Error label).
+
+const goNames = o => ({ ID: o.ID, ClientOrderID: o.ClientOrderID, Symbol: o.Symbol, PositionIntent: o.PositionIntent, Status: o.Status, FilledQty: o.FilledQty });
+const snakeNames = o => ({ order_id: o.order_id, client_order_id: o.client_order_id, symbol: o.symbol, position_intent: o.position_intent, status: o.status, filled_qty: o.filled_qty });
+
+test('N17-B01: conflicting spellings of one order field are ambiguous evidence (nothing is trusted); equal or single spellings still pass', async () => {
+  const ambiguous = {
+    'FilledQty 0 hides filled_qty 2 (Hermes U3)': order({ FilledQty: 0, filled_qty: 2 }),
+    'FilledQty 2 with filled_qty 0': order({ FilledQty: 2, filled_qty: 0 }),
+    'FilledQty null falls through to filled_qty 0': order({ FilledQty: null, filled_qty: 0 }),
+    'Status new vs status filled': order({ Status: 'new', status: 'filled' }),
+    'Status new vs status canceled': order({ Status: 'new', status: 'canceled' }),
+    'Status new vs status partially_filled': order({ Status: 'new', status: 'partially_filled' }),
+    'ID matches but order_id differs': order({ order_id: 'oid-other' }),
+    'order_id matches but ID differs': order({ ID: 'oid-other' }),
+    'ClientOrderID matches but client_order_id differs': order({ client_order_id: 'cid-other' }),
+    'Symbol matches but symbol differs': order({ symbol: 'BA261218P00175000' }),
+    'PositionIntent buy_to_open vs position_intent sell_to_close': order({ position_intent: 'sell_to_close' }),
+  };
+  for (const [name, o] of Object.entries(ambiguous)) await expectOutcome(name, [ack(), notFound(), read([o])], 'Failed', true);
+  await expectOutcome('an ambiguous read before the 404 also rules the warning out', [ack(), read([order({ FilledQty: 0, filled_qty: 2 })]), notFound(), read([order()])], 'Failed', true);
+  await expectOutcome('an ambiguous read after the confirming read also rules it out', [ack(), notFound(), read([order()]), read([order({ FilledQty: 0, filled_qty: 2 })])], 'Failed', true);
+  await expectOutcome('the held contract is named by either spelling in the positions list', [ack(), notFound(), read([order()]), positions([{ Symbol: 'AAPL261218C00200000', symbol: SYM, Qty: 6 }])], 'Failed', true);
+  const base = order();
+  await expectOutcome('both spellings, equal', [ack(), notFound(), read([base])], OPENING_WARNING, false);
+  await expectOutcome('Go names only', [ack(), notFound(), read([goNames(base)])], OPENING_WARNING, false);
+  await expectOutcome('snake_case names only', [ack(), notFound(), read([snakeNames(base)])], OPENING_WARNING, false);
+  // the closing-intent requirement added in this release is held to the same rule
+  const closeFill = over => read([order({ Status: 'filled', status: 'filled', FilledQty: 6, filled_qty: 6, PositionIntent: 'sell_to_close', position_intent: 'sell_to_close', ...over })]);
+  await expectOutcome('closing fill, both spellings agree', [positions([]), closeFill({}), notFound()], CLOSURE_WARNING, false);
+  await expectOutcome('closing intent contradicted by the other spelling', [positions([]), closeFill({ position_intent: 'buy_to_open' }), notFound()], 'Failed', true);
+});
+
+const chainRec = over => ({ kind: 'tool_call', tool: 'get_options_chain', args: { symbol: 'LOW' }, status: 'completed', ...over });
+const CLOSED = JSON.stringify(MARKET_CLOSED);
+const textPart = value => ({ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) });
+
+test('N17-B02: a nested market_closed fragment never hides contradictory outer, sibling or second-source failure information', async () => {
+  const bad = {
+    'authentication wrapper around market_closed (Hermes C1)': chainRec({ result: JSON.stringify({ category: 'authentication', http_status: 401, error: 'unauthorized', data: MARKET_CLOSED }) }),
+    'isError wrapper around market_closed (Hermes C2)': chainRec({ result: JSON.stringify({ data: MARKET_CLOSED, isError: true }) }),
+    'content with market_closed and a transport failure (Hermes C3)': chainRec({ result: JSON.stringify({ content: [textPart(MARKET_CLOSED), { category: 'transport', status: 'error', error: 'ECONNREFUSED' }] }) }),
+    'status error wrapper': chainRec({ result: JSON.stringify({ status: 'error', result: MARKET_CLOSED }) }),
+    'payload with http_status 401': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, http_status: 401 }) }),
+    'payload with status error': chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, status: 'error' }) }),
+    'content with a second, authentication part': chainRec({ result: JSON.stringify({ content: [textPart(MARKET_CLOSED), textPart({ category: 'authentication', error: 'unauthorized' })] }) }),
+    'wrapper with an unknown message field': chainRec({ result: JSON.stringify({ message: 'chain request failed', data: MARKET_CLOSED }) }),
+    'content with market_closed and plain prose': chainRec({ result: JSON.stringify({ content: [textPart(MARKET_CLOSED), textPart('provider returned 500')] }) }),
+    'two market_closed payloads in one result': chainRec({ result: JSON.stringify({ content: [textPart(MARKET_CLOSED), textPart(MARKET_CLOSED)] }) }),
+    'result market_closed, error is an authentication failure': chainRec({ result: CLOSED, error: JSON.stringify({ category: 'authentication', error: 'unauthorized' }) }),
+    'result market_closed, error is prose': chainRec({ result: CLOSED, error: 'ECONNREFUSED 127.0.0.1:4534' }),
+    'error market_closed, result is a different failure': chainRec({ result: JSON.stringify({ category: 'upstream_http', error: 'bad gateway', status: 'error' }), error: CLOSED }),
+    'error market_closed, result is prose': chainRec({ result: 'chain request failed', error: CLOSED }),
+  };
+  for (const [name, record] of Object.entries(bad)) await expectOutcome(name, [record], 'Failed', true);
+  // unchanged negatives from the first candidate
+  await expectOutcome('marked isError on the payload', [chainRec({ result: JSON.stringify({ ...MARKET_CLOSED, isError: true }) })], 'Failed', true);
+  await expectOutcome('market_closed only in prose', [chainRec({ result: JSON.stringify({ error: 'the market_closed condition prevented the chain', status: 'error' }) })], 'Failed', true);
+});
+
+test('N17-B03: an exact structured market_closed answer is a warning from the result or from the error alone, in the permitted wrappers only', async () => {
+  const good = {
+    'result only (the Nov 16 shape)': chainRec({ result: CLOSED }),
+    'wrapped in data': chainRec({ result: JSON.stringify({ data: MARKET_CLOSED }) }),
+    'wrapped in result': chainRec({ result: JSON.stringify({ result: MARKET_CLOSED }) }),
+    'MCP content array': chainRec({ result: JSON.stringify({ content: [textPart(MARKET_CLOSED)], isError: false }) }),
+    'error only, empty result string': chainRec({ result: '', error: CLOSED }),
+    'error only, result {} (Hermes C4)': chainRec({ result: '{}', error: CLOSED }),
+    'error only, no result field': chainRec({ error: CLOSED }),
+    'error only, record status error': chainRec({ status: 'error', result: '', error: CLOSED }),
+    'error wrapped in an MCP content array': chainRec({ result: '', error: JSON.stringify({ content: [textPart(MARKET_CLOSED)] }) }),
+    'result and error both say market_closed': chainRec({ result: CLOSED, error: CLOSED }),
+  };
+  for (const [name, record] of Object.entries(good)) await expectOutcome(name, [record], CHAIN_WARNING, false);
+  await expectOutcome('error-only positive next to a failed get_account stays Failed', [chainRec({ result: '{}', error: CLOSED }), failed('get_account')], 'Failed', true);
+});

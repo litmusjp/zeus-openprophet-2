@@ -23,40 +23,43 @@ export function actorOf(message, session) {
   return { agentId: value.agentId, agentName: value.agentName };
 }
 
-function parseObject(value) {
+const DEFAULT_PARSE_LIMIT = 128 * 1024;
+
+function parseObject(value, limit = DEFAULT_PARSE_LIMIT) {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value;
-  if (typeof value !== 'string' || value.length > 128 * 1024) return null;
+  if (typeof value !== 'string' || value.length > limit) return null;
   try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null; }
   catch { return null; }
 }
 
-function findIds(value, output = new Set(), depth = 0, inOrderObject = false) {
+function findIds(value, output = new Set(), depth = 0, inOrderObject = false, limit = DEFAULT_PARSE_LIMIT) {
   if (typeof value === 'string') {
     if (depth > 4) return output;
-    const parsed = parseObject(value);
-    return parsed ? findIds(parsed, output, depth + 1, inOrderObject) : output;
+    const parsed = parseObject(value, limit);
+    return parsed ? findIds(parsed, output, depth + 1, inOrderObject, limit) : output;
   }
   if (!value || typeof value !== 'object' || depth > 4) return output;
   for (const [key, item] of Object.entries(value)) {
     const orderObject = inOrderObject || /^(order|brokerOrder|broker_order)$/i.test(key);
     if ((RESULT_ORDER_ID_FIELDS.has(key) || orderObject && ['ID', 'id'].includes(key)) && typeof item === 'string' && item.trim() && item.length <= 256) output.add(item.trim());
     else if (key === 'text' && value.type === 'text' && typeof item === 'string') {
-      const structured = parseObject(item);
-      if (structured) findIds(structured, output, depth + 1, inOrderObject);
+      const structured = parseObject(item, limit);
+      if (structured) findIds(structured, output, depth + 1, inOrderObject, limit);
     }
-    else if (item && typeof item === 'object') findIds(item, output, depth + 1, orderObject);
+    else if (item && typeof item === 'object') findIds(item, output, depth + 1, orderObject, limit);
   }
   return output;
 }
 
-export function executionOrderIds(record) { return executionEvidence(record); }
+// `maxResultChars` raises the result-string parse bound for compact journal capture (the chat-record limit is unchanged).
+export function executionOrderIds(record, { maxResultChars = DEFAULT_PARSE_LIMIT } = {}) { return executionEvidence(record, maxResultChars); }
 
-function executionEvidence(record) {
+function executionEvidence(record, limit = DEFAULT_PARSE_LIMIT) {
   if (!isSubmittingOrderToolCall(record) || record?.resultTruncated || record?.error) return [];
   if (record?.status && !['completed', 'success'].includes(String(record.status).toLowerCase())) return [];
-  const result = parseObject(record?.result);
+  const result = parseObject(record?.result, limit);
   if (!result || result.isError === true || result.error) return [];
-  const returnedIds = findIds(result);
+  const returnedIds = findIds(result, new Set(), 0, false, limit);
   if (!returnedIds.size) return [];
   const args = record?.args && typeof record.args === 'object' && !Array.isArray(record.args) ? record.args : {};
   const clientId = ['client_order_id', 'clientOrderId', 'client_reference', 'clientReference']

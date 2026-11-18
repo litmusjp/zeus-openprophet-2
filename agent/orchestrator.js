@@ -126,6 +126,7 @@ export class AgentOrchestrator extends EventEmitter {
     this.agentUrl = options.agentUrl || process.env.AGENT_URL || 'http://localhost:3737';
     this.tradingBotBasePort = Number(options.tradingBotBasePort || process.env.TRADING_BOT_PORT || 4534);
     this.chatStore = options.chatStore || null;
+    this.orderAttributionJournal = options.orderAttributionJournal || null;
     this.ensureOptionSpreadCap = options.ensureOptionSpreadCap || (async () => ({ state: 'no_backend' }));
     this.runtimes = new Map();
     this.portOwners = new Map();
@@ -233,6 +234,7 @@ export class AgentOrchestrator extends EventEmitter {
         return response.data;
       },
       chatStore: this.chatStore,
+      orderAttributionJournal: this.orderAttributionJournal,
       opencodeEnv: {
         TRADING_BOT_URL: tradingBotUrl,
         TRADING_BOT_TOKEN: tradingBotToken,

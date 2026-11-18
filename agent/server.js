@@ -439,6 +439,7 @@ const chatStore = new ChatStore();
 const orderAttributionJournal = new OrderAttributionJournal();
 const orchestrator = new AgentOrchestrator({
   chatStore,
+  orderAttributionJournal,
   agentUrl: `http://localhost:${PORT}`,
   tradingBotBasePort: Number(TRADING_BOT_PORT),
   ensureOptionSpreadCap: sandboxId => optionSpreadCap.reconcile(sandboxId),
@@ -2260,6 +2261,7 @@ app.get('/api/trades', async (req, res) => {
     const accountStates = new Map();
     const actorMaps = new Map();
     const journalMaps = new Map();
+    const journalReads = {};
     let complete = true;
     const brokerStates = new Set();
     for (const sandbox of sandboxes) {
@@ -2298,11 +2300,16 @@ app.get('/api/trades', async (req, res) => {
         catch { actorMaps.set(account.id, new Map()); }
       }
       actorMap = actorMaps.get(account.id) || new Map();
-      if (!journalMaps.has(account.id)) {
-        try { journalMaps.set(account.id, (await orderAttributionJournal.loadMap(account.id)).map); }
-        catch { journalMaps.set(account.id, new Map()); } // journal unreadable: safe fallback to session evidence
+      const journalKey = `${account.id}\0${sandbox.id}`;
+      if (!journalMaps.has(journalKey)) {
+        // Authoritative lookup is bound to this account's verified broker account, PAPER flag and sandbox.
+        try {
+          const loaded = await orderAttributionJournal.loadMap(account.id, { brokerAccountId: account.brokerAccountId, paper: account.paper, sandboxId: sandbox.id });
+          journalMaps.set(journalKey, loaded.map);
+          journalReads[account.id] = { ...loaded.report };
+        } catch { journalMaps.set(journalKey, new Map()); journalReads[account.id] = { unreadable: true }; } // safe fallback to session evidence
       }
-      const journalMap = journalMaps.get(account.id);
+      const journalMap = journalMaps.get(journalKey);
       const attributedOrders = sandboxOrders.map(order => {
         const actorSnapshot = resolveOrderActorWithJournal(journalMap, actorMap, account.id, order);
         return { ...order, ...metadata, actorSnapshot, agentId: actorSnapshot?.agentId || null,
@@ -2316,7 +2323,7 @@ app.get('/api/trades', async (req, res) => {
       return [sandbox.accountId, { accountId: sandbox.accountId, accountName: account?.name || 'Unknown account', brokerAccountId: account?.brokerAccountId || null, paper: account?.paper === true, sandboxId: sandbox.id }];
     })).values()];
     const accounts = configuredAccounts.map(account => ({ ...account, ...(accountStates.get(account.accountId) || { complete: false, state: 'unavailable' }) }));
-    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, attributionJournal: orderAttributionJournal.status(), orders, trades, ...(req.query.scorecard === '1' ? { scorecard: buildScorecard(trades) } : {}) });
+    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, attributionJournal: { ...orderAttributionJournal.status(), read: journalReads }, orders, trades, ...(req.query.scorecard === '1' ? { scorecard: buildScorecard(trades) } : {}) });
   } catch (err) {
     res.status(500).json({ error: `Could not load verified trades: ${err.message}` });
   }

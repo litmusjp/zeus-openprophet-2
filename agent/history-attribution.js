@@ -49,6 +49,8 @@ function findIds(value, output = new Set(), depth = 0, inOrderObject = false) {
   return output;
 }
 
+export function executionOrderIds(record) { return executionEvidence(record); }
+
 function executionEvidence(record) {
   if (!isSubmittingOrderToolCall(record) || record?.resultTruncated || record?.error) return [];
   if (record?.status && !['completed', 'success'].includes(String(record.status).toLowerCase())) return [];
@@ -92,4 +94,15 @@ export function resolveOrderActor(map, accountId, order) {
 export async function loadOrderActorMap(chatStore, accountId, { sessionLimit = 100, messagesPerSession = Infinity } = {}) {
   const sessions = await chatStore.listOrderActorEvidence(accountId, { sessionLimit, recordLimit: messagesPerSession });
   return buildOrderActorMap(accountId, sessions);
+}
+
+// Durable journal first (authoritative). One journal actor wins; several journal actors for the order stay unknown
+// (a conflict is never hidden by falling back); no journal evidence falls back to the session-derived map.
+export function resolveOrderActorWithJournal(journalMap, legacyMap, accountId, order) {
+  const ids = new Set(ORDER_ID_FIELDS.map(key => order?.[key]).filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()));
+  const actors = new Map();
+  for (const id of ids) for (const [key, actor] of journalMap?.get(`${accountId}\0${id}`) || []) actors.set(key, actor);
+  if (actors.size === 1) return [...actors.values()][0];
+  if (actors.size > 1) return null;
+  return resolveOrderActor(legacyMap, accountId, order);
 }

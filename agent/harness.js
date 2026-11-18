@@ -1,5 +1,6 @@
 // Prophet Agent Harness - Autonomous trading agent with phased heartbeat
 // Uses claude CLI subprocess for auth (OAuth/API key handled by CLI)
+import { attributionFromToolEvent } from './order-attribution-journal.js';
 import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
@@ -684,6 +685,7 @@ export class AgentHarness {
       getHeldPositionSnapshot = async () => { throw new Error('position snapshot unavailable'); },
       getSessionLockFn = async () => null,
       chatStore = null,
+      orderAttributionJournal = null,
       opencodeEnv = {},
       spawnFn = spawn,
       checkCliAuthFn = checkCliAuth,
@@ -723,6 +725,7 @@ export class AgentHarness {
     this._marketScheduleUnavailable = false;
     this._marketScheduleEpoch = 0;
     this.chatStore = chatStore;
+    this.orderAttributionJournal = orderAttributionJournal;
     this.opencodeEnv = opencodeEnv;
     this.spawnFn = spawnFn;
     this.checkCliAuthFn = checkCliAuthFn;
@@ -1553,6 +1556,27 @@ ${userBlock}`;
   /**
    * Run opencode as subprocess with MCP tools and stream JSON events
    */
+  // Durable order-to-agent record, captured from the FULL (pre-truncation) result at the moment a submitting call completes.
+  // Never awaited by order handling and never throws: a failure only produces a visible warning (no raw error text).
+  _captureOrderAttribution(event, ctx) {
+    const journal = this.orderAttributionJournal;
+    if (!journal) return;
+    try {
+      const evidence = attributionFromToolEvent(event);
+      if (!evidence) return;
+      const accountId = ctx.accountId ?? this.accountId ?? this.state.activeAccountId;
+      if (!accountId) return;
+      let account = null;
+      try { account = this.getAccount(accountId) || null; } catch { account = null; }
+      journal.record({
+        accountId, sandboxId: ctx.sandboxId ?? this.sandboxId, brokerAccountId: account?.brokerAccountId ?? null,
+        paper: typeof account?.paper === 'boolean' ? account.paper : null,
+        actor: evidence.actor, orderIds: evidence.orderIds, at: event.completedAt, source: 'live',
+      }).catch(err => {
+        this.state.emit('agent_log', { message: `Order attribution record failed (${String(err?.code || 'write_failed').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40)}); the order is unaffected and its agent is recovered from retained session evidence where possible.`, level: 'warning' });
+      });
+    } catch { /* attribution capture must never affect order handling */ }
+  }
   async _runClaude(prompt, model, actorSnapshot = null) {
     const isNewSession = !this._sessionId;
     const runEpoch = this._sessionEpoch;
@@ -1985,6 +2009,10 @@ ${userBlock}`;
         const compactBars = resultLength > captureLimit && (toolName === 'get_historical_bars' || toolName === 'get_daily_features')
           ? (toolName === 'get_daily_features' ? compactDailyFeatures(safeResult) : compactHistoricalBars(safeResult)) : null;
         const resultTruncated = !compactBars && resultLength > captureLimit;
+        this._captureOrderAttribution({ kind: 'tool_call', tool: toolName, args: safeAuditValue(toolInput), result: safeResult,
+          status: state.status || (safeError ? 'error' : 'completed'), ...(safeError ? { error: safeError } : {}),
+          ...(ctx.actorSnapshot ? { actorSnapshot: ctx.actorSnapshot } : {}),
+          completedAt: new Date().toISOString() }, ctx);
         ctx.recordToolEvent?.({
           eventType: 'tool_call', kind: 'tool_call', role: 'assistant', tool: toolName,
           args: safeAuditValue(toolInput), result: compactBars ?? safeResult?.substring(0, captureLimit), beat: beatNum,

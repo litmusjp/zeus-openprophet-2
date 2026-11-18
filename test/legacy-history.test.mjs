@@ -78,7 +78,7 @@ test('legacy projection rejects directories and symlinks that resolve outside th
 test('Trades page renders only complete verified history', async () => {
   const server = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
   const page = await fs.readFile(new URL('../agent/public/index.html', import.meta.url), 'utf8');
-  assert.match(server, /resolveOrderActor\(actorMap, account\.id, order\)/);
+  assert.match(server, /resolveOrderActorWithJournal\(journalMap, actorMap, account\.id, order\)/);
   assert.match(server, /const attributedOrders = sandboxOrders\.map\(order =>/);
   assert.match(server, /trades\.push\(\.\.\.buildTradeLedger\(attributedOrders, metadata\)\)/);
   assert.doesNotMatch(server, /buildTradeLedger\(sandboxOrders, metadata\)/);

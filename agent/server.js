@@ -23,7 +23,8 @@ import { buildScorecard } from './trade-scorecard.js';
 import * as secretsStore from './secrets-store.js';
 import { createLoginVerifier } from './dashboard-login.js';
 import { registerSecretsRoutes } from './secrets-routes.js';
-import { loadOrderActorMap, resolveOrderActor } from './history-attribution.js';
+import { loadOrderActorMap, resolveOrderActorWithJournal } from './history-attribution.js';
+import { OrderAttributionJournal } from './order-attribution-journal.js';
 import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
@@ -435,6 +436,7 @@ if (!EXECUTION_START_ENABLED) {
 }
 
 const chatStore = new ChatStore();
+const orderAttributionJournal = new OrderAttributionJournal();
 const orchestrator = new AgentOrchestrator({
   chatStore,
   agentUrl: `http://localhost:${PORT}`,
@@ -513,6 +515,7 @@ function createHarnessForActiveSandbox() {
       return response.data;
     },
     chatStore,
+    orderAttributionJournal,
     opencodeEnv: {
       OPENPROPHET_DATA_DIR: path.join(PROJECT_ROOT, 'data'),
       TRADING_BOT_URL,
@@ -2256,6 +2259,7 @@ app.get('/api/trades', async (req, res) => {
     const trades = [];
     const accountStates = new Map();
     const actorMaps = new Map();
+    const journalMaps = new Map();
     let complete = true;
     const brokerStates = new Set();
     for (const sandbox of sandboxes) {
@@ -2294,8 +2298,13 @@ app.get('/api/trades', async (req, res) => {
         catch { actorMaps.set(account.id, new Map()); }
       }
       actorMap = actorMaps.get(account.id) || new Map();
+      if (!journalMaps.has(account.id)) {
+        try { journalMaps.set(account.id, (await orderAttributionJournal.loadMap(account.id)).map); }
+        catch { journalMaps.set(account.id, new Map()); } // journal unreadable: safe fallback to session evidence
+      }
+      const journalMap = journalMaps.get(account.id);
       const attributedOrders = sandboxOrders.map(order => {
-        const actorSnapshot = resolveOrderActor(actorMap, account.id, order);
+        const actorSnapshot = resolveOrderActorWithJournal(journalMap, actorMap, account.id, order);
         return { ...order, ...metadata, actorSnapshot, agentId: actorSnapshot?.agentId || null,
           agentName: actorSnapshot?.agentName || 'Unknown historical agent' };
       });
@@ -2307,7 +2316,7 @@ app.get('/api/trades', async (req, res) => {
       return [sandbox.accountId, { accountId: sandbox.accountId, accountName: account?.name || 'Unknown account', brokerAccountId: account?.brokerAccountId || null, paper: account?.paper === true, sandboxId: sandbox.id }];
     })).values()];
     const accounts = configuredAccounts.map(account => ({ ...account, ...(accountStates.get(account.accountId) || { complete: false, state: 'unavailable' }) }));
-    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, orders, trades, ...(req.query.scorecard === '1' ? { scorecard: buildScorecard(trades) } : {}) });
+    res.json({ generatedAt: new Date().toISOString(), complete, broker_state: [...brokerStates], accounts, accountStates: accounts, attributionJournal: orderAttributionJournal.status(), orders, trades, ...(req.query.scorecard === '1' ? { scorecard: buildScorecard(trades) } : {}) });
   } catch (err) {
     res.status(500).json({ error: `Could not load verified trades: ${err.message}` });
   }

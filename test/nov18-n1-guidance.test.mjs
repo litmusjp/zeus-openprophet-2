@@ -12,7 +12,7 @@ const count = (text, needle) => text.split(needle).length - 1;
 
 const NEW_PHRASES = [
   'The window is exactly the completed bars whose start time falls from the session open',
-  'Record the range once per event with prophet_log_decision',
+  'Record the range once per event, the first time you have the complete window, with prophet_log_decision', // Stage A (A3) wording
   'the confirming bar must start at or after the end of the range window, and a bar inside the window never confirms',
   '- Re-entering an event:',
   'for a call the wrong side is below the level, for a put it is above the level',
@@ -108,7 +108,7 @@ test('N1-d close-time exit: only when due, 30-minute window, catch-up, reconcili
 test('N1-e quotes: option quotes come from the chain; a position read is not a quote; the stock tool is for stocks', () => {
   assert.match(catalyst, /from prophet_get_options_chain for its exact expiry and type/);
   assert.match(catalyst, /A position read \(prophet_get_options_position\) gives exposure and a mark, not an executable quote/);
-  assert.match(catalyst, /prophet_get_quote is for stocks and ETFs, not for option symbols/);
+  assert.match(catalyst, /prophet_get_quote is for stocks and ETFs and fails on an option symbol/); // Stage A (A4) wording
 });
 
 test('N1-f re-entry (D-R1 b): needs its own post-exit confirmation, the recorded range and a reconciled predecessor', () => {

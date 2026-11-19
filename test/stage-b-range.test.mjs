@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { computeRangeConfirmation, getRangeConfirmation, parseStrictUtc, regularSessionUtc } from '../range-confirmation.js';
+import { computeRangeConfirmation, getRangeConfirmation, parseStrictUtc } from '../range-confirmation.js';
 import { compactHistoricalBars } from '../agent/audit-capture.js';
 
 const nvda = JSON.parse(fs.readFileSync(new URL('../testdata/nov18-nvda-5min-bars.json', import.meta.url), 'utf8'));
@@ -105,6 +105,10 @@ test('the helper is arithmetic only: no order, broker or network reference', () 
 const D = '2026-11-18';
 const z = hhmm => `${D}T${hhmm}:00Z`;
 const mk = (hhmm, o = {}) => ({ Timestamp: z(hhmm), Open: 10, High: 10.5, Low: 9.5, Close: 10, Volume: 100, complete: true, ...o });
+const CAL = async () => ({ sessions: [
+  { date: '2026-11-18', open: '09:30', close: '16:00' },
+  { date: '2026-07-15', open: '09:30', close: '16:00' },
+] });
 const tool = (bars, extra = {}) => {
   const calls = [];
   const fetchBars = async (symbol, start, end) => { calls.push({ symbol, start, end }); return { symbol, feed: 'iex', count: bars.length, bars, ...extra }; };
@@ -134,7 +138,7 @@ test('B-B03 A: the tool reads from the session open so the baseline matches the 
   const prior = ['14:30', '14:35', '14:40', '14:45', '14:50', '14:55'].map(h => mk(h, { Volume: 1000 }));
   const bars = [...prior, mk('15:00'), mk('15:05'), mk('15:10'), mk('15:15', { High: 12, Close: 11, Volume: 200 })];
   const { calls, fetchBars } = tool(bars);
-  const result = await getRangeConfirmation({ symbol: 'nvda', window_start: z('15:00') }, { fetchBars, now: Date.parse(z('15:31')) });
+  const result = await getRangeConfirmation({ symbol: 'nvda', window_start: z('15:00') }, { fetchBars, fetchCalendar: CAL, now: Date.parse(z('15:31')) });
   assert.deepEqual(calls, [{ symbol: 'NVDA', start: z('14:30'), end: z('15:31') }], 'fetch starts at the session open (09:30 New York) and ends at now');
   const row = result.confirmations.find(r => r.start === z('15:15'));
   assert.equal(row.baseline_volume, 550);
@@ -148,25 +152,24 @@ test('B-B03 A: the tool reads from the session open so the baseline matches the 
 test('B-B03 A: fewer bars are used only when fewer exist since the open; session bounds, DST and the session close are respected', async () => {
   const early = [mk('14:30'), mk('14:35'), mk('14:40'), mk('14:45', { High: 12, Close: 11, Volume: 500 })];
   const t1 = tool(early);
-  const r1 = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t1.fetchBars, now: Date.parse(z('14:55')) });
+  const r1 = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t1.fetchBars, fetchCalendar: CAL, now: Date.parse(z('14:55')) });
   assert.equal(r1.confirmations[0].baseline_bars, 3, 'only three bars exist since the open');
   assert.equal(r1.confirmations[0].confirming, true);
   // after the close the fetch ends at the regular close (16:00 New York = 21:00Z in November), not at now
   const t2 = tool(early);
-  await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t2.fetchBars, now: Date.parse(`${D}T23:00:00Z`) });
+  await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t2.fetchBars, fetchCalendar: CAL, now: Date.parse(`${D}T23:00:00Z`) });
   assert.equal(t2.calls[0].end, z('21:00'));
   // daylight time: the session opens at 13:30Z
   const t3 = tool([]);
-  await getRangeConfirmation({ symbol: 'NVDA', window_start: '2026-07-15T13:30:00Z' }, { fetchBars: t3.fetchBars, now: Date.parse('2026-07-15T15:00:00Z') });
+  await getRangeConfirmation({ symbol: 'NVDA', window_start: '2026-07-15T13:30:00Z' }, { fetchBars: t3.fetchBars, fetchCalendar: CAL, now: Date.parse('2026-07-15T15:00:00Z') });
   assert.equal(t3.calls[0].start, '2026-07-15T13:30:00Z');
-  const session = regularSessionUtc(Date.parse('2026-07-15T15:00:00Z'));
-  assert.equal(new Date(session.close).toISOString(), '2026-07-15T20:00:00.000Z');
+  assert.equal(t3.calls[0].end, '2026-07-15T15:00:00Z');
 });
 
 test('B-B03: the whole request is validated before any read', async () => {
   const bad = [
     [{ symbol: 'NVDA', window_start: z('14:00') }, /outside the regular session/], // before the open (pre-market)
-    [{ symbol: 'NVDA', window_start: `${D}T21:00:00Z` }, /outside the regular session/],
+    [{ symbol: 'NVDA', window_start: `${D}T21:00:00Z` }, /in the future/],
     [{ symbol: 'NVDA', window_start: '2026-02-30T15:00:00Z' }, /real RFC3339 UTC/],
     [{ symbol: 'NVDA', window_start: `${D}T15:00:00-05:00` }, /real RFC3339 UTC/],
     [{ symbol: 'NVDA', window_start: z('15:00'), window_minutes: 7 }, /multiple of 5/],
@@ -176,7 +179,7 @@ test('B-B03: the whole request is validated before any read', async () => {
   ];
   for (const [args, pattern] of bad) {
     const { calls, fetchBars } = tool([]);
-    const result = await getRangeConfirmation(args, { fetchBars, now: Date.parse(z('15:30')) });
+    const result = await getRangeConfirmation(args, { fetchBars, fetchCalendar: CAL, now: Date.parse(z('15:30')) });
     assert.equal(result.status, 'invalid_input', JSON.stringify(args));
     assert.match(result.error, pattern);
     assert.equal(calls.length, 0, 'no read is made for an invalid request');
@@ -190,14 +193,14 @@ test('B-B03 B: an unreadable price field does not erase a prior volume, and unve
   // prior completed bar with volume 1000 but an unreadable close: its volume stays in the baseline
   const withBadPrice = [...base, mk('14:45', { Volume: 1000, Close: null }), mk('14:50', { High: 12, Close: 11, Volume: 200 })];
   const t1 = tool(withBadPrice);
-  const r1 = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t1.fetchBars, now: Date.parse(z('15:00')) });
+  const r1 = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t1.fetchBars, fetchCalendar: CAL, now: Date.parse(z('15:00')) });
   const row1 = r1.confirmations.find(r => r.start === z('14:50'));
   assert.equal(row1.baseline_volume, 325);
   assert.equal(row1.confirming, false);
   // prior completed bar with no readable volume: baseline unverified, confirming is null (not true)
   const noVolume = [...base, mk('14:45', { Volume: null }), mk('14:50', { High: 12, Close: 11, Volume: 5000 }), mk('14:55')];
   const t2 = tool(noVolume);
-  const r2 = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t2.fetchBars, now: Date.parse(z('15:05')) });
+  const r2 = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t2.fetchBars, fetchCalendar: CAL, now: Date.parse(z('15:05')) });
   const row2 = r2.confirmations.find(r => r.start === z('14:50'));
   assert.equal(row2.confirming, null);
   assert.equal(row2.data_issue, 'baseline_unverified_unreadable_prior_volume');
@@ -218,15 +221,60 @@ test('B-B03 B: impossible window candles produce no range, and a count that disa
   }
   const bars = [mk('14:30'), mk('14:35'), mk('14:40'), mk('14:45')];
   const t = tool(bars, { count: 9 });
-  const result = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t.fetchBars, now: Date.parse(z('14:55')) });
+  const result = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t.fetchBars, fetchCalendar: CAL, now: Date.parse(z('14:55')) });
   assert.equal(result.status, 'data_incomplete');
   assert.equal(result.range, null);
 });
 
 test('the saved Nov 18 NVDA bars through the real tool path still give 154.43 / 159.68 and the 15:15 bar', async () => {
   const { fetchBars } = tool(nvda.bars);
-  const result = await getRangeConfirmation({ symbol: 'NVDA', window_start: START }, { fetchBars, now: Date.parse('2026-11-18T20:00:00Z') });
+  const result = await getRangeConfirmation({ symbol: 'NVDA', window_start: START }, { fetchBars, fetchCalendar: CAL, now: Date.parse('2026-11-18T20:00:00Z') });
   assert.equal(result.range.high, 159.68);
   assert.equal(result.range.low, 154.43);
   assert.equal(result.first_confirming.put, '2026-11-18T15:15:00Z');
+});
+
+// Hermes round 2 (B-B03 session bounds): the close comes from the broker market calendar, never from a fixed 16:00 assumption.
+test('early-close day: the calendar close bounds the fetch, post-close anchors read nothing, and after-close bars are ignored', async () => {
+  const day = '2026-11-27'; // the day after Thanksgiving: 09:30 to 13:00 Eastern, 14:30Z to 18:00Z
+  const zz = hhmm => `${day}T${hhmm}:00Z`;
+  const mkd = (hhmm, o = {}) => ({ Timestamp: zz(hhmm), Open: 10, High: 10.5, Low: 9.5, Close: 10, Volume: 100, complete: true, ...o });
+  const calendar = async () => ({ sessions: [{ date: day, open: '09:30', close: '13:00' }] });
+  const bars = [mkd('14:30'), mkd('14:35'), mkd('14:40'), mkd('14:45', { High: 12, Close: 11, Volume: 500 }),
+    mkd('18:05', { High: 12, Close: 11, Volume: 900 })]; // an after-close print the source returned anyway
+  const t = tool(bars);
+  const result = await getRangeConfirmation({ symbol: 'NVDA', window_start: zz('14:30') }, { fetchBars: t.fetchBars, fetchCalendar: calendar, now: Date.parse(`${day}T20:00:00Z`) });
+  assert.equal(t.calls[0].end, zz('18:00'), 'the fetch ends at the 13:00 Eastern close, not 16:00');
+  assert.equal(t.calls[0].start, zz('14:30'));
+  assert.equal(result.status, 'ok');
+  assert.ok(!result.confirmations.some(r => r.start === zz('18:05')), 'the after-close bar is not a candidate');
+  assert.match(result.notes.join(' '), /1 bar\(s\) outside the regular session/);
+  assert.equal(result.latest_complete_bar.start, zz('14:45'));
+  // an anchor after the real close (but before the usual 16:00) is refused with no bar read
+  for (const late of ['18:00', '18:30', '20:00']) {
+    const none = tool([]);
+    const refused = await getRangeConfirmation({ symbol: 'NVDA', window_start: zz(late) }, { fetchBars: none.fetchBars, fetchCalendar: calendar, now: Date.parse(`${day}T20:30:00Z`) });
+    assert.equal(refused.status, 'invalid_input', late);
+    assert.match(refused.error, /outside the regular session/);
+    assert.equal(none.calls.length, 0, 'no bar read for an anchor after the close');
+  }
+});
+
+test('the calendar is authoritative: no session row, an unavailable calendar, or a source count that includes bars outside the session', async () => {
+  const none = tool([]);
+  const holiday = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('15:00') }, { fetchBars: none.fetchBars, fetchCalendar: async () => ({ sessions: [{ date: '2026-11-19', open: '09:30', close: '16:00' }] }), now: Date.parse(z('15:30')) });
+  assert.equal(holiday.status, 'invalid_input');
+  assert.match(holiday.error, /no regular session for 2026-11-18/);
+  const down = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('15:00') }, { fetchBars: none.fetchBars, fetchCalendar: async () => { throw new Error('503'); }, now: Date.parse(z('15:30')) });
+  assert.equal(down.status, 'invalid_input');
+  assert.match(down.error, /calendar is unavailable/);
+  assert.equal(none.calls.length, 0);
+  // the reported count still has to agree with what the source returned, before out-of-session bars are dropped
+  const bars = [mk('14:30'), mk('14:35'), mk('14:40'), mk('14:45'), { ...mk('13:00'), Timestamp: z('13:00') }]; // 13:00Z is pre-market
+  const t = tool(bars, { count: 5 });
+  const ok = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: t.fetchBars, fetchCalendar: CAL, now: Date.parse(z('14:55')) });
+  assert.equal(ok.status, 'ok');
+  assert.match(ok.notes.join(' '), /1 bar\(s\) outside the regular session/);
+  const bad = tool(bars, { count: 9 });
+  assert.equal((await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: bad.fetchBars, fetchCalendar: CAL, now: Date.parse(z('14:55')) })).status, 'data_incomplete');
 });

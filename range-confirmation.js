@@ -15,6 +15,8 @@
 const BAR_MS = 5 * 60 * 1000;
 const BASELINE_BARS = 6;
 
+import { nyDateOf, nyWallToInstantMs } from './session-clock.js';
+
 const iso = ms => new Date(ms).toISOString().replace(/\.000Z$/, 'Z');
 const finite = value => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const UTC_STRICT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/i;
@@ -31,26 +33,6 @@ export function parseStrictUtc(value) {
     || check.getUTCHours() !== hour || check.getUTCMinutes() !== minute || check.getUTCSeconds() !== second) return null;
   const fraction = /\.(\d+)Z$/i.exec(value);
   return fraction ? ms + Math.floor(Number(`0.${fraction[1]}`) * 1000) : ms;
-}
-
-const NY = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-});
-const nyParts = ms => Object.fromEntries(NY.formatToParts(new Date(ms)).filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
-function nyLocalToUtc(year, month, day, hour, minute) {
-  for (const offset of [4, 5]) {
-    const ms = Date.UTC(year, month - 1, day, hour + offset, minute);
-    const p = nyParts(ms);
-    if (p.year === year && p.month === month && p.day === day && p.hour === hour && p.minute === minute) return ms;
-  }
-  return null;
-}
-/** Regular-session bounds (09:30 to 16:00 America/New_York) of the New York date that contains the instant. */
-export function regularSessionUtc(ms) {
-  const p = nyParts(ms);
-  const open = nyLocalToUtc(p.year, p.month, p.day, 9, 30);
-  const close = nyLocalToUtc(p.year, p.month, p.day, 16, 0);
-  return open === null || close === null ? null : { open, close };
 }
 
 export function normalizeBars(rawBars) {
@@ -154,11 +136,13 @@ export function computeRangeConfirmation({ bars, windowStart, windowMinutes = 15
 }
 
 /**
- * The tool itself: validates the whole request first, fetches the regular-session bars from the session open (so volume baselines see the
- * bars since the open) to the earlier of now and the session close, and computes. `fetchBars(symbol, startIso, endIso)` returns the bars
- * response ({ bars, feed, count }). Nothing here can place or change an order.
+ * The tool itself: validates the whole request first, takes the session bounds for the anchor's New York date from the broker market
+ * calendar (the same source get_datetime uses, so early closes and holidays are respected; no fixed-clock calendar), fetches the
+ * regular-session bars from the open to the earlier of now and the session close, and computes. `fetchCalendar()` returns the calendar
+ * response ({ sessions: [{ date, open, close }] }); `fetchBars(symbol, startIso, endIso)` returns the bars response ({ bars, feed, count }).
+ * Bars outside the regular session are ignored. Nothing here can place or change an order.
  */
-export async function getRangeConfirmation(args, { fetchBars, now = Date.now() } = {}) {
+export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now = Date.now() } = {}) {
   const symbol = typeof args?.symbol === 'string' ? args.symbol.trim().toUpperCase() : '';
   if (!/^[A-Z.]{1,10}$/.test(symbol)) return { status: 'invalid_input', error: 'symbol must be a stock ticker such as NVDA' };
   const anchor = parseStrictUtc(args?.window_start);
@@ -168,17 +152,27 @@ export async function getRangeConfirmation(args, { fetchBars, now = Date.now() }
     return { status: 'invalid_input', error: 'window_minutes must be a multiple of 5 from 5 to 60' };
   }
   if (args?.baseline_start !== undefined) return { status: 'invalid_input', error: 'baseline_start is not accepted: the baseline always starts at the session open' };
-  const session = regularSessionUtc(anchor);
-  if (!session) return { status: 'invalid_input', error: 'the regular session for window_start could not be determined' };
-  if (anchor < session.open || anchor >= session.close) {
-    return { status: 'invalid_input', error: `window_start is outside the regular session (${iso(session.open)} to ${iso(session.close)}); for news published before the open use the session open as window_start, a pre-market bar never forms the range` };
-  }
   if (anchor > now) return { status: 'invalid_input', error: `window_start ${iso(anchor)} is in the future (current UTC ${iso(now)})` };
-  const end = Math.min(now, session.close);
-  const response = await fetchBars(symbol, iso(session.open), iso(end));
-  const bars = Array.isArray(response?.bars) ? response.bars : [];
-  return computeRangeConfirmation({
-    bars, windowStart: anchor, windowMinutes: minutes, symbol, feed: response?.feed ?? null,
-    reportedCount: typeof response?.count === 'number' ? response.count : null,
-  });
+  let calendar;
+  try { calendar = await fetchCalendar(); } catch (error) {
+    return { status: 'invalid_input', error: `the broker market calendar is unavailable, so the session bounds cannot be verified (${error?.message || 'error'})` };
+  }
+  const date = nyDateOf(anchor);
+  const row = Array.isArray(calendar?.sessions) ? calendar.sessions.find(s => s && s.date === date) : null;
+  const open = row ? nyWallToInstantMs(row.date, row.open) : null;
+  const close = row ? nyWallToInstantMs(row.date, row.close) : null;
+  if (open === null || close === null || close <= open) {
+    return { status: 'invalid_input', error: `the broker market calendar has no regular session for ${date} (it lists today and the next days only), so the range cannot be computed` };
+  }
+  if (anchor < open || anchor >= close) {
+    return { status: 'invalid_input', error: `window_start is outside the regular session of ${date} (${iso(open)} to ${iso(close)}); for news published before the open use the session open as window_start, a pre-market bar never forms the range` };
+  }
+  const end = Math.min(now, close);
+  const response = await fetchBars(symbol, iso(open), iso(end));
+  const raw = Array.isArray(response?.bars) ? response.bars : [];
+  const reportedCount = typeof response?.count === 'number' ? response.count : null;
+  const bars = raw.filter(bar => { const at = typeof (bar?.Timestamp ?? bar?.timestamp ?? bar?.t) === 'number' ? (bar.Timestamp ?? bar.timestamp ?? bar.t) : Date.parse(bar?.Timestamp ?? bar?.timestamp ?? bar?.t); return Number.isFinite(at) && at >= open && at < close; });
+  const result = computeRangeConfirmation({ bars, windowStart: anchor, windowMinutes: minutes, symbol, feed: response?.feed ?? null, reportedCount: reportedCount === null ? null : (reportedCount === raw.length ? bars.length : reportedCount) });
+  if (bars.length !== raw.length) result.notes.push(`${raw.length - bars.length} bar(s) outside the regular session (${iso(open)} to ${iso(close)}) were ignored`);
+  return result;
 }

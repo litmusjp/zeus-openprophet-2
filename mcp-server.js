@@ -638,12 +638,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_range_confirmation',
-        description: 'Read-only arithmetic for the post-news range and confirmation rules, computed from the FULL set of completed 5-minute bars of that regular session, from the session open to now (one feed, none dropped), so volume baselines see every bar since the open. window_start is used exactly as given: the session open for news published before the open, or the publication time for news published during the session (never rounded; the window holds the actual five-minute bar starts from window_start up to but not including window_start plus window_minutes). Returns the range (high, low, midpoint, height, the window bar starts) only when every bar of the window is present, complete and readable; otherwise it lists the missing, forming or unreadable window starts and returns no range. Lists EVERY completed bar after the window with its close, volume, baseline volume (up to 6 prior completed bars), direction (call above the high, put below the low) and confirming flag (true, false, or null when the bar or its baseline cannot be verified), plus the earliest confirming bar per direction. It states facts only: it never decides an entry, stop or exit and places no order.',
+        description: 'Read-only arithmetic for the post-news range and confirmation rules, computed from the FULL set of completed 5-minute bars of that regular session, from the session open to now or the session close (whichever is earlier) (one feed, none dropped), so volume baselines see every bar since the open. window_start is used exactly as given: the session open for news published before the open, or the publication time for news published during the session (never rounded; the window holds the actual five-minute bar starts from window_start up to but not including window_start plus window_minutes). Returns the range (high, low, midpoint, height, the window bar starts) only when every bar of the window is present, complete and readable; otherwise it lists the missing, forming or unreadable window starts and returns no range. Lists EVERY completed bar after the window with its close, volume, baseline volume (up to 6 prior completed bars), direction (call above the high, put below the low) and confirming flag (true, false, or null when the bar or its baseline cannot be verified), plus the earliest confirming bar per direction. It states facts only: it never decides an entry, stop or exit and places no order.',
         inputSchema: {
           type: 'object',
           properties: {
             symbol: { type: 'string', description: 'Stock symbol (e.g., NVDA)' },
-            window_start: { type: 'string', description: 'RFC3339 UTC timestamp ending in Z, inside the regular session of its New York date: the session open (session_open_et from get_datetime, as UTC) for pre-open news, or the publication time for news published during the session' },
+            window_start: { type: 'string', description: 'RFC3339 UTC timestamp ending in Z, inside the current regular session as listed by the broker market calendar (early closes and holidays respected): the session open (session_open_et from get_datetime, as UTC) for pre-open news, or the publication time for news published during the session' },
             window_minutes: { type: 'number', description: 'Window length in minutes, a multiple of 5 from 5 to 60 (default 15, the range length in your Strategy Rules)' },
           },
           required: ['symbol', 'window_start'],
@@ -1814,6 +1814,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_range_confirmation': {
         const computed = await getRangeConfirmation(args, {
+          fetchCalendar: () => callTradingBot('/calendar'),
           fetchBars: (symbol, start, end) => callTradingBot(`/market/bars/${encodeURIComponent(symbol)}?${new URLSearchParams({ start, end, timeframe: '5Min' }).toString()}`),
         });
         if (computed.status === 'invalid_input') return { content: [{ type: 'text', text: computed.error }], isError: true };

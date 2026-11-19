@@ -1701,7 +1701,10 @@ ${userBlock}`;
         read: { ...(primaryAgent.permission?.read && typeof primaryAgent.permission.read === 'object' ? primaryAgent.permission.read : {}), ...TRADING_AGENT_READ_DENIES },
       };
       delete primaryAgent.maxSteps;
-      invocationEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inherited, model: ocModel, small_model: ocModel, agent: agents });
+      // A refused permission ask (a read outside the allowed folders, which cannot be answered in a headless run) otherwise ends the whole beat
+      // before the model sees the refusal (reproduced on the OpenCode runtime with a local mock provider). This experimental switch only lets the
+      // run continue with the error returned to the model: it grants no permission, so every denied or asked path stays refused.
+      invocationEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...inherited, experimental: { ...(inherited.experimental && typeof inherited.experimental === 'object' && !Array.isArray(inherited.experimental) ? inherited.experimental : {}), continue_loop_on_deny: true }, model: ocModel, small_model: ocModel, agent: agents });
 
       const proc = this.spawnFn('opencode', args, {
         cwd: process.cwd(),

@@ -278,3 +278,19 @@ test('the calendar is authoritative: no session row, an unavailable calendar, or
   const bad = tool(bars, { count: 9 });
   assert.equal((await getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: bad.fetchBars, fetchCalendar: CAL, now: Date.parse(z('14:55')) })).status, 'data_incomplete');
 });
+
+// Hermes calendar verification (B-B03-C1): the reported count is checked against the RAW source rows, before out-of-session bars are dropped.
+test('B-B03-C1: the reported count must equal the raw rows returned, whatever the session filter does', async () => {
+  const bars = [mk('14:30'), mk('14:35'), mk('14:40'), mk('14:45'), mk('13:00')]; // five raw rows, four inside the session (13:00Z is pre-market)
+  const run = async count => getRangeConfirmation({ symbol: 'NVDA', window_start: z('14:30') }, { fetchBars: tool(bars, { count }).fetchBars, fetchCalendar: CAL, now: Date.parse(z('14:55')) });
+  const short = await run(4); // raw 5, reported 4, filtered 4: inconsistent source
+  assert.equal(short.status, 'data_incomplete');
+  assert.equal(short.range, null);
+  const ok = await run(5); // raw 5, reported 5, filtered 4: consistent, one bar ignored with a note
+  assert.equal(ok.status, 'ok');
+  assert.ok(ok.range);
+  assert.match(ok.notes.join(' '), /1 bar\(s\) outside the regular session/);
+  const high = await run(9); // raw 5, reported 9
+  assert.equal(high.status, 'data_incomplete');
+  assert.equal(high.range, null);
+});

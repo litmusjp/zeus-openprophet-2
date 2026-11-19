@@ -172,7 +172,10 @@ export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now
   const raw = Array.isArray(response?.bars) ? response.bars : [];
   const reportedCount = typeof response?.count === 'number' ? response.count : null;
   const bars = raw.filter(bar => { const at = typeof (bar?.Timestamp ?? bar?.timestamp ?? bar?.t) === 'number' ? (bar.Timestamp ?? bar.timestamp ?? bar.t) : Date.parse(bar?.Timestamp ?? bar?.timestamp ?? bar?.t); return Number.isFinite(at) && at >= open && at < close; });
-  const result = computeRangeConfirmation({ bars, windowStart: anchor, windowMinutes: minutes, symbol, feed: response?.feed ?? null, reportedCount: reportedCount === null ? null : (reportedCount === raw.length ? bars.length : reportedCount) });
+  const common = { windowStart: anchor, windowMinutes: minutes, symbol, feed: response?.feed ?? null };
+  // The source count must agree with what the source returned BEFORE out-of-session bars are dropped; only then is the filtered set computed.
+  if (reportedCount !== null && reportedCount !== raw.length) return computeRangeConfirmation({ bars: raw, ...common, reportedCount });
+  const result = computeRangeConfirmation({ bars, ...common, reportedCount: null });
   if (bars.length !== raw.length) result.notes.push(`${raw.length - bars.length} bar(s) outside the regular session (${iso(open)} to ${iso(close)}) were ignored`);
   return result;
 }

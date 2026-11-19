@@ -169,32 +169,88 @@ function isUnfilledOpeningPositionNotFound(record, records) {
   return true;
 }
 // B1 label triggers. A single-position lookup answers 404 once the contract is gone. These two triggers downgrade it to a warning
-// only when the same activity proves, with exact account, contract, order and quantity binding, that the contract was closed by a
-// filled full close or that its order was cancelled with nothing filled. Labels only: they are never broker truth and never
-// permission to resubmit. Missing, partial, ambiguous, contradictory or unrelated evidence leaves the 404 an essential failure.
+// only when the same activity proves, with positive and consistent account, contract, order and quantity identity, that the
+// contract was closed by a filled full close or that its order was cancelled with nothing filled, in a COMPLETE broker read taken
+// after both the action and the lookup. Labels only: they are never broker truth and never permission to resubmit. A missing
+// identity never counts as a match; conflicting aliases, unrelated or contradictory diagnostics, stale evidence, and missing,
+// partial or ambiguous evidence all leave the lookup an essential failure.
 const CLOSED_POSITION_WARNING = 'get_options_position not found after confirmed full close';
 const CANCELED_ORDER_WARNING = 'get_options_position not found after confirmed cancel';
 const TERMINAL_CANCEL_STATUSES = new Set(['canceled', 'cancelled']);
+const TERMINAL_UNFILLED_STATUSES = new Set(['canceled', 'cancelled', 'expired', 'rejected', 'done_for_day', 'replaced']);
 const positiveNumber = value => typeof value === 'number' && Number.isFinite(value) && value > 0;
 const completeOrdersRead = record => {
   const { body, orders } = ordersFromRead(record);
   return body && !Array.isArray(body) && body.broker_state === 'available' && body.complete === true && Array.isArray(orders) ? orders : null;
 };
-const sameAccount = (a, b) => {
-  const left = fieldOf(a, ['BrokerAccountID', 'broker_account_id'], trimNormal);
-  const right = fieldOf(b, ['BrokerAccountID', 'broker_account_id'], trimNormal);
-  if (left.ambiguous || right.ambiguous) return false;
-  return !left.present || !right.present || left.value === right.value;
+// The lookup must be an unambiguous structured 404: a diagnostics status of exactly 404, no other HTTP status anywhere in the answer
+// (an authentication or server answer with misleading prose is not a not-found), and the not-found text from the lookup itself.
+function isStrictPositionNotFound(record) {
+  if (!isPositionNotFoundRecord(record)) return false;
+  const source = typeof record.error === 'string' && record.error.trim() ? record.error : (typeof record.result === 'string' ? record.result : '');
+  const parsed = parseJsonish(source);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  const diagnostics = parsed.diagnostics;
+  if (!diagnostics || typeof diagnostics !== 'object' || diagnostics.status !== 404) return false;
+  if (diagnostics.http_status !== undefined && diagnostics.http_status !== 404) return false;
+  if (!/no open position found|options position not found/i.test(String(parsed.error || ''))) return false;
+  const codes = [...source.matchAll(/\\?"(?:http_)?status\\?"\s*:\s*(\d+)/g)].map(match => Number(match[1]));
+  return codes.length > 0 && codes.every(code => code === 404);
+}
+// Identity helpers. A row may spell a field two ways; two different values are a conflict, never a match.
+const accountOf = row => {
+  const field = fieldOf(row, ['BrokerAccountID', 'broker_account_id'], trimNormal);
+  return field.present && !field.ambiguous && typeof field.value === 'string' && field.value ? field.value : null;
 };
-const orderRowsFor = (orders, symbol) => orders.filter(order => [order?.Symbol, order?.symbol].some(value => trimmedText(value) === symbol));
+function rowMatches(row, names, wanted) {
+  const field = fieldOf(row, names, trimNormal);
+  if (!field.present) return 'no';
+  const values = names.map(name => row?.[name]).filter(value => value !== undefined).map(trimNormal);
+  if (field.ambiguous) return values.includes(wanted) ? 'conflict' : 'no';
+  return field.value === wanted ? 'yes' : 'no';
+}
+const rowsForSymbol = (rows, symbol) => {
+  const out = [];
+  for (const row of rows) {
+    const verdict = rowMatches(row, ['Symbol', 'symbol'], symbol);
+    if (verdict === 'conflict') return null;
+    if (verdict === 'yes') out.push(row);
+  }
+  return out;
+};
+const orderById = (rows, id) => {
+  const mine = [];
+  for (const row of rows) {
+    const verdict = rowMatches(row, ['ID', 'order_id'], id);
+    if (verdict === 'conflict') return null;
+    if (verdict === 'yes') mine.push(row);
+  }
+  return mine;
+};
 function positionRowsFor(read, symbol) {
   const rows = parseJsonish(read.result);
-  if (!Array.isArray(rows)) return null;
-  return rows.filter(row => [row?.Symbol, row?.symbol].some(value => trimmedText(value) === symbol));
+  return Array.isArray(rows) ? rowsForSymbol(rows, symbol) : null;
 }
+// Every broker account identity the activity shows (positions, orders, acknowledgement, account read) must be one single account.
+function activityAccountIds(records) {
+  const ids = new Set();
+  const take = row => { for (const name of ['BrokerAccountID', 'broker_account_id']) if (row?.[name] !== undefined) ids.add(trimNormal(row[name])); };
+  for (const read of records) {
+    if (!isToolCallRecord(read) || hasStructuredFailure(read)) continue;
+    const tool = toolNameOf(read);
+    if (tool === 'get_options_positions') { const rows = parseJsonish(read.result); if (Array.isArray(rows)) rows.forEach(take); }
+    else if (tool === 'get_orders') { const { orders } = ordersFromRead(read); if (Array.isArray(orders)) orders.forEach(take); }
+    else if (tool === 'place_options_order') { const body = parseJsonish(read.result); if (body && typeof body === 'object') take(body); }
+    else if (tool === 'get_account') {
+      const body = parseJsonish(read.result);
+      if (body && typeof body === 'object' && !Array.isArray(body)) { take(body); for (const name of ['ID', 'account_id']) if (body[name] !== undefined) ids.add(trimNormal(body[name])); }
+    }
+  }
+  return ids;
+}
+const singleAccount = (records, account) => { const ids = activityAccountIds(records); return ids.size === 1 && ids.has(account); };
 // Another row for the same contract is history, not a contradiction, only when it is terminal with nothing filled (cancelled, expired,
 // rejected) or an earlier filled OPENING order. Anything working, partly filled, ambiguous, or a second closing fill contradicts.
-const TERMINAL_UNFILLED_STATUSES = new Set(['canceled', 'cancelled', 'expired', 'rejected', 'done_for_day', 'replaced']);
 const isTerminalUnfilled = row => {
   const state = fieldOf(row, ['Status', 'status'], lowerNormal);
   const filled = fieldOf(row, ['FilledQty', 'filled_qty']);
@@ -204,12 +260,12 @@ const isTerminalUnfilled = row => {
   return state.value === 'filled' && positiveNumber(filled.value) && intent.value === 'buy_to_open';
 };
 function isConfirmedFullClosePositionNotFound(record, records) {
-  if (!isPositionNotFoundRecord(record)) return false;
+  if (!isStrictPositionNotFound(record)) return false;
   const symbol = trimmedText(record.args?.symbol ?? record.input?.symbol);
   const at = records.indexOf(record);
   if (!symbol || at < 0) return false;
   // The position held before the close: exactly one row for the contract in a successful read before the lookup, with a positive
-  // quantity. A read after the lookup that still holds the contract contradicts a full close.
+  // quantity and a positive account. A read after the lookup that still holds the contract contradicts a full close.
   const held = [];
   for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_options_positions' && !hasStructuredFailure(r))) {
     const rows = positionRowsFor(read, symbol);
@@ -219,32 +275,37 @@ function isConfirmedFullClosePositionNotFound(record, records) {
   }
   if (held.length !== 1) return false;
   const [position] = held;
+  const account = accountOf(position);
   const qty = fieldOf(position, ['Qty', 'qty']);
-  if (qty.ambiguous || !positiveNumber(qty.value)) return false;
-  // The one order this activity placed for the contract (acknowledged, not failed) is the order that must be the closing fill.
+  if (!account || qty.ambiguous || !positiveNumber(qty.value)) return false;
+  // The one order this activity placed for the contract (a closing sell, acknowledged, not failed, naming the same contract) is the order
+  // that must be the closing fill.
   const placed = records.slice(0, at).filter(r => isToolCallRecord(r) && toolNameOf(r) === 'place_options_order' && trimmedText(r.args?.symbol) === symbol);
   if (placed.length !== 1 || hasStructuredFailure(placed[0])) return false;
+  if (lowerNormal(trimmedText(placed[0].args?.position_intent)) !== 'sell_to_close') return false;
   const ack = parseJsonish(placed[0].result);
   if (!ack || typeof ack !== 'object' || Array.isArray(ack)) return false;
   const orderId = trimmedText(ack.order_id);
-  if (!orderId) return false;
+  if (!orderId || trimmedText(ack.symbol) !== symbol) return false;
+  if (ack.broker_account_id !== undefined && trimNormal(ack.broker_account_id) !== account) return false;
+  if (!singleAccount(records, account)) return false;
   let confirmed = false;
   for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_orders' && !hasStructuredFailure(r) && records.indexOf(r) > at)) {
     const orders = completeOrdersRead(read);
     if (!orders) continue;
-    const rows = orderRowsFor(orders, symbol);
-    const mine = rows.filter(order => [order?.ID, order?.order_id].some(value => trimmedText(value) === orderId));
-    if (mine.length > 1) return false;
+    const rows = rowsForSymbol(orders, symbol);
+    if (rows === null) return false;
+    const mine = orderById(rows, orderId);
+    if (mine === null || mine.length > 1) return false;
     if (mine.length === 0) continue;
     const [order] = mine;
-    const id = fieldOf(order, ['ID', 'order_id'], trimNormal);
     const state = fieldOf(order, ['Status', 'status'], lowerNormal);
     const filled = fieldOf(order, ['FilledQty', 'filled_qty']);
     const orderQty = fieldOf(order, ['Qty', 'qty']);
     const side = fieldOf(order, ['Side', 'side'], lowerNormal);
-    if ([id, state, filled, orderQty, side].some(field => field.ambiguous) || id.value !== orderId) return false;
-    if (!sameAccount(position, order) || !isClosingIntent(order)) return false;
-    // No residual, replacement or second fill: every other row for the contract is terminal with nothing filled.
+    if ([state, filled, orderQty, side].some(field => field.ambiguous)) return false;
+    if (accountOf(order) !== account || !isClosingIntent(order)) return false;
+    // No residual, replacement or second fill: every other row for the contract is history.
     if (rows.some(row => row !== order && !isTerminalUnfilled(row))) return false;
     if (side.value === 'sell' && state.value === 'filled' && positiveNumber(filled.value) && filled.value === orderQty.value && filled.value === qty.value) confirmed = true;
     else return false;
@@ -252,30 +313,34 @@ function isConfirmedFullClosePositionNotFound(record, records) {
   return confirmed;
 }
 function isConfirmedCancelPositionNotFound(record, records) {
-  if (!isPositionNotFoundRecord(record)) return false;
+  if (!isStrictPositionNotFound(record)) return false;
   const symbol = trimmedText(record.args?.symbol ?? record.input?.symbol);
   const at = records.indexOf(record);
   if (!symbol || at < 0) return false;
-  // One successful cancel of one order id, which must be the contract's order in a later complete broker read.
+  // One successful cancel of one order id, which must be the contract's order in a complete broker read taken after BOTH the cancel
+  // and the lookup.
   const cancels = records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'cancel_order');
   if (cancels.length !== 1 || hasStructuredFailure(cancels[0])) return false;
   const cancelledId = trimmedText(cancels[0].args?.order_id);
   const reply = parseJsonish(cancels[0].result);
   if (!cancelledId || !reply || typeof reply !== 'object' || !/cancell?ed successfully/i.test(String(reply.message || ''))) return false;
+  const after = Math.max(at, records.indexOf(cancels[0]));
   let confirmed = false;
-  const cancelAt = records.indexOf(cancels[0]);
-  for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_orders' && !hasStructuredFailure(r) && records.indexOf(r) > cancelAt)) {
+  for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_orders' && !hasStructuredFailure(r) && records.indexOf(r) > after)) {
     const orders = completeOrdersRead(read);
     if (!orders) continue;
-    const rows = orderRowsFor(orders, symbol);
-    const mine = rows.filter(order => [order?.ID, order?.order_id].some(value => trimmedText(value) === cancelledId));
-    if (mine.length > 1) return false;
+    const rows = rowsForSymbol(orders, symbol);
+    if (rows === null) return false;
+    const mine = orderById(rows, cancelledId);
+    if (mine === null || mine.length > 1) return false;
     if (mine.length === 0) continue;
     const [order] = mine;
+    const account = accountOf(order);
     const state = fieldOf(order, ['Status', 'status'], lowerNormal);
     const filled = fieldOf(order, ['FilledQty', 'filled_qty']);
     const orderQty = fieldOf(order, ['Qty', 'qty']);
-    if ([state, filled, orderQty].some(field => field.ambiguous)) return false;
+    if (!account || [state, filled, orderQty].some(field => field.ambiguous)) return false;
+    if (!singleAccount(records, account)) return false;
     // Terminal cancelled, nothing filled, a positive quantity, and no other row for the contract that is working or filled.
     if (!TERMINAL_CANCEL_STATUSES.has(state.value) || !isExactZero(filled.value) || !positiveNumber(orderQty.value)) return false;
     if (rows.some(row => row !== order && !isTerminalUnfilled(row))) return false;

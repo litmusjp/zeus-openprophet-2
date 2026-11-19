@@ -98,3 +98,49 @@ test('the existing reconciled-close and unfilled-opening triggers are unchanged 
   const records = [call('get_options_positions', {}, []), lookup, call('get_orders', {}, { orders: [order()] })];
   assert.deepEqual(labelOf(records).warnings, ['get_options_position not found after confirmed close']);
 });
+
+// QA round 1 (B-B01): the seven negative controls that the first candidate wrongly downgraded. Each runs through the real classifier.
+const edit = (records, tool, fn) => records.map(r => (r.tool === `prophet_${tool}` ? fn(r) : r));
+const rewrite = (records, tool, fn) => edit(records, tool, r => ({ ...r, result: JSON.stringify(fn(JSON.parse(r.result))) }));
+const stillFailed = (name, records) => {
+  const { essential, warnings } = classifyFailures(records);
+  assert.ok(essential.some(r => r.tool === 'prophet_get_options_position'), `${name}: must stay an essential failure (warnings: ${warnings})`);
+};
+
+test('B-B01: missing or conflicting identity, misleading diagnostics and stale reads never downgrade a lookup', () => {
+  // 1. both account ids missing on the held position and the closing order
+  let r = rewrite(closeActivity(), 'get_options_positions', rows => rows.map(({ BrokerAccountID, ...rest }) => rest));
+  r = rewrite(r, 'get_orders', body => ({ ...body, orders: body.orders.map(({ BrokerAccountID, ...rest }) => rest) }));
+  stillFailed('missing account ids', r);
+  // 2. acknowledgement names another contract
+  stillFailed('acknowledgement names another contract', rewrite(closeActivity(), 'place_options_order', ack => ({ ...ack, symbol: 'OTHER' })));
+  // 3. broker row spells the symbol two ways with different values
+  stillFailed('conflicting symbol aliases on the order row', rewrite(closeActivity(), 'get_orders', body => ({ ...body, orders: body.orders.map(o => ({ ...o, symbol: 'OTHER' })) })));
+  // 4. structured 401 whose prose still says "no open position found"
+  stillFailed('unauthorised diagnostics with not-found prose', closeActivity().map(x => (x.tool === 'prophet_get_options_position'
+    ? { ...x, error: '{"error":"unauthorized: no open position found","diagnostics":{"status":401}}' } : x)));
+  // 4b. a 404 in the diagnostics but a different status elsewhere in the answer
+  stillFailed('mixed statuses', closeActivity().map(x => (x.tool === 'prophet_get_options_position'
+    ? { ...x, error: '{"error":"no open position found","diagnostics":{"status":404,"http_status":401}}' } : x)));
+  // 5. the confirming read comes after the cancel but BEFORE the lookup
+  const open = { BrokerAccountID: ACCT, ID: 'ord-open', Symbol: SYM, Qty: 5, Side: 'buy', Status: 'canceled', FilledQty: 0, PositionIntent: 'buy_to_open' };
+  stillFailed('cancel read before the lookup', [call('get_options_positions', {}, []),
+    call('cancel_order', { order_id: 'ord-open' }, { message: 'Order canceled successfully' }), ordersRead([open]), notFound()]);
+  // 6. the cancelled row has an ID and a conflicting order_id
+  stillFailed('conflicting order id aliases', cancelActivity({ orders: [{ ...open, order_id: 'OTHER' }] }));
+  // 7. the account read says one account and the cancelled row another
+  stillFailed('account mismatch with the account read', [call('get_options_positions', {}, []), call('get_account', {}, { ID: ACCT }),
+    call('cancel_order', { order_id: 'ord-open' }, { message: 'Order canceled successfully' }), notFound(), ordersRead([{ ...open, BrokerAccountID: 'acct-2' }])]);
+  // 8. the cancelled order row has no account at all
+  const { BrokerAccountID, ...noAccount } = open;
+  stillFailed('cancelled row without an account', cancelActivity({ orders: [noAccount] }));
+  // 9. position row and order row name different accounts
+  stillFailed('position and order accounts differ', rewrite(closeActivity(), 'get_options_positions', rows => rows.map(p => ({ ...p, BrokerAccountID: 'acct-2' }))));
+});
+
+test('B-B01: the positive controls and the saved Nov 18 shapes still downgrade through the real classifier', () => {
+  assert.deepEqual(classifyFailures(closeActivity()).warnings, ['get_options_position not found after confirmed full close']);
+  assert.deepEqual(classifyFailures(cancelActivity()).warnings, ['get_options_position not found after confirmed cancel']);
+  const accountRead = call('get_account', {}, { BrokerAccountID: ACCT, ID: ACCT });
+  assert.equal(classifyFailures([accountRead, ...closeActivity()]).essential.length, 0, 'an agreeing account read is fine');
+});

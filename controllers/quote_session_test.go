@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"errors"
 	"math"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"prophet-trader/interfaces"
 
+	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/gin-gonic/gin"
 )
 
@@ -178,5 +180,34 @@ func TestSlowSessionEnrichmentDoesNotDelayTheQuote(t *testing.T) {
 	}
 	if _, has := session["daily_open"]; has {
 		t.Fatalf("a timed-out session must not invent an open: %v", session)
+	}
+}
+
+type quoteErrData struct {
+	sessionQuoteData
+	quoteErr error
+}
+
+func (d *quoteErrData) GetLatestQuote(context.Context, string) (*interfaces.Quote, error) {
+	return nil, d.quoteErr
+}
+
+// A typed provider 400 is invalid input (400, one attempt for the caller); every other quote failure stays a 500 so genuine
+// transient-server retries are unchanged. Text that merely contains "400" is never treated as a typed 400.
+func TestQuoteEndpointMapsTypedProviderBadRequestToInvalidInput(t *testing.T) {
+	params := gin.Params{{Key: "symbol", Value: "AMD261218P00500000"}}
+	typed := &alpaca.APIError{StatusCode: 400, Code: 40010001, Message: "invalid symbol: AMD261218P00500000"}
+	wrapped := fmt.Errorf("failed to get latest quote: %w", typed)
+	recorder, body := getJSON(t, NewOrderController(nil, &quoteErrData{quoteErr: wrapped}, nil).HandleGetQuote, "/x", params)
+	if recorder.Code != 400 || body["status"] != "invalid_request" || body["category"] != "invalid_symbol" {
+		t.Fatalf("typed provider 400 must be invalid input: %d %s", recorder.Code, recorder.Body.String())
+	}
+	server := fmt.Errorf("failed to get latest quote: %w", &alpaca.APIError{StatusCode: 503, Code: 50310000, Message: "unavailable"})
+	if recorder, _ = getJSON(t, NewOrderController(nil, &quoteErrData{quoteErr: server}, nil).HandleGetQuote, "/x", params); recorder.Code != 500 {
+		t.Fatalf("a provider 5xx must stay a 500: %d", recorder.Code)
+	}
+	textOnly := errors.New("failed to get latest quote: code=400, message=invalid symbol (HTTP 400)")
+	if recorder, _ = getJSON(t, NewOrderController(nil, &quoteErrData{quoteErr: textOnly}, nil).HandleGetQuote, "/x", params); recorder.Code != 500 {
+		t.Fatalf("untyped text containing 400 must not be trusted: %d", recorder.Code)
 	}
 }

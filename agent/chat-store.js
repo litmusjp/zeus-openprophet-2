@@ -168,6 +168,127 @@ function isUnfilledOpeningPositionNotFound(record, records) {
   }
   return true;
 }
+// B1 label triggers. A single-position lookup answers 404 once the contract is gone. These two triggers downgrade it to a warning
+// only when the same activity proves, with exact account, contract, order and quantity binding, that the contract was closed by a
+// filled full close or that its order was cancelled with nothing filled. Labels only: they are never broker truth and never
+// permission to resubmit. Missing, partial, ambiguous, contradictory or unrelated evidence leaves the 404 an essential failure.
+const CLOSED_POSITION_WARNING = 'get_options_position not found after confirmed full close';
+const CANCELED_ORDER_WARNING = 'get_options_position not found after confirmed cancel';
+const TERMINAL_CANCEL_STATUSES = new Set(['canceled', 'cancelled']);
+const positiveNumber = value => typeof value === 'number' && Number.isFinite(value) && value > 0;
+const completeOrdersRead = record => {
+  const { body, orders } = ordersFromRead(record);
+  return body && !Array.isArray(body) && body.broker_state === 'available' && body.complete === true && Array.isArray(orders) ? orders : null;
+};
+const sameAccount = (a, b) => {
+  const left = fieldOf(a, ['BrokerAccountID', 'broker_account_id'], trimNormal);
+  const right = fieldOf(b, ['BrokerAccountID', 'broker_account_id'], trimNormal);
+  if (left.ambiguous || right.ambiguous) return false;
+  return !left.present || !right.present || left.value === right.value;
+};
+const orderRowsFor = (orders, symbol) => orders.filter(order => [order?.Symbol, order?.symbol].some(value => trimmedText(value) === symbol));
+function positionRowsFor(read, symbol) {
+  const rows = parseJsonish(read.result);
+  if (!Array.isArray(rows)) return null;
+  return rows.filter(row => [row?.Symbol, row?.symbol].some(value => trimmedText(value) === symbol));
+}
+// Another row for the same contract is history, not a contradiction, only when it is terminal with nothing filled (cancelled, expired,
+// rejected) or an earlier filled OPENING order. Anything working, partly filled, ambiguous, or a second closing fill contradicts.
+const TERMINAL_UNFILLED_STATUSES = new Set(['canceled', 'cancelled', 'expired', 'rejected', 'done_for_day', 'replaced']);
+const isTerminalUnfilled = row => {
+  const state = fieldOf(row, ['Status', 'status'], lowerNormal);
+  const filled = fieldOf(row, ['FilledQty', 'filled_qty']);
+  const intent = fieldOf(row, ['PositionIntent', 'position_intent'], lowerNormal);
+  if (state.ambiguous || filled.ambiguous || intent.ambiguous) return false;
+  if (TERMINAL_UNFILLED_STATUSES.has(state.value) && isExactZero(filled.value)) return true;
+  return state.value === 'filled' && positiveNumber(filled.value) && intent.value === 'buy_to_open';
+};
+function isConfirmedFullClosePositionNotFound(record, records) {
+  if (!isPositionNotFoundRecord(record)) return false;
+  const symbol = trimmedText(record.args?.symbol ?? record.input?.symbol);
+  const at = records.indexOf(record);
+  if (!symbol || at < 0) return false;
+  // The position held before the close: exactly one row for the contract in a successful read before the lookup, with a positive
+  // quantity. A read after the lookup that still holds the contract contradicts a full close.
+  const held = [];
+  for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_options_positions' && !hasStructuredFailure(r))) {
+    const rows = positionRowsFor(read, symbol);
+    if (rows === null || rows.length > 1) return false;
+    if (rows.length === 1 && records.indexOf(read) > at) return false;
+    if (rows.length === 1) held.push(rows[0]);
+  }
+  if (held.length !== 1) return false;
+  const [position] = held;
+  const qty = fieldOf(position, ['Qty', 'qty']);
+  if (qty.ambiguous || !positiveNumber(qty.value)) return false;
+  // The one order this activity placed for the contract (acknowledged, not failed) is the order that must be the closing fill.
+  const placed = records.slice(0, at).filter(r => isToolCallRecord(r) && toolNameOf(r) === 'place_options_order' && trimmedText(r.args?.symbol) === symbol);
+  if (placed.length !== 1 || hasStructuredFailure(placed[0])) return false;
+  const ack = parseJsonish(placed[0].result);
+  if (!ack || typeof ack !== 'object' || Array.isArray(ack)) return false;
+  const orderId = trimmedText(ack.order_id);
+  if (!orderId) return false;
+  let confirmed = false;
+  for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_orders' && !hasStructuredFailure(r) && records.indexOf(r) > at)) {
+    const orders = completeOrdersRead(read);
+    if (!orders) continue;
+    const rows = orderRowsFor(orders, symbol);
+    const mine = rows.filter(order => [order?.ID, order?.order_id].some(value => trimmedText(value) === orderId));
+    if (mine.length > 1) return false;
+    if (mine.length === 0) continue;
+    const [order] = mine;
+    const id = fieldOf(order, ['ID', 'order_id'], trimNormal);
+    const state = fieldOf(order, ['Status', 'status'], lowerNormal);
+    const filled = fieldOf(order, ['FilledQty', 'filled_qty']);
+    const orderQty = fieldOf(order, ['Qty', 'qty']);
+    const side = fieldOf(order, ['Side', 'side'], lowerNormal);
+    if ([id, state, filled, orderQty, side].some(field => field.ambiguous) || id.value !== orderId) return false;
+    if (!sameAccount(position, order) || !isClosingIntent(order)) return false;
+    // No residual, replacement or second fill: every other row for the contract is terminal with nothing filled.
+    if (rows.some(row => row !== order && !isTerminalUnfilled(row))) return false;
+    if (side.value === 'sell' && state.value === 'filled' && positiveNumber(filled.value) && filled.value === orderQty.value && filled.value === qty.value) confirmed = true;
+    else return false;
+  }
+  return confirmed;
+}
+function isConfirmedCancelPositionNotFound(record, records) {
+  if (!isPositionNotFoundRecord(record)) return false;
+  const symbol = trimmedText(record.args?.symbol ?? record.input?.symbol);
+  const at = records.indexOf(record);
+  if (!symbol || at < 0) return false;
+  // One successful cancel of one order id, which must be the contract's order in a later complete broker read.
+  const cancels = records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'cancel_order');
+  if (cancels.length !== 1 || hasStructuredFailure(cancels[0])) return false;
+  const cancelledId = trimmedText(cancels[0].args?.order_id);
+  const reply = parseJsonish(cancels[0].result);
+  if (!cancelledId || !reply || typeof reply !== 'object' || !/cancell?ed successfully/i.test(String(reply.message || ''))) return false;
+  let confirmed = false;
+  const cancelAt = records.indexOf(cancels[0]);
+  for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_orders' && !hasStructuredFailure(r) && records.indexOf(r) > cancelAt)) {
+    const orders = completeOrdersRead(read);
+    if (!orders) continue;
+    const rows = orderRowsFor(orders, symbol);
+    const mine = rows.filter(order => [order?.ID, order?.order_id].some(value => trimmedText(value) === cancelledId));
+    if (mine.length > 1) return false;
+    if (mine.length === 0) continue;
+    const [order] = mine;
+    const state = fieldOf(order, ['Status', 'status'], lowerNormal);
+    const filled = fieldOf(order, ['FilledQty', 'filled_qty']);
+    const orderQty = fieldOf(order, ['Qty', 'qty']);
+    if ([state, filled, orderQty].some(field => field.ambiguous)) return false;
+    // Terminal cancelled, nothing filled, a positive quantity, and no other row for the contract that is working or filled.
+    if (!TERMINAL_CANCEL_STATUSES.has(state.value) || !isExactZero(filled.value) || !positiveNumber(orderQty.value)) return false;
+    if (rows.some(row => row !== order && !isTerminalUnfilled(row))) return false;
+    confirmed = true;
+  }
+  if (!confirmed) return false;
+  // The contract must not be held in any successful positions read of the activity, and every such read must be readable.
+  for (const read of records.filter(r => isToolCallRecord(r) && toolNameOf(r) === 'get_options_positions' && !hasStructuredFailure(r))) {
+    const rows = positionRowsFor(read, symbol);
+    if (rows === null || rows.length) return false;
+  }
+  return true;
+}
 // get_options_chain answers HTTP 503 with category market_closed before the regular session. Only that exact structured answer is a
 // warning, and only when NOTHING else in the evidence says otherwise: the answer (the result or the error, or both) may be the payload
 // itself or the payload inside the content/result/data wrappers, and every other key, part or string beside it (an authentication or
@@ -238,7 +359,7 @@ function adPreBrokerBlock(record) {
   return `${AD_BLOCK_PREFIX} (${decision})`;
 }
 /** Split an activity's failing records into essential failures and optional-research warnings. */
-function classifyFailures(records) {
+export function classifyFailures(records) {
   const essential = [];
   const warnings = [];
   for (const record of records) {
@@ -248,12 +369,14 @@ function classifyFailures(records) {
     else if (isReconciledPositionNotFound(record, records)) warnings.push(POSITION_NOT_FOUND_WARNING);
     else if (adPreBrokerBlock(record)) warnings.push(adPreBrokerBlock(record));
     else if (isUnfilledOpeningPositionNotFound(record, records)) warnings.push(UNFILLED_OPENING_WARNING);
+    else if (isConfirmedFullClosePositionNotFound(record, records)) warnings.push(CLOSED_POSITION_WARNING);
+    else if (isConfirmedCancelPositionNotFound(record, records)) warnings.push(CANCELED_ORDER_WARNING);
     else if (isMarketClosedChain(record)) warnings.push(MARKET_CLOSED_CHAIN_WARNING);
     else essential.push(record);
   }
   return { essential, warnings: [...new Set(warnings)] };
 }
-const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, MARKET_CLOSED_CHAIN_WARNING]);
+const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, CLOSED_POSITION_WARNING, CANCELED_ORDER_WARNING, MARKET_CLOSED_CHAIN_WARNING]);
 function activityOutcome({ recovery, status, essential, warnings }) {
   // A warning is appended to a Recorded or Recovered outcome, so it is never hidden by a recorded order status or a recovery.
   // An essential failure that was not recovered is never hidden: a recorded status or a recovery marker does not erase it, and
@@ -266,6 +389,8 @@ function activityOutcome({ recovery, status, essential, warnings }) {
   if (adBlocks.length) parts.push(adBlocks.join('; '));
   if (warnings.includes(POSITION_NOT_FOUND_WARNING)) parts.push(POSITION_NOT_FOUND_WARNING);
   if (warnings.includes(UNFILLED_OPENING_WARNING)) parts.push(UNFILLED_OPENING_WARNING);
+  if (warnings.includes(CLOSED_POSITION_WARNING)) parts.push(CLOSED_POSITION_WARNING);
+  if (warnings.includes(CANCELED_ORDER_WARNING)) parts.push(CANCELED_ORDER_WARNING);
   if (warnings.includes(MARKET_CLOSED_CHAIN_WARNING)) parts.push(MARKET_CLOSED_CHAIN_WARNING);
   const warning = parts.length ? ` (warning: ${parts.join('; ')})` : '';
   const residual = recovery ? essential.filter(record => record?.kind !== 'heartbeat_failure') : essential;

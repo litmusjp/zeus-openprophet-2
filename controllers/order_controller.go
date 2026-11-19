@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 	"github.com/sirupsen/logrus"
@@ -1637,6 +1638,13 @@ func (oc *OrderController) HandleGetQuote(c *gin.Context) {
 	ctx := context.Background()
 	quote, err := oc.dataService.GetLatestQuote(ctx, symbol)
 	if err != nil {
+		// A typed provider 400 (for example an option symbol sent to the stock quote endpoint) is invalid input, not a server fault:
+		// answer 400 so the caller makes one attempt and does not retry. Nested text containing "400" is never consulted.
+		var apiErr *alpaca.APIError
+		if errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == http.StatusBadRequest {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "invalid_request", "category": "invalid_symbol", "error": err.Error()})
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}

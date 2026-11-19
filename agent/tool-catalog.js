@@ -26,6 +26,8 @@ export const HERALD_TOOL_CATALOG = Object.fromEntries(
     .filter(([category]) => !HERALD_OMIT_CATEGORIES.has(category))
     .map(([category, tools]) => [category, tools.filter(tool => !HERALD_OMIT_TOOLS.has(tool))]),
 );
+// Herald alone also gets the read-only range and confirmation arithmetic helper (Guardian and Prophet menus are unchanged).
+HERALD_TOOL_CATALOG['Market Data'].splice(HERALD_TOOL_CATALOG['Market Data'].indexOf('get_historical_bars') + 1, 0, 'get_range_confirmation');
 
 // Render a catalog as the `**Category**: tool, tool` block used in prompts.
 export function renderToolMenu(options = {}) {

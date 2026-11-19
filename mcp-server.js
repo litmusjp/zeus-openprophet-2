@@ -16,6 +16,7 @@ import { authorizeAndUpdateHeartbeatPhase } from './mcp-heartbeat-guard.js';
 import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
 import { futureHistoricalBarsError } from './historical-bars-time.js';
+import { computeRangeConfirmation } from './range-confirmation.js';
 import { normalizeOptionLimitPrice } from './option-price.js';
 import { sessionFields, openingGateDecision, parseMinOpeningMinutes } from './session-clock.js';
 import { ordersFrom, isOptionExitOrder, buildPostCancelCheck, unverifiedPostCancelCheck } from './cancel-check.js';
@@ -633,6 +634,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ['symbol'],
+        },
+      },
+      {
+        name: 'get_range_confirmation',
+        description: 'Read-only arithmetic for the post-news range and confirmation rules, computed from the FULL set of completed 5-minute bars from the anchor to now (same feed, none dropped). Returns the range (high, low, midpoint, height, the window bar starts) only when every bar of the window is present, complete and readable; otherwise it lists the missing, forming or unreadable window starts and returns no range. Lists EVERY completed bar after the window with its close, volume, baseline volume (up to 6 prior completed bars), direction (call above the high, put below the low) and confirming flag, plus the earliest confirming bar per direction. It states facts only: it never decides an entry, stop or exit and places no order.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: { type: 'string', description: 'Stock symbol (e.g., NVDA)' },
+            window_start: { type: 'string', description: 'RFC3339 UTC timestamp ending in Z: the session open for pre-open news, or the publication time (rounded as your rules state) for news published during the session' },
+            window_minutes: { type: 'number', description: 'Window length in minutes, a multiple of 5 from 5 to 60 (default 15, the range length in your Strategy Rules)' },
+            baseline_start: { type: 'string', description: 'Optional RFC3339 UTC timestamp earlier than window_start (for example the session open for news published during the session) so volume baselines can use bars from before the window' },
+          },
+          required: ['symbol', 'window_start'],
         },
       },
       {
@@ -1796,6 +1811,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case 'get_range_confirmation': {
+        const symbol = typeof args.symbol === 'string' ? args.symbol.trim().toUpperCase() : '';
+        if (!/^[A-Z.]{1,10}$/.test(symbol)) return { content: [{ type: 'text', text: 'symbol must be a stock ticker such as NVDA' }], isError: true };
+        const isUtc = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/i.test(value) && Number.isFinite(Date.parse(value));
+        if (!isUtc(args.window_start) || (args.baseline_start !== undefined && !isUtc(args.baseline_start))) {
+          return { content: [{ type: 'text', text: 'window_start and baseline_start must be RFC3339 UTC timestamps ending in Z' }], isError: true };
+        }
+        const fetchFrom = args.baseline_start && Date.parse(args.baseline_start) < Date.parse(args.window_start) ? args.baseline_start : args.window_start;
+        const future = futureHistoricalBarsError(args.window_start, new Date().toISOString());
+        if (future) return future;
+        const params = new URLSearchParams({ start: fetchFrom, end: new Date().toISOString(), timeframe: '5Min' });
+        const bars = await callTradingBot(`/market/bars/${encodeURIComponent(symbol)}?${params.toString()}`);
+        const computed = computeRangeConfirmation({ bars: bars?.bars, windowStart: args.window_start, windowMinutes: args.window_minutes === undefined ? 15 : args.window_minutes, symbol, feed: bars?.feed ?? null });
+        if (computed.status === 'invalid_input') return { content: [{ type: 'text', text: computed.error }], isError: true };
+        return { content: [{ type: 'text', text: JSON.stringify(computed) }] };
       }
 
       case 'get_news': {

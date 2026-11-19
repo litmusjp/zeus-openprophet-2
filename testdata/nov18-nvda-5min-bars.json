@@ -1,0 +1,332 @@
+{
+ "symbol": "NVDA",
+ "timeframe": "5Min",
+ "feed": "iex",
+ "count": 36,
+ "bars": [
+  {
+   "Timestamp": "2026-11-18T14:30:00Z",
+   "Open": 159.205,
+   "High": 159.68,
+   "Low": 157.5,
+   "Close": 158.04,
+   "Volume": 434448,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T14:35:00Z",
+   "Open": 158.2,
+   "High": 158.4,
+   "Low": 155.86,
+   "Close": 156.46,
+   "Volume": 220890,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T14:40:00Z",
+   "Open": 156.55,
+   "High": 156.81,
+   "Low": 154.43,
+   "Close": 154.47,
+   "Volume": 287705,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T14:45:00Z",
+   "Open": 154.45,
+   "High": 155.04,
+   "Low": 153.905,
+   "Close": 154.49,
+   "Volume": 244421,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T14:50:00Z",
+   "Open": 154.52,
+   "High": 154.94,
+   "Low": 153.27,
+   "Close": 154.29,
+   "Volume": 209823,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T14:55:00Z",
+   "Open": 154.21,
+   "High": 155.17,
+   "Low": 153.55,
+   "Close": 154.845,
+   "Volume": 191166,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:00:00Z",
+   "Open": 154.78,
+   "High": 155.63,
+   "Low": 154.03,
+   "Close": 155.12,
+   "Volume": 230860,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:05:00Z",
+   "Open": 155.12,
+   "High": 155.5,
+   "Low": 154.43,
+   "Close": 154.64,
+   "Volume": 153512,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:10:00Z",
+   "Open": 154.635,
+   "High": 155.025,
+   "Low": 154.17,
+   "Close": 154.76,
+   "Volume": 153914,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:15:00Z",
+   "Open": 154.76,
+   "High": 155.48,
+   "Low": 153.73,
+   "Close": 154.33,
+   "Volume": 228046,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:20:00Z",
+   "Open": 154.335,
+   "High": 154.91,
+   "Low": 152.935,
+   "Close": 153.03,
+   "Volume": 143096,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:25:00Z",
+   "Open": 153.07,
+   "High": 154.09,
+   "Low": 152.72,
+   "Close": 153.785,
+   "Volume": 152879,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:30:00Z",
+   "Open": 153.755,
+   "High": 153.98,
+   "Low": 153.06,
+   "Close": 153.85,
+   "Volume": 133389,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:35:00Z",
+   "Open": 153.83,
+   "High": 154.04,
+   "Low": 152.48,
+   "Close": 152.62,
+   "Volume": 94502,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:40:00Z",
+   "Open": 152.63,
+   "High": 152.65,
+   "Low": 151.61,
+   "Close": 152.39,
+   "Volume": 142324,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:45:00Z",
+   "Open": 152.38,
+   "High": 153.135,
+   "Low": 152.16,
+   "Close": 152.75,
+   "Volume": 102450,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:50:00Z",
+   "Open": 152.77,
+   "High": 153.36,
+   "Low": 152.49,
+   "Close": 152.675,
+   "Volume": 92079,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T15:55:00Z",
+   "Open": 152.76,
+   "High": 153.285,
+   "Low": 152.69,
+   "Close": 153.25,
+   "Volume": 103626,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:00:00Z",
+   "Open": 153.225,
+   "High": 153.26,
+   "Low": 152.22,
+   "Close": 152.29,
+   "Volume": 152482,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:05:00Z",
+   "Open": 152.27,
+   "High": 152.895,
+   "Low": 152.27,
+   "Close": 152.825,
+   "Volume": 73236,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:10:00Z",
+   "Open": 152.85,
+   "High": 152.91,
+   "Low": 152.26,
+   "Close": 152.45,
+   "Volume": 78573,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:15:00Z",
+   "Open": 152.48,
+   "High": 152.66,
+   "Low": 151.91,
+   "Close": 152.185,
+   "Volume": 114627,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:20:00Z",
+   "Open": 152.13,
+   "High": 152.695,
+   "Low": 151.58,
+   "Close": 152.695,
+   "Volume": 157438,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:25:00Z",
+   "Open": 152.64,
+   "High": 152.64,
+   "Low": 151.76,
+   "Close": 152.02,
+   "Volume": 116314,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:30:00Z",
+   "Open": 152.01,
+   "High": 152.27,
+   "Low": 151.55,
+   "Close": 152.06,
+   "Volume": 100696,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:35:00Z",
+   "Open": 152.005,
+   "High": 152.345,
+   "Low": 151.62,
+   "Close": 151.67,
+   "Volume": 56257,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:40:00Z",
+   "Open": 151.65,
+   "High": 151.74,
+   "Low": 151.35,
+   "Close": 151.575,
+   "Volume": 66888,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:45:00Z",
+   "Open": 151.56,
+   "High": 151.96,
+   "Low": 151.44,
+   "Close": 151.89,
+   "Volume": 75314,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:50:00Z",
+   "Open": 151.86,
+   "High": 152.01,
+   "Low": 150.89,
+   "Close": 151.05,
+   "Volume": 131589,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T16:55:00Z",
+   "Open": 151.045,
+   "High": 151.69,
+   "Low": 150.87,
+   "Close": 151.69,
+   "Volume": 177451,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T17:00:00Z",
+   "Open": 151.66,
+   "High": 152.33,
+   "Low": 151.55,
+   "Close": 152.25,
+   "Volume": 95989,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T17:05:00Z",
+   "Open": 152.24,
+   "High": 152.4,
+   "Low": 151.86,
+   "Close": 151.885,
+   "Volume": 83412,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T17:10:00Z",
+   "Open": 151.895,
+   "High": 152.05,
+   "Low": 151.16,
+   "Close": 151.385,
+   "Volume": 106332,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T17:15:00Z",
+   "Open": 151.41,
+   "High": 152.26,
+   "Low": 151.36,
+   "Close": 152.2,
+   "Volume": 134076,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T17:20:00Z",
+   "Open": 152.22,
+   "High": 152.74,
+   "Low": 152.035,
+   "Close": 152.565,
+   "Volume": 77070,
+   "complete": true
+  },
+  {
+   "Timestamp": "2026-11-18T17:25:00Z",
+   "Open": 152.565,
+   "High": 153.18,
+   "Low": 152.565,
+   "Close": 152.87,
+   "Volume": 118955,
+   "complete": true
+  }
+ ]
+}

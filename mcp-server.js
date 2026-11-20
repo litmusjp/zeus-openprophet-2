@@ -1106,6 +1106,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_options_quote',
+        description: 'Read-only exact-contract quote for ONE option contract THIS account holds (bid, ask, sizes, quote time, with the same indicative/testing_only quality). Use it for a due exit when get_options_chain does not return a usable quote for the held contract. It has no delta, cost or expiry filters, it is a quote and never a position mark, it is refused when the quote is stale or invalid (the answer says why), and a contract you do not hold is refused: entries use get_options_chain. It places, cancels and sizes nothing.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol: {
+              type: 'string',
+              description: 'Held options contract in OCC format',
+            },
+          },
+          required: ['symbol'],
+        },
+      },
+      {
         name: 'get_options_chain',
         description: 'Get options contracts with indicative/testing_only provider data. LatestTradeSize is one trade, not daily Volume; unknown Volume and OpenInterest are omitted and OpenInterestPresent is false. PAPER_ADVISORY_OP2 assessment still requires exact fresh OCC bid/ask/depth and strategy/risk checks.',
         inputSchema: {
@@ -2336,6 +2350,12 @@ ${allNews.map((article, i) =>
             },
           ],
         };
+      }
+
+      case 'get_options_quote': {
+        // Read-only exact-contract quote of a held contract. Refusals keep their structured answer (returnAvailability), never an order.
+        const data = await callTradingBot(`/options/quote/${encodeURIComponent(String(args.symbol || '').trim())}`, 'GET', null, { returnAvailability: true });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
       case 'get_options_chain': {

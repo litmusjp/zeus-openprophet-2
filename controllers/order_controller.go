@@ -2474,10 +2474,12 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 		hasMaxCost = true
 	}
 
-	// Apply all filters in one pass
+	// Apply all filters in one pass. The two drop reasons are counted so an empty answer can say which layer removed what.
+	droppedZeroGreeks, droppedByFilters := 0, 0
 	for _, contract := range chain {
 		// Skip contracts with zero Greeks (invalid/stale data)
 		if contract.Delta == 0 && contract.Gamma == 0 && contract.Theta == 0 {
+			droppedZeroGreeks++
 			continue
 		}
 
@@ -2485,40 +2487,127 @@ func (oc *OrderController) GetOptionsChain(c *gin.Context) {
 
 		// Apply delta filters
 		if hasMin && absDelta < deltaMin {
+			droppedByFilters++
 			continue
 		}
 		if hasMax && absDelta > deltaMax {
+			droppedByFilters++
 			continue
 		}
 
 		// Apply bid filter
 		if hasMinBid && contract.Bid <= minBid {
+			droppedByFilters++
 			continue
 		}
 
 		// Apply per-contract cost filter (ask x 100)
 		if hasMaxCost && contract.Ask*100 > maxCost {
+			droppedByFilters++
 			continue
 		}
 
 		// Apply option type filter
 		if optionType == "call" && contract.Delta <= 0 {
+			droppedByFilters++
 			continue
 		}
 		if optionType == "put" && contract.Delta >= 0 {
+			droppedByFilters++
 			continue
 		}
 
 		filtered = append(filtered, contract)
 	}
 
-	c.JSON(200, gin.H{
+	body := gin.H{
 		"status":     "available",
 		"symbol":     symbol,
 		"expiration": expiration.Format("2006-01-02"),
 		"total":      len(chain),
 		"filtered":   len(filtered),
 		"contracts":  filtered,
+	}
+	if len(filtered) == 0 {
+		// An empty list is not proof the provider returned nothing: total counts only the contracts that passed the service's freshness
+		// and valid-quote check, and a contract with zero Greeks or one outside the request filters is removed here. A contract you hold
+		// can be priced exactly with get_options_quote, which has none of these entry filters.
+		body["message"] = "no usable contracts returned by this request"
+		body["diagnostics"] = gin.H{
+			"usable_contracts_before_request_filters": len(chain),
+			"dropped_zero_greeks":                     droppedZeroGreeks,
+			"dropped_by_request_filters":              droppedByFilters,
+			"total_meaning":                           "contracts with a fresh valid quote; provider snapshots that failed that check are not counted",
+			"held_contract_quote":                     "get_options_quote reads one exact contract you hold, without entry filters",
+		}
+	}
+	c.JSON(200, body)
+}
+
+// GetOptionsQuote handles GET /api/options/quote/:symbol. It answers the exact-contract quote of ONE contract this account holds, for a
+// due exit when the chain does not return it. Read-only: it holds no order, cancel or sizing authority, it needs no entry filter
+// (delta, cost, expiry window), and it never returns a position mark as a quote. The quote keeps its honest source and quality and is
+// refused when stale or invalid (the freshness check of GetOptionsQuote). A contract the account does not hold is refused: entries must
+// use the options chain.
+func (oc *OrderController) GetOptionsQuote(c *gin.Context) {
+	diagnostic := func(code int, status, category, message string, extra gin.H) {
+		body := gin.H{"status": status, "category": category, "endpoint": "options_quote", "error": message}
+		for key, value := range extra {
+			body[key] = value
+		}
+		c.JSON(code, body)
+	}
+	if oc.tradingService == nil {
+		diagnostic(503, "unavailable", "provider_unavailable", "options broker service is unavailable in inert mode", nil)
+		return
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(c.Param("symbol")))
+	if symbol == "" {
+		diagnostic(400, "invalid_request", "invalid_symbol", "symbol required", nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := oc.tradingService.GetOptionsPosition(ctx, symbol); err != nil {
+		if strings.HasPrefix(err.Error(), "options position not found") {
+			diagnostic(404, "not_held", "not_a_held_contract", "this tool quotes only a contract held in this account; use the options chain for any other contract", gin.H{"symbol": symbol})
+			return
+		}
+		oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("Held-contract check failed before an exact options quote")
+		diagnostic(503, "unavailable", "broker_unavailable", "the held contract could not be verified, so no quote was read", gin.H{"symbol": symbol})
+		return
+	}
+	quote, err := oc.tradingService.GetOptionsQuote(ctx, symbol)
+	switch {
+	case err != nil && strings.HasPrefix(err.Error(), "invalid OCC option symbol"):
+		diagnostic(400, "invalid_request", "invalid_symbol", "symbol must be an OCC option symbol", gin.H{"symbol": symbol})
+		return
+	case err != nil && strings.HasPrefix(err.Error(), "options quote not found"):
+		diagnostic(503, "unavailable", "quote_not_found", "the provider returned no snapshot for this exact contract", gin.H{"symbol": symbol})
+		return
+	case err != nil && strings.HasPrefix(err.Error(), "options quote is stale or invalid"):
+		diagnostic(503, "unavailable", "quote_stale_or_invalid", "the exact contract quote is stale or invalid, so it is not usable for a price", gin.H{"symbol": symbol})
+		return
+	case err != nil || quote == nil:
+		if err != nil {
+			oc.logger.WithFields(oc.auditIdentityFields()).WithError(err).Warn("Exact options quote failed")
+		}
+		diagnostic(503, "unavailable", "provider_unavailable", "the exact contract quote could not be read", gin.H{"symbol": symbol})
+		return
+	}
+	c.JSON(200, gin.H{
+		"status":              "available",
+		"source":              "exact_contract_snapshot",
+		"symbol":              symbol,
+		"bid":                 quote.BidPrice,
+		"bid_size":            quote.BidSize,
+		"ask":                 quote.AskPrice,
+		"ask_size":            quote.AskSize,
+		"quote_timestamp":     quote.Timestamp.UTC().Format(time.RFC3339Nano),
+		"quote_age_seconds":   math.Round(time.Since(quote.Timestamp).Seconds()*10) / 10,
+		"market_data_feed":    quote.MarketDataFeed,
+		"market_data_quality": quote.MarketDataQuality,
+		"note":                "Exact-contract quote of a contract you hold: a quote, not a position mark and not an order. A zero bid or zero bid size is not an executable bid. Indicative provider data.",
 	})
 }
 

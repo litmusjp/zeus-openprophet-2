@@ -467,6 +467,7 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		api.GET("/options/positions", orderController.ListOptionsPositions)
 		api.GET("/options/position/:symbol", orderController.GetOptionsPosition)
 		api.GET("/options/chain/:symbol", orderController.GetOptionsChain)
+		api.GET("/options/quote/:symbol", orderController.GetOptionsQuote)
 		api.GET("/options/expirations/:symbol", orderController.GetOptionExpirations)
 
 		// News endpoints

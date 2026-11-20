@@ -28,6 +28,8 @@ export const HERALD_TOOL_CATALOG = Object.fromEntries(
 );
 // Herald alone also gets the read-only range and confirmation arithmetic helper (Guardian and Prophet menus are unchanged).
 HERALD_TOOL_CATALOG['Market Data'].splice(HERALD_TOOL_CATALOG['Market Data'].indexOf('get_historical_bars') + 1, 0, 'get_range_confirmation');
+// Herald alone also gets the read-only exact-contract quote for a contract it holds (a due exit when the chain does not return it).
+HERALD_TOOL_CATALOG['Options'].splice(HERALD_TOOL_CATALOG['Options'].indexOf('get_options_chain') + 1, 0, 'get_options_quote');
 
 // Render a catalog as the `**Category**: tool, tool` block used in prompts.
 export function renderToolMenu(options = {}) {

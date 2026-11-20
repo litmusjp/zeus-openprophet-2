@@ -56,6 +56,10 @@ type AlpacaTradingService struct {
 
 const brokerQuoteMaxAge = 2 * time.Minute
 
+// ErrOptionsQuoteStaleOrInvalid is returned by GetOptionsQuote when the latest quote has no verifiable fresh quote timestamp or no valid
+// bid and ask. The latest TRADE time never stands in for a missing quote time.
+var ErrOptionsQuoteStaleOrInvalid = errors.New("options quote is stale or invalid")
+
 func (s *AlpacaTradingService) SetAlphaDeskClient(client *AlphaDeskClient) { s.alphaDesk = client }
 func (s *AlpacaTradingService) AssessOptionsStrategy(ctx context.Context, order *interfaces.OptionsOrder, features any) (*interfaces.AlphaDeskAssessment, error) {
 	if s.alphaDesk == nil || !s.alphaDesk.Enabled {
@@ -1284,12 +1288,11 @@ func (s *AlpacaTradingService) GetOptionsQuote(ctx context.Context, symbol strin
 	if !found {
 		return nil, fmt.Errorf("options quote not found for %s", symbol)
 	}
+	// The quote time is the time of the latest QUOTE. A missing quote time is never repaired from the latest trade time: a bid and ask of
+	// unknown age are not a fresh quote, whatever the last trade says.
 	timestamp := data.LatestQuote.T
-	if timestamp.IsZero() {
-		timestamp = data.LatestTrade.T
-	}
 	if !quoteTimestampFresh(timestamp) || data.LatestQuote.Ask <= 0 || data.LatestQuote.Bid < 0 {
-		return nil, fmt.Errorf("options quote is stale or invalid for %s", symbol)
+		return nil, fmt.Errorf("%w for %s", ErrOptionsQuoteStaleOrInvalid, symbol)
 	}
 	return &interfaces.OptionsQuote{
 		Symbol:          symbol,

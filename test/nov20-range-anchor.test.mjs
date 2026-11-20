@@ -167,3 +167,37 @@ test('get_datetime fields: full-UTC session bounds come from the broker calendar
   assert.equal(none.session_close_utc, null);
   assert.equal(sessionFields(null, []).session_open_utc, null);
 });
+
+// Nov 20 QA B02: coverage is only derived from a calendar whose every row is readable (a real date, an open before its close).
+test('B02 (-): an unreadable calendar is an essential refusal, never session_not_covered, with zero bar reads', async () => {
+  const prior = { window_start: '2026-11-17T14:30:00Z' }; // a valid prior-date request
+  const calendars = {
+    'only row has bad open and close': { sessions: [{ date: D, open: 'bad', close: 'bad' }] },
+    'only row has an impossible date': { sessions: [{ date: '2026-99-99', open: 'bad', close: 'bad' }] },
+    'impossible date with readable times': { sessions: [{ date: '2026-99-99', open: '09:30', close: '16:00' }] },
+    'a rolled-over date': { sessions: [{ date: '2026-02-30', open: '09:30', close: '16:00' }] },
+    'close before open': { sessions: [{ date: D, open: '16:00', close: '09:30' }] },
+    'missing open and close': { sessions: [{ date: D }] },
+    'a null row': { sessions: [null] },
+    'one good row and one bad row (never shrunk)': { sessions: [{ date: D, open: '09:30', close: '16:00' }, { date: '2026-11-19', open: 'x', close: 'y' }] },
+    'good rows and an impossible-date row': { sessions: [{ date: D, open: '09:30', close: '16:00' }, { date: '2026-99-99', open: '09:30', close: '16:00' }] },
+  };
+  for (const [name, calendar] of Object.entries(calendars)) {
+    const { result, calls } = await run(prior, { calendar: async () => calendar });
+    assert.equal(result.status, 'invalid_input', name);
+    assert.match(result.error, /not readable/, name);
+    assert.equal(calls.length, 0, `${name}: no bar read`);
+    assert.equal(result.requested_date, undefined, name);
+  }
+});
+
+test('B02 (+): readable forward coverage still gives the genuine unsupported-date result, and a holiday today stays essential', async () => {
+  const { result, calls } = await run({ window_start: '2026-11-17T14:30:00Z' });
+  assert.equal(result.status, 'session_not_covered');
+  assert.equal(result.coverage_start, D);
+  assert.equal(result.coverage_end, '2026-11-19');
+  assert.equal(calls.length, 0);
+  const holiday = await run({ window_start: z('13:30') }, { calendar: async () => ({ sessions: [{ date: '2026-11-19', open: '09:30', close: '16:00' }] }) });
+  assert.equal(holiday.result.status, 'invalid_input');
+  assert.match(holiday.result.error, /no regular session on 2026-11-18/);
+});

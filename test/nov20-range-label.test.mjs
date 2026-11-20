@@ -124,3 +124,59 @@ test('D1 (-): the same text under a different status keeps the beat Failed', asy
   const payload = await realPayload();
   await expectOutcome('different status', [record({ ...payload, status: 'invalid_input' })], 'Failed', true);
 });
+
+// ── Nov 20 QA B02: producer to classifier, malformed calendar evidence and impossible dates ──
+test('B02 (-): a malformed calendar through the real producer stays essential in the classifier, with no bar read', async () => {
+  const calendars = {
+    'only row has bad open and close': { sessions: [{ date: '2026-11-18', open: 'bad', close: 'bad' }] },
+    'only row has an impossible date': { sessions: [{ date: '2026-99-99', open: 'bad', close: 'bad' }] },
+    'impossible date with readable times': { sessions: [{ date: '2026-99-99', open: '09:30', close: '16:00' }] },
+    'a good row beside a bad one': { sessions: [{ date: '2026-11-18', open: '09:30', close: '16:00' }, { date: '2026-11-19', open: 'x', close: 'y' }] },
+  };
+  for (const [name, calendar] of Object.entries(calendars)) {
+    let reads = 0;
+    const produced = await getRangeConfirmation(PRIOR, { fetchBars: async () => { reads += 1; return { bars: [] }; }, fetchCalendar: async () => calendar, now: NOW });
+    assert.equal(produced.status, 'invalid_input', name);
+    assert.equal(reads, 0, `${name}: no bar read`);
+    // the way the MCP server hands a refusal back: plain error text
+    const { essential, warnings } = classifyFailures([record(produced.error)]);
+    assert.equal(essential.length, 1, `${name}: essential`);
+    assert.deepEqual(warnings, [], name);
+  }
+});
+
+test('B02 (-): the recognizer needs real calendar dates, in every date of a stored payload', async () => {
+  const good = await realPayload();
+  const impossible = ['2026-99-99', '2026-02-30', '2026-13-01', '2026-00-10', '2026-11-31', '0000-01-01', '2026-1-1'];
+  for (const bad of impossible) {
+    const variants = {
+      'coverage_end': { ...good, coverage_end: bad },
+      'coverage_start': { ...good, coverage_start: bad },
+      'requested_date': { ...good, requested_date: bad },
+    };
+    for (const [field, payload] of Object.entries(variants)) {
+      // the request date must still match, so the request args follow requested_date when that is the bad field
+      const args = field === 'requested_date' ? { ...PRIOR, window_start: PRIOR.window_start } : PRIOR;
+      const { essential, warnings } = classifyFailures([record(payload, {}, args)]);
+      assert.equal(essential.length, 1, `${field}=${bad}: essential`);
+      assert.deepEqual(warnings, [], `${field}=${bad}`);
+    }
+  }
+  // the exact case Hermes named: a directly stored payload with an impossible coverage end
+  const stored = { status: 'session_not_covered', reason: 'date_outside_calendar_coverage', requested_date: '2026-11-17', coverage_start: '2026-11-18', coverage_end: '2026-99-99', message: 'outside' };
+  assert.equal(classifyFailures([record(stored)]).essential.length, 1);
+  // and the genuine one with the same shape and real dates still warns
+  assert.deepEqual(classifyFailures([record({ ...stored, coverage_end: '2026-11-19' })]).warnings, [WARNING]);
+});
+
+test('B02 (+/-): the genuine unsupported prior date still warns; a holiday today and a second failure stay essential', async () => {
+  const good = await realPayload();
+  assert.deepEqual(classifyFailures([record(good)]).warnings, [WARNING]);
+  const holiday = await getRangeConfirmation({ symbol: 'DIS', window_start: '2026-11-18T14:30:00Z' }, { fetchBars: async () => ({ bars: [] }), fetchCalendar: async () => ({ sessions: [{ date: '2026-11-19', open: '09:30', close: '16:00' }] }), now: NOW });
+  assert.equal(holiday.status, 'invalid_input');
+  assert.equal(classifyFailures([record(holiday.error, {}, { ...PRIOR, window_start: '2026-11-18T14:30:00Z' })]).essential.length, 1);
+  const other = { kind: 'tool_call', tool: 'get_account', args: {}, status: 'error', error: 'Trading bot request failed: {"status":401}' };
+  const { essential } = classifyFailures([record(good), other]);
+  assert.equal(essential.length, 1);
+  assert.equal(essential[0].tool, 'get_account');
+});

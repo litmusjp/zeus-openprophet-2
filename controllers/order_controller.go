@@ -2585,7 +2585,7 @@ func (oc *OrderController) GetOptionsQuote(c *gin.Context) {
 	case err != nil && strings.HasPrefix(err.Error(), "options quote not found"):
 		diagnostic(503, "unavailable", "quote_not_found", "the provider returned no snapshot for this exact contract", gin.H{"symbol": symbol})
 		return
-	case err != nil && strings.HasPrefix(err.Error(), "options quote is stale or invalid"):
+	case err != nil && errors.Is(err, services.ErrOptionsQuoteStaleOrInvalid):
 		diagnostic(503, "unavailable", "quote_stale_or_invalid", "the exact contract quote is stale or invalid, so it is not usable for a price", gin.H{"symbol": symbol})
 		return
 	case err != nil || quote == nil:

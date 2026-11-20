@@ -12,6 +12,15 @@ function nyParts(ms) {
 
 function pad(n) { return String(n).padStart(2, '0'); }
 
+// A real calendar date "YYYY-MM-DD": the shape alone is not enough (2026-99-99 and 2026-02-30 are not dates).
+export function isRealIsoDay(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof value === 'string' ? value : '');
+  if (!match) return false;
+  const [year, month, day] = match.slice(1).map(Number);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  return check.getUTCFullYear() === year && check.getUTCMonth() === month - 1 && check.getUTCDate() === day;
+}
+
 export function nyDateOf(ms) {
   const p = nyParts(ms);
   return `${p.year}-${pad(p.month)}-${pad(p.day)}`;

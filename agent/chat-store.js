@@ -7,7 +7,7 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'url';
 import { isSubmittingOrderToolCall } from './history-attribution.js';
 import { parseStrictUtc } from '../range-confirmation.js';
-import { nyDateOf } from '../session-clock.js';
+import { isRealIsoDay, nyDateOf } from '../session-clock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -420,13 +420,12 @@ function isMarketClosedChain(record) {
 const RANGE_NOT_COVERED_WARNING = 'get_range_confirmation date outside the calendar coverage';
 const RANGE_WRAPPER_KEYS = new Set(['content', 'result', 'data', 'text', 'type', 'isError']);
 const RANGE_PAYLOAD_KEYS = new Set(['status', 'reason', 'requested_date', 'coverage_start', 'coverage_end', 'message']);
-const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 function isExactNotCoveredPayload(value, requestedDate) {
   if (!Object.keys(value).every(key => RANGE_PAYLOAD_KEYS.has(key))) return false;
   if (value.status !== 'session_not_covered' || value.reason !== 'date_outside_calendar_coverage') return false;
   if (typeof value.message !== 'string' || value.message === '') return false;
   const { requested_date: asked, coverage_start: start, coverage_end: end } = value;
-  if (![asked, start, end].every(day => typeof day === 'string' && ISO_DAY.test(day))) return false;
+  if (![asked, start, end].every(isRealIsoDay)) return false; // real calendar dates, not just the shape
   if (start > end) return false;
   if (!(asked < start || asked > end)) return false; // a date inside the coverage is not this case
   return asked === requestedDate; // it must be the date of the request that produced it

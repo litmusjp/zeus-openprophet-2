@@ -21,10 +21,10 @@ const NEW = {
   C1_event_identity: 'counts as a new event only if it cites a distinct verified publication; otherwise it is the same event and the re-entering rule applies.',
   C1_tool_anchor_used: 'Its answer states anchor_requested and anchor_used: record and reuse anchor_used as the window start.',
   C1_uncovered_date: 'When it refuses a date it cannot cover (an earlier session), use the range already recorded for that event and do not recompute it.',
-  C2_stop_exact_fill: 'The bar must have completed after the broker-confirmed entry fill of that exact contract (take the fill time from the filled order or the position of that contract, never from another contract or from a plan)',
+  C2_stop_exact_fill: 'The bar must have completed after the broker-confirmed entry fill of that exact contract (take the fill time from the filled order of that exact contract, never from another contract, from a plan, from a position mark or from the time you looked)',
   C2_stop_same_heartbeat: 'with the fill time, using bars fetched in the same heartbeat.',
   C2_reentry_exit_fill: 'starts after the exit fill of that exact contract (read from the filled order of that contract, never from another contract or from a plan)',
-  C3_reducing_order: 'A reducing order of yours (a take-profit exit) has its own test: it is stale once it is still unfilled at the second heartbeat after submission, and only then:',
+  C3_reducing_order: 'A reducing order of yours (including a take-profit exit) has its own test: it is stale once it is still unfilled at the second heartbeat after submission, and only then:',
   C3_stop_not_held: 'A stop or invalidation exit is never held for this review.',
 };
 

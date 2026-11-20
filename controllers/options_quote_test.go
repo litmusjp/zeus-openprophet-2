@@ -3,11 +3,13 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"prophet-trader/interfaces"
+	"prophet-trader/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -117,7 +119,7 @@ func TestExactQuoteIsRefusedWhenStaleOrInvalid(t *testing.T) {
 		err      error
 		category string
 	}{
-		"stale":      {errors.New("options quote is stale or invalid for " + heldSymbol), "quote_stale_or_invalid"},
+		"stale":      {fmt.Errorf("%w for %s", services.ErrOptionsQuoteStaleOrInvalid, heldSymbol), "quote_stale_or_invalid"},
 		"not found":  {errors.New("options quote not found for " + heldSymbol), "quote_not_found"},
 		"provider":   {errors.New("options quote API error (HTTP 500): boom"), "provider_unavailable"},
 		"no payload": {nil, "provider_unavailable"},
@@ -148,7 +150,7 @@ func TestExactQuoteNeverReturnsThePositionMark(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), "12.65") {
 		t.Fatalf("the position mark leaked into the quote answer: %s", recorder.Body.String())
 	}
-	stale := &quoteTradingService{positionOK: true, quoteErr: errors.New("options quote is stale or invalid for " + heldSymbol), mark: mark}
+	stale := &quoteTradingService{positionOK: true, quoteErr: fmt.Errorf("%w for %s", services.ErrOptionsQuoteStaleOrInvalid, heldSymbol), mark: mark}
 	recorder, _ = getJSON(t, newQuoteController(t, stale).GetOptionsQuote, "/x", quoteParams)
 	if strings.Contains(recorder.Body.String(), "12.65") {
 		t.Fatalf("a refusal must not fall back to the mark: %s", recorder.Body.String())

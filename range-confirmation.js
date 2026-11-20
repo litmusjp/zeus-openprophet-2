@@ -15,7 +15,7 @@
 const BAR_MS = 5 * 60 * 1000;
 const BASELINE_BARS = 6;
 
-import { nyDateOf, nyWallToInstantMs } from './session-clock.js';
+import { isRealIsoDay, nyDateOf, nyWallToInstantMs } from './session-clock.js';
 
 const iso = ms => new Date(ms).toISOString().replace(/\.000Z$/, 'Z');
 const finite = value => (typeof value === 'number' && Number.isFinite(value) ? value : null);
@@ -144,7 +144,8 @@ export function computeRangeConfirmation({ bars, windowStart, windowMinutes = 15
  *
  * Pre-open anchors: a window_start that is strictly parsed, not in the future and falls on the CURRENT New York session date before
  * that session's open is moved to the session open (the rule for news published before the open), once the session has opened. The answer
- * always carries both `anchor_requested` (exactly what was passed) and `anchor_used` (the full-UTC anchor the window was computed from).
+ * carries both `anchor_requested` (the requested time in canonical form) and `anchor_used` (the full-UTC anchor the window was computed from)
+ * on every computed answer (a refusal computes nothing and carries neither).
  * Nothing else is ever moved: a prior-date, after-close or in-session non-grid anchor is used or refused exactly as before.
  *
  * Refusals are structured. Every refusal has status `invalid_input` and a plain `error` text, except a validated date outside the calendar's
@@ -167,8 +168,20 @@ export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now
   try { calendar = await fetchCalendar(); } catch (error) {
     return { status: 'invalid_input', error: `the broker market calendar is unavailable, so the session bounds cannot be verified (${error?.message || 'error'})` };
   }
-  const rows = Array.isArray(calendar?.sessions) ? calendar.sessions.filter(s => s && typeof s.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.date)) : [];
-  if (!rows.length) return { status: 'invalid_input', error: 'the broker market calendar answer has no readable sessions, so the session bounds cannot be verified' };
+  const listed = Array.isArray(calendar?.sessions) ? calendar.sessions : [];
+  if (!listed.length) return { status: 'invalid_input', error: 'the broker market calendar answer has no readable sessions, so the session bounds cannot be verified' };
+  // Coverage is only ever derived from a calendar whose EVERY row is readable: a real calendar date and an open and a close that convert
+  // (close after open). One unreadable row makes the whole answer unverifiable; it is never dropped to shrink the calendar into a
+  // supposed proof that a date is not covered.
+  const rows = [];
+  for (const entry of listed) {
+    const rowOpen = entry && isRealIsoDay(entry.date) ? nyWallToInstantMs(entry.date, entry.open) : null;
+    const rowClose = entry && isRealIsoDay(entry.date) ? nyWallToInstantMs(entry.date, entry.close) : null;
+    if (rowOpen === null || rowClose === null || rowClose <= rowOpen) {
+      return { status: 'invalid_input', error: 'the broker market calendar has a row that is not readable (a real date with an open before its close), so the session bounds cannot be verified' };
+    }
+    rows.push({ date: entry.date, open: rowOpen, close: rowClose });
+  }
   const today = nyDateOf(now);
   const requestedDate = nyDateOf(requested);
   const dates = rows.map(s => s.date).sort();
@@ -184,11 +197,7 @@ export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now
   }
   const row = rows.find(s => s.date === requestedDate);
   if (!row) return { status: 'invalid_input', error: `the broker market calendar has no regular session on ${requestedDate} (a weekend or a market holiday), so the range cannot be computed` };
-  const open = nyWallToInstantMs(row.date, row.open);
-  const close = nyWallToInstantMs(row.date, row.close);
-  if (open === null || close === null || close <= open) {
-    return { status: 'invalid_input', error: `the broker market calendar row for ${requestedDate} is not readable, so the session bounds cannot be verified` };
-  }
+  const { open, close } = row;
   let anchor = requested;
   let clamped = false;
   if (requested < open) {

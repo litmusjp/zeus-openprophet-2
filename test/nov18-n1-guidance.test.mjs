@@ -71,7 +71,7 @@ test('N1-b target: once per position, quantity at first touch, a pending order r
 
 test('N1-c stop: direction by side, post-entry bar only, cited; other exits unaffected', () => {
   assert.match(catalyst, /for a call the wrong side is below the level, for a put it is above the level/);
-  assert.match(catalyst, /The bar must have completed after the broker-confirmed entry fill of that exact contract \(take the fill time from the filled order or the position of that contract, never from another contract or from a plan\): compare the bar's end time \(a bar is stamped with its start, so its end is the start plus 5 minutes\) with the fill time, using bars fetched in the same heartbeat/);
+  assert.match(catalyst, /The bar must have completed after the broker-confirmed entry fill of that exact contract \(take the fill time from the filled order of that exact contract, never from another contract, from a plan, from a position mark or from the time you looked\): compare the bar's end time \(a bar is stamped with its start, so its end is the start plus 5 minutes\) with the fill time, using bars fetched in the same heartbeat/);
   assert.doesNotMatch(catalyst, /compare its start time with the fill time/); // the start-vs-fill predicate was a contradiction
   assert.match(catalyst, /A bar that had already completed before your fill, and any bar inside the range window, never triggers the stop; a bar that was in progress at your fill and completes after it can/);
   assert.match(catalyst, /Cite the bar's start time, its close, the level and the feed when you exit on the stop/);

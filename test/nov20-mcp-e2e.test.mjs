@@ -150,3 +150,12 @@ test('D1/D2 end to end: a date outside the calendar coverage returns the structu
     assert.equal(classifyFailures([{ kind: 'tool_call', tool: 'prophet_get_range_confirmation', args: { ...args, window_start: '2020-01-02T15:00:00' }, status: 'error', error: bad.text }]).essential.length, 1);
   });
 });
+
+test('get_datetime returns the full-UTC session bounds beside the New York wall-clock strings', async () => {
+  const source = await fs.readFile(new URL('../mcp-server.js', import.meta.url), 'utf8');
+  const handler = source.slice(source.indexOf("case 'get_datetime':"), source.indexOf("case 'find_similar_setups':"));
+  assert.match(handler, /session_open_utc: sessionInfo\.session_open_utc/);
+  assert.match(handler, /session_close_utc: sessionInfo\.session_close_utc/);
+  assert.match(handler, /session_open_et: sessionInfo\.session_open_et/);
+  assert.match(source, /session_open_utc and session_close_utc are the full UTC bounds of today regular session from the broker calendar/);
+});

@@ -43,7 +43,9 @@ export function nyWallToInstantMs(dateText, timeText) {
   return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, 0) === wallAsUtc ? guess : null;
 }
 
-const EMPTY = Object.freeze({ session_time_et: null, session_open_et: null, session_close_et: null, minutes_since_open: null, minutes_to_close: null });
+const EMPTY = Object.freeze({ session_time_et: null, session_open_et: null, session_close_et: null, session_open_utc: null, session_close_utc: null, minutes_since_open: null, minutes_to_close: null });
+
+const isoUtc = ms => new Date(ms).toISOString().replace(/\.000Z$/, 'Z');
 
 /**
  * Session fields from the broker clock ({timestamp, is_open}) and broker calendar rows
@@ -64,6 +66,10 @@ export function sessionFields(clock, sessions) {
   if (openMs === null || closeMs === null || closeMs <= openMs) return out;
   out.session_open_et = String(row.open).slice(0, 5).padStart(5, '0');
   out.session_close_et = String(row.close).slice(0, 5).padStart(5, '0');
+  // Authoritative full-UTC bounds of today's regular session, converted from the broker calendar's New York wall times with the
+  // daylight-saving-correct helper above. Callers that need a UTC timestamp for the open or the close take these, never an offset.
+  out.session_open_utc = isoUtc(openMs);
+  out.session_close_utc = isoUtc(closeMs);
   if (isOpen === true && nowMs >= openMs && nowMs < closeMs) {
     out.minutes_since_open = Math.floor((nowMs - openMs) / 60000);
     out.minutes_to_close = Math.floor((closeMs - nowMs) / 60000);

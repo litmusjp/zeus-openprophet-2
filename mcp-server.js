@@ -638,12 +638,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_range_confirmation',
-        description: 'Read-only arithmetic for the post-news range and confirmation rules, computed from the FULL set of completed 5-minute bars of that regular session, from the session open to now or the session close (whichever is earlier) (one feed, none dropped), so volume baselines see every bar since the open. window_start is used exactly as given: the session open for news published before the open, or the publication time for news published during the session (never rounded; the window holds the actual five-minute bar starts from window_start up to but not including window_start plus window_minutes). Returns the range (high, low, midpoint, height, the window bar starts) only when every bar of the window is present, complete and readable; otherwise it lists the missing, forming or unreadable window starts and returns no range. Lists EVERY completed bar after the window with its close, volume, baseline volume (up to 6 prior completed bars), direction (call above the high, put below the low) and confirming flag (true, false, or null when the bar or its baseline cannot be verified), plus the earliest confirming bar per direction. It states facts only: it never decides an entry, stop or exit and places no order.',
+        description: 'Read-only arithmetic for the post-news range and confirmation rules, computed from the FULL set of completed 5-minute bars of that regular session, from the session open to now or the session close (whichever is earlier) (one feed, none dropped), so volume baselines see every bar since the open. window_start is used exactly as given and never rounded (the window holds the actual five-minute bar starts from the anchor up to but not including the anchor plus window_minutes), with one exception: a time before the open on the CURRENT session date is moved to the session open once the session has opened. Every answer carries anchor_requested (what you passed) and anchor_used (the full-UTC anchor the window was computed from); use anchor_used. For news published before the open pass the session open from get_datetime (session_open_utc); for news published during the session pass the publication time. Returns the range (high, low, midpoint, height, the window bar starts) only when every bar of the window is present, complete and readable; otherwise it lists the missing, forming or unreadable window starts and returns no range. Lists EVERY completed bar after the window with its close, volume, baseline volume (up to 6 prior completed bars), direction (call above the high, put below the low) and confirming flag (true, false, or null when the bar or its baseline cannot be verified), plus the earliest confirming bar per direction. It states facts only: it never decides an entry, stop or exit and places no order.',
         inputSchema: {
           type: 'object',
           properties: {
             symbol: { type: 'string', description: 'Stock symbol (e.g., NVDA)' },
-            window_start: { type: 'string', description: 'RFC3339 UTC timestamp ending in Z, inside the current regular session as listed by the broker market calendar (early closes and holidays respected): the session open (session_open_et from get_datetime, as UTC) for pre-open news, or the publication time for news published during the session' },
+            window_start: { type: 'string', description: 'RFC3339 UTC timestamp ending in Z: the session open (session_open_utc from get_datetime) for news published before the open, or the publication time for news published during the session. A pre-open time on the current session date is moved to the open and reported as anchor_used; a date the broker calendar does not cover is refused with status session_not_covered' },
             window_minutes: { type: 'number', description: 'Window length in minutes, a multiple of 5 from 5 to 60 (default 15, the range length in your Strategy Rules)' },
           },
           required: ['symbol', 'window_start'],
@@ -1209,7 +1209,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_datetime',
-        description: 'Get the current date and time in a specified timezone. Defaults to America/New_York (US Eastern). Returns time, date, day of week, market status, and whether markets are likely open. Use iso_utc as the canonical UTC clock when supplying timestamp bounds.',
+        description: 'Get the current date and time in a specified timezone. Defaults to America/New_York (US Eastern). Returns time, date, day of week, market status, and whether markets are likely open. Use iso_utc as the canonical UTC clock when supplying timestamp bounds. session_open_utc and session_close_utc are the full UTC bounds of today regular session from the broker calendar (null when unavailable); use them for any timestamp that is the session open or close, never work one out from session_open_et or session_close_et, which are New York wall-clock strings.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1818,6 +1818,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           fetchBars: (symbol, start, end) => callTradingBot(`/market/bars/${encodeURIComponent(symbol)}?${new URLSearchParams({ start, end, timeframe: '5Min' }).toString()}`),
         });
         if (computed.status === 'invalid_input') return { content: [{ type: 'text', text: computed.error }], isError: true };
+        // A date outside the calendar's coverage keeps its structured payload (and stays an error answer) so the activity label can
+        // recognise exactly this case and nothing else.
+        if (computed.status === 'session_not_covered') return { content: [{ type: 'text', text: JSON.stringify(computed) }], isError: true };
         return { content: [{ type: 'text', text: JSON.stringify(computed) }] };
       }
 
@@ -2539,6 +2542,8 @@ ${allNews.map((article, i) =>
                   session_time_et: sessionInfo.session_time_et,
                   session_open_et: sessionInfo.session_open_et,
                   session_close_et: sessionInfo.session_close_et,
+                  session_open_utc: sessionInfo.session_open_utc,
+                  session_close_utc: sessionInfo.session_close_utc,
                   minutes_since_open: sessionInfo.minutes_since_open,
                   minutes_to_close: sessionInfo.minutes_to_close,
                   session_fields_error: sessionFieldsError,

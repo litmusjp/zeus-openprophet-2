@@ -168,7 +168,6 @@ test('B-B03 A: fewer bars are used only when fewer exist since the open; session
 
 test('B-B03: the whole request is validated before any read', async () => {
   const bad = [
-    [{ symbol: 'NVDA', window_start: z('14:00') }, /outside the regular session/], // before the open (pre-market)
     [{ symbol: 'NVDA', window_start: `${D}T21:00:00Z` }, /in the future/],
     [{ symbol: 'NVDA', window_start: '2026-02-30T15:00:00Z' }, /real RFC3339 UTC/],
     [{ symbol: 'NVDA', window_start: `${D}T15:00:00-05:00` }, /real RFC3339 UTC/],
@@ -255,7 +254,7 @@ test('early-close day: the calendar close bounds the fetch, post-close anchors r
     const none = tool([]);
     const refused = await getRangeConfirmation({ symbol: 'NVDA', window_start: zz(late) }, { fetchBars: none.fetchBars, fetchCalendar: calendar, now: Date.parse(`${day}T20:30:00Z`) });
     assert.equal(refused.status, 'invalid_input', late);
-    assert.match(refused.error, /outside the regular session/);
+    assert.match(refused.error, /after the close of the regular session/);
     assert.equal(none.calls.length, 0, 'no bar read for an anchor after the close');
   }
 });
@@ -264,7 +263,7 @@ test('the calendar is authoritative: no session row, an unavailable calendar, or
   const none = tool([]);
   const holiday = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('15:00') }, { fetchBars: none.fetchBars, fetchCalendar: async () => ({ sessions: [{ date: '2026-11-19', open: '09:30', close: '16:00' }] }), now: Date.parse(z('15:30')) });
   assert.equal(holiday.status, 'invalid_input');
-  assert.match(holiday.error, /no regular session for 2026-11-18/);
+  assert.match(holiday.error, /no regular session on 2026-11-18/);
   const down = await getRangeConfirmation({ symbol: 'NVDA', window_start: z('15:00') }, { fetchBars: none.fetchBars, fetchCalendar: async () => { throw new Error('503'); }, now: Date.parse(z('15:30')) });
   assert.equal(down.status, 'invalid_input');
   assert.match(down.error, /calendar is unavailable/);

@@ -136,36 +136,69 @@ export function computeRangeConfirmation({ bars, windowStart, windowMinutes = 15
 }
 
 /**
- * The tool itself: validates the whole request first, takes the session bounds for the anchor's New York date from the broker market
- * calendar (the same source get_datetime uses, so early closes and holidays are respected; no fixed-clock calendar), fetches the
- * regular-session bars from the open to the earlier of now and the session close, and computes. `fetchCalendar()` returns the calendar
- * response ({ sessions: [{ date, open, close }] }); `fetchBars(symbol, startIso, endIso)` returns the bars response ({ bars, feed, count }).
+ * The tool itself: validates the whole request first, takes the session bounds from the broker market calendar (the same source
+ * get_datetime uses, so early closes and holidays are respected; no fixed-clock calendar), fetches the regular-session bars from the
+ * open to the earlier of now and the session close, and computes. `fetchCalendar()` returns the calendar response
+ * ({ sessions: [{ date, open, close }] }); `fetchBars(symbol, startIso, endIso)` returns the bars response ({ bars, feed, count }).
  * Bars outside the regular session are ignored. Nothing here can place or change an order.
+ *
+ * Pre-open anchors: a window_start that is strictly parsed, not in the future and falls on the CURRENT New York session date before
+ * that session's open is moved to the session open (the rule for news published before the open), once the session has opened. The answer
+ * always carries both `anchor_requested` (exactly what was passed) and `anchor_used` (the full-UTC anchor the window was computed from).
+ * Nothing else is ever moved: a prior-date, after-close or in-session non-grid anchor is used or refused exactly as before.
+ *
+ * Refusals are structured. Every refusal has status `invalid_input` and a plain `error` text, except a validated date outside the calendar's
+ * coverage, which is status `session_not_covered` with the requested date and the coverage it was checked against (the only refusal that
+ * the activity label treats as a warning).
  */
 export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now = Date.now() } = {}) {
   const symbol = typeof args?.symbol === 'string' ? args.symbol.trim().toUpperCase() : '';
   if (!/^[A-Z.]{1,10}$/.test(symbol)) return { status: 'invalid_input', error: 'symbol must be a stock ticker such as NVDA' };
-  const anchor = parseStrictUtc(args?.window_start);
-  if (anchor === null) return { status: 'invalid_input', error: 'window_start must be a real RFC3339 UTC timestamp ending in Z' };
+  const requested = parseStrictUtc(args?.window_start);
+  if (requested === null) return { status: 'invalid_input', error: 'window_start must be a real RFC3339 UTC timestamp ending in Z' };
   const minutes = args?.window_minutes === undefined ? 15 : args.window_minutes;
   if (!Number.isInteger(minutes) || minutes < 5 || minutes > 60 || minutes % 5 !== 0) {
     return { status: 'invalid_input', error: 'window_minutes must be a multiple of 5 from 5 to 60' };
   }
   if (args?.baseline_start !== undefined) return { status: 'invalid_input', error: 'baseline_start is not accepted: the baseline always starts at the session open' };
-  if (anchor > now) return { status: 'invalid_input', error: `window_start ${iso(anchor)} is in the future (current UTC ${iso(now)})` };
+  // The original input is validated BEFORE any correction: a future request is refused, never corrected into a past one.
+  if (requested > now) return { status: 'invalid_input', error: `window_start ${iso(requested)} is in the future (current UTC ${iso(now)})` };
   let calendar;
   try { calendar = await fetchCalendar(); } catch (error) {
     return { status: 'invalid_input', error: `the broker market calendar is unavailable, so the session bounds cannot be verified (${error?.message || 'error'})` };
   }
-  const date = nyDateOf(anchor);
-  const row = Array.isArray(calendar?.sessions) ? calendar.sessions.find(s => s && s.date === date) : null;
-  const open = row ? nyWallToInstantMs(row.date, row.open) : null;
-  const close = row ? nyWallToInstantMs(row.date, row.close) : null;
-  if (open === null || close === null || close <= open) {
-    return { status: 'invalid_input', error: `the broker market calendar has no regular session for ${date} (it lists today and the next days only), so the range cannot be computed` };
+  const rows = Array.isArray(calendar?.sessions) ? calendar.sessions.filter(s => s && typeof s.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.date)) : [];
+  if (!rows.length) return { status: 'invalid_input', error: 'the broker market calendar answer has no readable sessions, so the session bounds cannot be verified' };
+  const today = nyDateOf(now);
+  const requestedDate = nyDateOf(requested);
+  const dates = rows.map(s => s.date).sort();
+  // The broker calendar lists today and the days after it. Coverage therefore starts at the earlier of today and its first row.
+  const coverageStart = dates[0] < today ? dates[0] : today;
+  const coverageEnd = dates[dates.length - 1];
+  if (requestedDate < coverageStart || requestedDate > coverageEnd) {
+    return {
+      status: 'session_not_covered', reason: 'date_outside_calendar_coverage', requested_date: requestedDate,
+      coverage_start: coverageStart, coverage_end: coverageEnd,
+      message: `the requested date ${requestedDate} is outside the broker calendar's coverage (${coverageStart} to ${coverageEnd}), so this tool cannot read that session; use the range recorded for the event`,
+    };
   }
-  if (anchor < open || anchor >= close) {
-    return { status: 'invalid_input', error: `window_start is outside the regular session of ${date} (${iso(open)} to ${iso(close)}); for news published before the open use the session open as window_start, a pre-market bar never forms the range` };
+  const row = rows.find(s => s.date === requestedDate);
+  if (!row) return { status: 'invalid_input', error: `the broker market calendar has no regular session on ${requestedDate} (a weekend or a market holiday), so the range cannot be computed` };
+  const open = nyWallToInstantMs(row.date, row.open);
+  const close = nyWallToInstantMs(row.date, row.close);
+  if (open === null || close === null || close <= open) {
+    return { status: 'invalid_input', error: `the broker market calendar row for ${requestedDate} is not readable, so the session bounds cannot be verified` };
+  }
+  let anchor = requested;
+  let clamped = false;
+  if (requested < open) {
+    // Only a request on the current New York session date, made once that session has opened, is the pre-open news case.
+    if (requestedDate !== today) return { status: 'invalid_input', error: `window_start ${iso(requested)} is before the open of ${requestedDate} (${iso(open)}); a pre-open time on an earlier date is not moved forward. Use window_start from the current session's open (session_open_utc from get_datetime)` };
+    if (now < open) return { status: 'invalid_input', error: `the ${requestedDate} regular session has not opened yet (opens ${iso(open)}), so no completed range exists` };
+    anchor = open;
+    clamped = true;
+  } else if (requested >= close) {
+    return { status: 'invalid_input', error: `window_start is after the close of the regular session of ${requestedDate} (${iso(open)} to ${iso(close)}); a pre-market bar never forms the range and nothing after the close is used` };
   }
   const end = Math.min(now, close);
   const response = await fetchBars(symbol, iso(open), iso(end));
@@ -173,9 +206,11 @@ export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now
   const reportedCount = typeof response?.count === 'number' ? response.count : null;
   const bars = raw.filter(bar => { const at = typeof (bar?.Timestamp ?? bar?.timestamp ?? bar?.t) === 'number' ? (bar.Timestamp ?? bar.timestamp ?? bar.t) : Date.parse(bar?.Timestamp ?? bar?.timestamp ?? bar?.t); return Number.isFinite(at) && at >= open && at < close; });
   const common = { windowStart: anchor, windowMinutes: minutes, symbol, feed: response?.feed ?? null };
+  const stamp = result => { result.anchor_requested = iso(requested); result.anchor_used = iso(anchor); return result; };
   // The source count must agree with what the source returned BEFORE out-of-session bars are dropped; only then is the filtered set computed.
-  if (reportedCount !== null && reportedCount !== raw.length) return computeRangeConfirmation({ bars: raw, ...common, reportedCount });
-  const result = computeRangeConfirmation({ bars, ...common, reportedCount: null });
+  if (reportedCount !== null && reportedCount !== raw.length) return stamp(computeRangeConfirmation({ bars: raw, ...common, reportedCount }));
+  const result = stamp(computeRangeConfirmation({ bars, ...common, reportedCount: null }));
+  if (clamped) result.notes.unshift(`window_start ${iso(requested)} is before the regular session open, so the window starts at the session open ${iso(anchor)} (anchor_used); the news time itself stays your recorded publication time`);
   if (bars.length !== raw.length) result.notes.push(`${raw.length - bars.length} bar(s) outside the regular session (${iso(open)} to ${iso(close)}) were ignored`);
   return result;
 }

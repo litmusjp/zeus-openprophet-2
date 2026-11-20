@@ -17,6 +17,7 @@ import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
 import { futureHistoricalBarsError } from './historical-bars-time.js';
 import { getRangeConfirmation } from './range-confirmation.js';
+import { getEarningsDates } from './earnings-batching.js';
 import { normalizeOptionLimitPrice } from './option-price.js';
 import { sessionFields, openingGateDecision, parseMinOpeningMinutes } from './session-clock.js';
 import { ordersFrom, isOptionExitOrder, buildPostCancelCheck, unverifiedPostCancelCheck } from './cancel-check.js';
@@ -1173,14 +1174,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_earnings_dates',
-        description: 'Scheduled earnings dates from a public calendar (not broker-verified) for up to 30 symbols over the next 1-30 days (default 21). Status scheduled gives the date and timing; none_found_in_window means the whole window was read and no report was listed; unknown means part of the window could not be read, so no date proves nothing. ETFs normally have none.',
+        description: 'Scheduled earnings dates from a public calendar (not broker-verified) for any number of symbols (more than 30 are read in batches of 30 and merged; a symbol in a failed batch is unknown) over the next 1-30 days (default 21). Status scheduled gives the date and timing; none_found_in_window means the whole window was read and no report was listed; unknown means part of the window could not be read, so no date proves nothing. ETFs normally have none.',
         inputSchema: {
           type: 'object',
           properties: {
             symbols: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Up to 30 ticker symbols',
+              description: 'Ticker symbols (more than 30 are batched for you)',
             },
             days: { type: 'number', description: 'Days ahead to check, 1-30 (default 21)' },
           },
@@ -2402,10 +2403,12 @@ ${allNews.map((article, i) =>
       }
 
       case 'get_earnings_dates': {
-        const symbols = Array.isArray(args.symbols) ? args.symbols : [];
-        const params = new URLSearchParams({ symbols: symbols.join(',') });
-        if (args.days !== undefined) params.append('days', args.days);
-        const data = await callTradingBot(`/market/earnings?${params.toString()}`);
+        // The backend takes at most 30 symbols per call; a longer list is split into batches of 30 and merged (earnings-batching.js).
+        const data = await getEarningsDates(args, (batch, days) => {
+          const params = new URLSearchParams({ symbols: batch.join(',') });
+          if (days !== undefined) params.append('days', days);
+          return callTradingBot(`/market/earnings?${params.toString()}`);
+        });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

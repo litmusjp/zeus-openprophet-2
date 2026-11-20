@@ -81,7 +81,7 @@ test('C3: Herald-only conditional at the shared pricing owner, no cancel-every-b
 
 test('every other family preview is byte-identical to the previous release', () => {
   for (const id of OTHERS) {
-    const before = fs.readFileSync(new URL(`./fixtures/nov20-preview-${id}.txt`, import.meta.url), 'utf8');
+    const before = fs.readFileSync(new URL(`./fixtures/nov20-preview-${id}.txt`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
     assert.equal(render(id), before, id);
   }
 });

@@ -6,6 +6,8 @@ import path from 'path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'url';
 import { isSubmittingOrderToolCall } from './history-attribution.js';
+import { parseStrictUtc } from '../range-confirmation.js';
+import { nyDateOf } from '../session-clock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -409,6 +411,62 @@ function isMarketClosedChain(record) {
   }
   return payloads >= 1;
 }
+// get_range_confirmation answers a validated date that the broker calendar does not cover (an earlier session) with the structured status
+// session_not_covered. Only that exact, correctly scoped payload is a warning: the answer (the result or the error, or both) must be the
+// payload itself or sit inside the content/result/data wrappers, and it must match the request that produced it (the New York date of the
+// requested window_start). Any other key, status, prose, second payload, or a payload that contradicts the request (including the same words
+// under another status, an error key, a date inside the coverage, or a malformed one) leaves the whole answer essential. An authentication,
+// transport, timeout, calendar-unavailable, malformed, truncated, invalid-input, future-input or incomplete-range answer is never this case.
+const RANGE_NOT_COVERED_WARNING = 'get_range_confirmation date outside the calendar coverage';
+const RANGE_WRAPPER_KEYS = new Set(['content', 'result', 'data', 'text', 'type', 'isError']);
+const RANGE_PAYLOAD_KEYS = new Set(['status', 'reason', 'requested_date', 'coverage_start', 'coverage_end', 'message']);
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+function isExactNotCoveredPayload(value, requestedDate) {
+  if (!Object.keys(value).every(key => RANGE_PAYLOAD_KEYS.has(key))) return false;
+  if (value.status !== 'session_not_covered' || value.reason !== 'date_outside_calendar_coverage') return false;
+  if (typeof value.message !== 'string' || value.message === '') return false;
+  const { requested_date: asked, coverage_start: start, coverage_end: end } = value;
+  if (![asked, start, end].every(day => typeof day === 'string' && ISO_DAY.test(day))) return false;
+  if (start > end) return false;
+  if (!(asked < start || asked > end)) return false; // a date inside the coverage is not this case
+  return asked === requestedDate; // it must be the date of the request that produced it
+}
+function scanRangeAnswer(value, found, requestedDate, depth = 0) {
+  if (value == null || value === '') return;
+  if (depth > 5) { found.bad = true; return; }
+  if (typeof value === 'string') {
+    let parsed;
+    try { parsed = JSON.parse(value); } catch { found.bad = true; return; } // prose is not structured evidence
+    scanRangeAnswer(parsed, found, requestedDate, depth + 1);
+    return;
+  }
+  if (Array.isArray(value)) { for (const item of value) scanRangeAnswer(item, found, requestedDate, depth + 1); return; }
+  if (typeof value !== 'object') { found.bad = true; return; }
+  if (value.status === 'session_not_covered') {
+    if (isExactNotCoveredPayload(value, requestedDate)) found.payloads += 1; else found.bad = true;
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (!RANGE_WRAPPER_KEYS.has(key)) { found.bad = true; continue; }
+    if (key === 'isError') { if (typeof child !== 'boolean') found.bad = true; continue; }
+    if (key === 'type') { if (child !== 'text') found.bad = true; continue; }
+    scanRangeAnswer(child, found, requestedDate, depth + 1);
+  }
+}
+function isRangeNotCovered(record) {
+  if (!isToolCallRecord(record) || toolNameOf(record) !== 'get_range_confirmation') return false;
+  const anchor = parseStrictUtc(record.args?.window_start);
+  if (anchor === null) return false; // the request itself must have been well formed
+  const requestedDate = nyDateOf(anchor);
+  let payloads = 0;
+  for (const source of [record.result, record.error]) {
+    const found = { payloads: 0, bad: false };
+    scanRangeAnswer(source, found, requestedDate);
+    if (found.bad || found.payloads > 1) return false;
+    payloads += found.payloads;
+  }
+  return payloads >= 1;
+}
 // A guarded opening order that AlphaDesk refused (FAIL or UNAVAILABLE) before anything reached the broker, or that
 // OP2 refused locally for its contract limit, is a normal outcome, not a failed heartbeat. Anything else about an
 // order (unknown submission state, authentication, broker errors, a fill) keeps the Failed/Error treatment.
@@ -437,11 +495,12 @@ export function classifyFailures(records) {
     else if (isConfirmedFullClosePositionNotFound(record, records)) warnings.push(CLOSED_POSITION_WARNING);
     else if (isConfirmedCancelPositionNotFound(record, records)) warnings.push(CANCELED_ORDER_WARNING);
     else if (isMarketClosedChain(record)) warnings.push(MARKET_CLOSED_CHAIN_WARNING);
+    else if (isRangeNotCovered(record)) warnings.push(RANGE_NOT_COVERED_WARNING);
     else essential.push(record);
   }
   return { essential, warnings: [...new Set(warnings)] };
 }
-const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, CLOSED_POSITION_WARNING, CANCELED_ORDER_WARNING, MARKET_CLOSED_CHAIN_WARNING]);
+const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, CLOSED_POSITION_WARNING, CANCELED_ORDER_WARNING, MARKET_CLOSED_CHAIN_WARNING, RANGE_NOT_COVERED_WARNING]);
 function activityOutcome({ recovery, status, essential, warnings }) {
   // A warning is appended to a Recorded or Recovered outcome, so it is never hidden by a recorded order status or a recovery.
   // An essential failure that was not recovered is never hidden: a recorded status or a recovery marker does not erase it, and
@@ -457,6 +516,7 @@ function activityOutcome({ recovery, status, essential, warnings }) {
   if (warnings.includes(CLOSED_POSITION_WARNING)) parts.push(CLOSED_POSITION_WARNING);
   if (warnings.includes(CANCELED_ORDER_WARNING)) parts.push(CANCELED_ORDER_WARNING);
   if (warnings.includes(MARKET_CLOSED_CHAIN_WARNING)) parts.push(MARKET_CLOSED_CHAIN_WARNING);
+  if (warnings.includes(RANGE_NOT_COVERED_WARNING)) parts.push(RANGE_NOT_COVERED_WARNING);
   const warning = parts.length ? ` (warning: ${parts.join('; ')})` : '';
   const residual = recovery ? essential.filter(record => record?.kind !== 'heartbeat_failure') : essential;
   if (residual.length) return status ? `Failed (recorded: ${status})` : 'Failed';

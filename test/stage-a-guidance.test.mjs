@@ -60,7 +60,7 @@ test('A2: the cancel clarification is Herald only, at the existing sentence; the
 
 test('A3: session anchor for pre-open news, record once, read when available, no silent reset, no promise of persistence', () => {
   assert.match(catalyst, /another article about the same event, or a new anchor article, never restarts it/);
-  assert.match(catalyst, /Record the range once per event, the first time you have the complete window, with prophet_log_decision \(the symbol, the session date, the anchor time, the window, the feed, the high, the low and the midpoint\)/);
+  assert.match(catalyst, /Record the range once per event, the first time you have the complete window, with prophet_log_decision using action RANGE_RECORDED \(the symbol, the session date, the event publication time and the effective window start as two separate facts, the window, the feed, the high, the low and the midpoint\)/);
   assert.match(catalyst, /use it and do not recompute it; when none is, compute it once from exactly the window bars, cite their start times/);
   assert.match(catalyst, /record a correction that cites the bars, and do not rewrite earlier entries/);
   assert.doesNotMatch(catalyst, /store_trade_setup/);

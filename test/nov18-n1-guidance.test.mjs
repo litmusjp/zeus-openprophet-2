@@ -16,7 +16,7 @@ const NEW_PHRASES = [
   'the confirming bar must start at or after the end of the range window, and a bar inside the window never confirms',
   '- Re-entering an event:',
   'for a call the wrong side is below the level, for a put it is above the level',
-  'The bar must have completed after your entry fill',
+  'The bar must have completed after the broker-confirmed entry fill of that exact contract',
   'A placed target order reserves that allocation but is not a confirmed fill',
   '- Close-time exit:',
   '- Option quotes:',
@@ -34,8 +34,8 @@ test('each new instruction appears exactly once, in the catalyst family only', (
 test('N1-a range: window is defined by bar start times, validated, recorded once per event, corrected openly', () => {
   assert.match(catalyst, /a bar that starts at the end of the window is not part of the range/);
   assert.match(catalyst, /Check that every bar of the window is present, complete and from the same feed before you use the range/);
-  assert.match(catalyst, /the anchor time, the window, the feed, the high, the low and the midpoint/);
-  assert.match(catalyst, /reuse that recorded range for every later entry and stop on the same event/);
+  assert.match(catalyst, /the event publication time and the effective window start as two separate facts, the window, the feed, the high, the low and the midpoint/);
+  assert.match(catalyst, /reuse that recorded range, with the same anchor, for every later entry and stop on the same event/);
   assert.match(catalyst, /record a correction that cites the bars, and do not rewrite earlier entries/);
   assert.doesNotMatch(catalyst, /store_trade_setup/); // that tool is for completed trades, not an open event
 });
@@ -71,7 +71,7 @@ test('N1-b target: once per position, quantity at first touch, a pending order r
 
 test('N1-c stop: direction by side, post-entry bar only, cited; other exits unaffected', () => {
   assert.match(catalyst, /for a call the wrong side is below the level, for a put it is above the level/);
-  assert.match(catalyst, /The bar must have completed after your entry fill: compare the bar's end time \(a bar is stamped with its start, so its end is the start plus 5 minutes\) with the fill time/);
+  assert.match(catalyst, /The bar must have completed after the broker-confirmed entry fill of that exact contract \(take the fill time from the filled order or the position of that contract, never from another contract or from a plan\): compare the bar's end time \(a bar is stamped with its start, so its end is the start plus 5 minutes\) with the fill time, using bars fetched in the same heartbeat/);
   assert.doesNotMatch(catalyst, /compare its start time with the fill time/); // the start-vs-fill predicate was a contradiction
   assert.match(catalyst, /A bar that had already completed before your fill, and any bar inside the range window, never triggers the stop; a bar that was in progress at your fill and completes after it can/);
   assert.match(catalyst, /Cite the bar's start time, its close, the level and the feed when you exit on the stop/);
@@ -112,7 +112,7 @@ test('N1-e quotes: option quotes come from the chain; a position read is not a q
 });
 
 test('N1-f re-entry (D-R1 b): needs its own post-exit confirmation, the recorded range and a reconciled predecessor', () => {
-  assert.match(catalyst, /a later entry on the same event needs its own completed-bar confirmation that starts after your exit/);
+  assert.match(catalyst, /a later entry on the same event needs its own completed-bar confirmation that starts after the exit fill of that exact contract/);
   assert.match(catalyst, /an earlier position that is fully reconciled \(no remaining quantity and no active, planned or uncertain order\)/);
   assert.doesNotMatch(catalyst, /no new entry on that event for the rest/i); // the session-long ban is not the chosen behaviour
 });

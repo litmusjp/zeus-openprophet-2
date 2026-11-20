@@ -249,9 +249,9 @@ test('A1/A2/A4: the new guidance lines appear once per agent prompt and carry no
   const herald = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE, catalystRangeMinutes: 15 }, { strategyId: 'catalyst-news' });
   assert.equal(herald.split('This target exit happens once per position').length - 1, 1);
   assert.match(herald, /Enter only once minutes_since_open is at least 15 \(OP2 also refuses an earlier opening\)/);
-  assert.match(herald, /the end is the actual session close \(session_close_et from get_datetime; early-close days end earlier\)/);
+  assert.match(herald, /the end is the actual session close \(session_close_utc from get_datetime; early-close days end earlier\)/);
   assert.match(herald, /or the publication time for news published during the session/);
-  assert.match(herald, /overnight or pre-open news \(session_open_et from get_datetime; a pre-market bar never forms the range\)/);
+  assert.match(herald, /overnight or pre-open news \(session_open_utc from get_datetime; a pre-market bar never forms the range\)/);
   assert.doesNotMatch(herald, /09:30 to 16:00 ET/);
   const other = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: 'default' });
   assert.doesNotMatch(other, /This target exit happens once|a pre-market bar never forms the range/);

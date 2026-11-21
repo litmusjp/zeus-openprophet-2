@@ -41,6 +41,7 @@ type AlpacaTradingService struct {
 	expectedTenantID        string
 	expectedSandboxID       string
 	localOrderProvider      func(context.Context) ([]*interfaces.Order, error)
+	optionGroupProvider     func(context.Context) ([]OptionGroupRisk, error)
 	openingReservationMu    sync.Mutex
 	openingReservationPath  string
 	dailyLossLock           *DailyLossLockStore
@@ -149,6 +150,12 @@ func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, orde
 	now := time.Now()
 	order.MarketEvidenceAt, order.ObservedAt, order.AssessmentExpiresAt = contract.QuoteTimestamp, now, now.Add(brokerQuoteMaxAge)
 	return nil
+}
+
+// SetOptionGroupProvider binds the durable multi-leg group ledger to the broker risk snapshot. With no provider the
+// snapshot carries no groups and every order behaves exactly as before.
+func (s *AlpacaTradingService) SetOptionGroupProvider(provider func(context.Context) ([]OptionGroupRisk, error)) {
+	s.optionGroupProvider = provider
 }
 
 // SetLocalOrderProvider binds the durable local order store to the broker risk snapshot.
@@ -340,6 +347,14 @@ func (s *AlpacaTradingService) brokerRiskSnapshot(ctx context.Context, excludeCl
 		pendingOrders = filtered
 	}
 	snapshot := BrokerRiskSnapshot{Account: account, Positions: positions, PendingOrders: pendingOrders}
+	if s.optionGroupProvider != nil {
+		// Fail closed: with the group ledger unreadable, a grouped leg could be closed on its own or counted twice.
+		groups, groupErr := s.optionGroupProvider(ctx)
+		if groupErr != nil {
+			return BrokerRiskSnapshot{}, fmt.Errorf("option group ledger unavailable: %w", groupErr)
+		}
+		snapshot.Groups = groups
+	}
 	// The lock check never fails the snapshot: closing and reducing orders must stay possible. Opening paths fail closed on LockErr.
 	lock, lockErr := s.evaluateDailyLossLock(ctx, true, account, false)
 	snapshot.Lock, snapshot.LockErr = lock, lockErr
@@ -874,6 +889,36 @@ func convertAlpacaOrderStatic(ao *alpaca.Order) *interfaces.Order {
 	if IsOCCOptionSymbol(ao.Symbol) {
 		order.AssetClass = "us_option"
 		order.Underlying = optionRoot(ao.Symbol)
+	}
+	if ao.OrderClass == alpaca.MLeg && len(ao.Legs) > 0 {
+		// A multi-leg parent has no symbol, side or intent of its own; the legs are its identity. The legs are carried so
+		// reconciliation compares them, and the purpose is derived only when every leg opens or every leg closes.
+		legs := make([]interfaces.OptionLeg, 0, len(ao.Legs))
+		opens, closes := 0, 0
+		for _, leg := range ao.Legs {
+			ratio := 0
+			if leg.RatioQty != nil {
+				ratio = int(leg.RatioQty.IntPart())
+			}
+			legIntent := strings.ToLower(string(leg.PositionIntent))
+			if strings.HasSuffix(legIntent, "_to_open") {
+				opens++
+			} else if strings.HasSuffix(legIntent, "_to_close") {
+				closes++
+			}
+			legs = append(legs, interfaces.OptionLeg{Symbol: leg.Symbol, Side: string(leg.Side), RatioQty: ratio, PositionIntent: string(leg.PositionIntent)})
+		}
+		order.OptionLegs = legs
+		order.AssetClass = "us_option"
+		order.Underlying = optionRoot(legs[0].Symbol)
+		switch {
+		case opens == len(legs):
+			order.Purpose = "entry"
+		case closes == len(legs):
+			order.Purpose = "close"
+		default:
+			order.Purpose = ""
+		}
 	}
 	if err := ValidateBrokerOrderState(order, order.Qty); err != nil {
 		order.Status = "submission_uncertain"

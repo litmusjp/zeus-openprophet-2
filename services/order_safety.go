@@ -321,6 +321,14 @@ func validateOptionsOrder(order *interfaces.OptionsOrder) error {
 	if order.LimitPrice != nil && !isPositiveFinite(*order.LimitPrice) {
 		return fmt.Errorf("limit price must be positive")
 	}
+	if order.PriceKind != "" {
+		if len(order.Legs) == 0 {
+			return fmt.Errorf("price_kind applies to multi-leg orders only")
+		}
+		if order.PriceKind != "debit" && order.PriceKind != "credit" {
+			return fmt.Errorf("price_kind must be debit or credit")
+		}
+	}
 	if len(order.Legs) != 0 {
 		if len(order.Legs) != 2 && len(order.Legs) != 4 {
 			return fmt.Errorf("complex options order must contain exactly 2 or 4 legs")

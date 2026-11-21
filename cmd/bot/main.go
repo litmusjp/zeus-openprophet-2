@@ -180,6 +180,14 @@ func main() {
 			}
 			return pending, nil
 		})
+		// The durable multi-leg group ledger feeds the risk snapshot (grouped legs counted once, single-leg close of a grouped leg refused).
+		tradingService.SetOptionGroupProvider(func(context.Context) ([]services.OptionGroupRisk, error) {
+			states, err := storageService.OptionGroupStates()
+			if err != nil {
+				return nil, err
+			}
+			return services.OptionGroupRisksFromStates(states)
+		})
 		accountKey := os.Getenv("ALPACA_ACCOUNT_ID")
 		accountHash := sha256.Sum256([]byte(accountKey))
 		lockPath := filepath.Join(filepath.Dir(filepath.Dir(cfg.DatabasePath)), "account-"+hex.EncodeToString(accountHash[:])[:24]+".opening.lock")

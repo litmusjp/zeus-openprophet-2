@@ -325,7 +325,8 @@ func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot Bro
 			return fmt.Errorf("pending broker order %q has no bounded executable price", pending.ClientOrderID)
 		}
 		pendingNotional := pendingPrice * pending.Qty
-		if IsOCCOptionSymbol(pending.Symbol) {
+		if IsOCCOptionSymbol(pending.Symbol) || len(pending.OptionLegs) > 0 {
+			// A multi-leg broker order has no parent symbol, so its legs mark it as an option order.
 			pendingNotional *= 100
 		}
 		deployed += pendingNotional

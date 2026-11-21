@@ -74,6 +74,11 @@ func brokerOrderMatchesLocal(local, broker *interfaces.Order) bool {
 	if local.ClientOrderID != "" && broker.ClientOrderID != local.ClientOrderID {
 		return false
 	}
+	if len(local.OptionLegs) > 0 || len(broker.OptionLegs) > 0 {
+		// A multi-leg order is identified by its legs, not by a parent symbol, side or intent (the broker leaves them empty).
+		return optionLegsMatch(local.OptionLegs, broker.OptionLegs) && local.Type == broker.Type && local.TimeInForce == broker.TimeInForce &&
+			local.Qty > 0 && broker.Qty > 0 && local.Qty == broker.Qty
+	}
 	if local.Symbol != broker.Symbol || local.Side != broker.Side || local.Type != broker.Type || local.TimeInForce != broker.TimeInForce {
 		return false
 	}
@@ -1837,6 +1842,8 @@ type OptionsOrderRequest struct {
 	ExpiresAt             time.Time                           `json:"expires_at,omitempty"`
 	OptionLegs            []interfaces.OptionLeg              `json:"option_legs,omitempty"`
 	CapRevision           *int64                              `json:"cap_revision,omitempty"`
+	// PriceKind is "debit" for a spread opening and "credit" for a spread close. The price itself stays a positive magnitude.
+	PriceKind string `json:"price_kind,omitempty"`
 }
 
 type optionsAssessmentValidationError struct {
@@ -2021,6 +2028,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		AssessmentExpiresAt:   req.ExpiresAt,
 		Legs:                  req.OptionLegs,
 		CapRevision:           req.CapRevision,
+		PriceKind:             req.PriceKind,
 	}
 	if err := services.ValidateOptionsOrder(order); err != nil {
 		c.JSON(400, oc.optionsResponseWithIdentity(nil, nil, "validation_error", err.Error()))
@@ -2121,6 +2129,19 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
+	// A spread is recorded on the durable group ledger before it can be submitted (single-leg orders skip this entirely).
+	groupID, groupErr := oc.registerSpreadBeforeSubmission(order)
+	if groupErr != nil {
+		intent.Status = "rejected_before_submission"
+		intent.Metadata = withFailureReason(intent.Metadata, intent.Status, groupErr)
+		if saveErr := oc.storageService.SaveOrder(intent); saveErr != nil {
+			c.JSON(http.StatusBadGateway, oc.optionsResponseWithIdentity(intent, nil, "submission_uncertain", "spread group rejection was not durably recorded"))
+			return
+		}
+		c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(intent, nil, "risk_blocked", groupErr.Error()))
+		return
+	}
+
 	result, err := oc.tradingService.PlaceOptionsOrder(ctx, order)
 	if intent.Metadata == "" {
 		intent.Metadata = auditMetadata
@@ -2181,6 +2202,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 				return
 			}
 			oc.logger.WithError(err).Error("Broker rejected options order")
+			oc.finishSpreadEntry(groupID, order, "void")
 			c.JSON(http.StatusConflict, oc.optionsResponseWithIdentity(intent, nil, intent.Status, err.Error()))
 			return
 		}
@@ -2192,6 +2214,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 				c.JSON(http.StatusBadGateway, oc.optionsResponseWithIdentity(intent, nil, "submission_uncertain", "pre-submission rejection was not durably recorded"))
 				return
 			}
+			oc.finishSpreadEntry(groupID, order, "void")
 			response := oc.optionsResponseWithIdentity(intent, nil, "risk_blocked", err.Error())
 			attachAssessmentError(response, err)
 			c.JSON(http.StatusConflict, response)
@@ -2229,6 +2252,11 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		PositionIntent:  order.PositionIntent,
 		Purpose:         map[bool]string{true: "entry", false: "close"}[strings.HasSuffix(order.PositionIntent, "_to_open")],
 	}
+	if len(order.Legs) > 0 {
+		// A multi-leg parent has no symbol, side or intent of its own; the service has already required any value the
+		// provider did return to be one of the submitted legs, so the consumer check compares everything else.
+		expectedResultOrder.Symbol, expectedResultOrder.Side, expectedResultOrder.PositionIntent = result.Symbol, result.Side, ""
+	}
 	if err := validateBrokerResultForConsumer(result, expectedResultOrder); err != nil {
 		intent.Status = "submission_uncertain"
 		result.ClientOrderID = clientOrderID
@@ -2250,6 +2278,7 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 		c.JSON(502, oc.optionsResponseWithIdentity(intent, result, intent.Status, "options order persistence is unresolved"))
 		return
 	}
+	oc.finishSpreadEntry(groupID, order, "open")
 
 	c.JSON(200, result)
 }

@@ -1,0 +1,67 @@
+{
+  "sbx_723be98b": {
+    "allowLiveTrading": false,
+    "allowPaperTrading": true,
+    "maxPositionPct": 15,
+    "maxDeployedPct": 80,
+    "maxDailyLoss": 5,
+    "maxOpenPositions": 10,
+    "maxOrderValue": 0,
+    "allowedTools": [],
+    "blockedTools": [],
+    "allowOptions": true,
+    "allowStocks": false,
+    "allow0DTE": false,
+    "requireConfirmation": false,
+    "maxToolRoundsPerBeat": 25,
+    "allowedStructures": [
+      "long_call",
+      "long_put",
+      "bull_call_debit",
+      "bear_put_debit"
+    ]
+  },
+  "sbx_956ff9e4": {
+    "allowLiveTrading": false,
+    "allowPaperTrading": true,
+    "maxPositionPct": 15,
+    "maxDeployedPct": 80,
+    "maxDailyLoss": 5,
+    "maxOpenPositions": 10,
+    "maxOrderValue": 0,
+    "allowedTools": [],
+    "blockedTools": [],
+    "allowOptions": true,
+    "allowStocks": false,
+    "allow0DTE": false,
+    "requireConfirmation": false,
+    "maxToolRoundsPerBeat": 25,
+    "allowedStructures": [
+      "long_call",
+      "long_put",
+      "bull_call_debit"
+    ]
+  },
+  "sbx_0d35471e": {
+    "allowLiveTrading": false,
+    "allowPaperTrading": true,
+    "maxPositionPct": 15,
+    "maxDeployedPct": 80,
+    "maxDailyLoss": 5,
+    "maxOpenPositions": 10,
+    "maxOrderValue": 0,
+    "allowedTools": [],
+    "blockedTools": [],
+    "allowOptions": true,
+    "allowStocks": false,
+    "allow0DTE": false,
+    "requireConfirmation": false,
+    "maxToolRoundsPerBeat": 25,
+    "allowedStructures": [
+      "long_call",
+      "long_put",
+      "bull_call_debit",
+      "bear_put_debit"
+    ]
+  }
+}

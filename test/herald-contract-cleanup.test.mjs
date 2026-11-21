@@ -27,10 +27,13 @@ test('Herald-owned prompt alone gets a focused supported menu and coherent asses
   for (const tool of ['get_account', 'get_positions', 'get_orders', 'get_options_positions', 'get_options_position', 'get_options_chain', 'cancel_order', 'withdraw_planned_intent', 'get_news', 'search_news', 'get_historical_bars', 'get_activity_log', 'get_datetime', 'wait']) assert.ok(menu.includes(`prophet_${tool}`), `missing ${tool}`);
   for (const tool of ['place_buy_order', 'place_sell_order', 'place_managed_position', 'close_managed_position', 'get_managed_positions', 'set_heartbeat', 'update_permissions', 'apply_heartbeat_profile', 'get_agent_config', 'analyze_stocks', 'get_quick_market_intelligence', 'get_cleaned_news', 'aggregate_and_summarize_news']) assert.ok(!menu.includes(`prophet_${tool}`), `unexpected ${tool}`);
   assert.doesNotMatch(menu, /\*\*Intelligence\*\*/);
-  assert.match(prompt, /one intent in the same heartbeat; submit before op2_effective_expires_at/);
-  assert.match(prompt, /first submission is not a retry/i);
-  assert.match(prompt, /same client_order_id, matching the client_reference already sent in assessment; client_reference is not an order-tool argument/);
-  assert.match(prompt, /periodic agent-managed market\/limit closes.*no broker-held stops\/OCO or guaranteed instantaneous protection/i);
+  // The saved workflow copy is dropped; the one shared workflow from code is rendered exactly once.
+  assert.doesNotMatch(prompt, /Assess: generate one fresh client_order_id/);
+  assert.equal(prompt.split('### MARKET-OPEN ALPHADESK WORKFLOW').length - 1, 1);
+  assert.match(prompt, /The first submission is not a retry/i);
+  assert.match(prompt, /Use the same client_order_id for this intent/);
+  assert.match(prompt, /periodic agent-managed market\/limit closes.*not broker-held stops\/OCO and do not provide guaranteed instantaneous protection/i);
+  assert.match(menu, /prophet_get_option_groups/);
   assert.doesNotMatch(prompt, /TEMP safety and objective must remain|TEMPORARY_ALPHA_MVP_OVERRIDE/);
   assert.match(prompt, /ORIGINAL STRATEGY: exact strategy rules remain/);
   assert.doesNotMatch(prompt, /After genuine PASS:[^\n]*new client_order_id/i);
@@ -40,10 +43,16 @@ test('Herald-owned prompt alone gets a focused supported menu and coherent asses
   assert.match(renderPrefixedToolMenu(), /prophet_set_heartbeat/);
   const other = await buildSystemPrompt({ id: 'pendulum', sandboxId: 'sbx_956ff9e4', name: 'Pendulum', systemPromptTemplate: 'custom', customSystemPrompt: 'Pendulum identity' });
   assert.match(other, /prophet_place_managed_position/);
+  // Herald's focused menu follows the Herald agent on any slot that allows options; an agent whose slot does not allow options keeps the full catalog.
   const arbitrary = 'Custom text must stay inert and unchanged.\n### MARKET-OPEN ALPHADESK WORKFLOW\nExecute after PASS with a new ID.';
   const inertCustom = await buildSystemPrompt({ id: 'catalyst', sandboxId: 'sbx_723be98b', name: 'Herald', systemPromptTemplate: 'custom', customSystemPrompt: arbitrary });
-  assert.ok(inertCustom.includes(arbitrary));
-  assert.match(inertCustom.slice(inertCustom.indexOf('## Available Tools'), inertCustom.indexOf('OpenCode registers')), /prophet_place_managed_position/);
+  assert.ok(inertCustom.includes(arbitrary), 'an unterminated saved marker is left exactly as written');
+  assert.doesNotMatch(inertCustom.slice(inertCustom.indexOf('## Available Tools'), inertCustom.indexOf('OpenCode registers')), /prophet_place_managed_position/);
+  const herald = { id: 'catalyst', sandboxId: 'sbx_other', name: 'Herald', systemPromptTemplate: 'custom', customSystemPrompt: 'Herald on another slot.' };
+  const heraldElsewhere = await buildSystemPrompt(herald);
+  assert.doesNotMatch(heraldElsewhere.slice(heraldElsewhere.indexOf('## Available Tools'), heraldElsewhere.indexOf('OpenCode registers')), /prophet_place_managed_position/);
+  const heraldNoOptions = await buildSystemPrompt(herald, { allowOptions: false });
+  assert.match(heraldNoOptions.slice(heraldNoOptions.indexOf('## Available Tools'), heraldNoOptions.indexOf('OpenCode registers')), /prophet_place_managed_position/);
 });
 
 test('options order alone receives 15 seconds while unsafe mutation failures remain one attempt', async () => {

@@ -114,6 +114,9 @@ export function strategyFamilyOf(strategyId) {
     case 'catalyst-news': return 'catalyst';
     case 'long-premium-volatility': return 'long-vol';
     case 'default': return 'prophet';
+    case 'capital-preservation': return 'support';
+    case 'macro-rotation':
+    case 'long-horizon-trend': return 'shares';
     default: return 'unknown';
   }
 }
@@ -215,14 +218,28 @@ function catalystLines(g) {
 export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, options = {}) {
   const g = normalizeTradingGuidance(guidance);
   const family = strategyFamilyOf(options.strategyId);
+  // A prompt without a start list block must not be told to "complete every listed symbol" (buildSystemPrompt passes the real value).
+  const hasStartList = options.hasStartList !== false;
   const lines = [
     '## Trading Guidance',
     'This is how to read your strategy rules in practice. The user can change these settings. They never override your Strategy Rules, permissions or risk limits, and never create a trade or a reason to skip a rule.',
+  ];
+  if (family === 'shares') {
+    // Share strategies (Compass, Anchor) are not activated and never open options; they get only the shared session lines.
+    lines.push(
+      '- Your strategy trades shares only and is not activated: do not open options positions, and do not place any order unless the operator has assigned you a share-trading slot with stock permissions.',
+      sessionClockLine(),
+      sessionCountLine(),
+    );
+    return lines.join('\n');
+  }
+  lines.push(
     family === 'catalyst' ? CATALYST_CONTRACT(g)
       : family === 'long-vol' ? DIRECTIONAL_CONTRACT(g)
         : family === 'prophet' ? PROPHET_CONTRACT(g)
           : CALLS_ONLY_CONTRACT(g),
-  ];
+  );
+  const outsideList = hasStartList ? 'names outside your start list' : 'names you have not looked at';
   if (family === 'long-vol') {
     // Vega's own Strategy Rules decide entries and exits. No breakout, market-trend or sector test is added here;
     // the definitions below are information only, and the evidence line only points at the tools that exist.
@@ -230,14 +247,14 @@ export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, optio
       '- Thesis: your Strategy Rules decide every entry and exit (a dated event inside the hold, a directional view consistent with the prevailing trend, and evidence that the premium is reasonably priced for the anticipated move). Trading Guidance adds no breakout, market-trend or sector test to them. Find dated events with prophet_get_earnings_dates (status unknown means unverified). For the anticipated move, use the at-the-money straddle price and the implied volatility of the event expiry compared with a nearer expiry in prophet_get_options_chain, and the underlying\'s recent realized moves from completed daily bars. Say which evidence you used and which you could not get; no tool returns an implied-volatility history.',
       dailyVolumeLine(),
       computedFieldsLine(),
-      '- Market-wide discovery (advised, not required): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface names outside your start list.',
+      `- Market-wide discovery (advised, not required): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface ${outsideList}.`,
     );
   } else if (family === 'prophet') {
     lines.push(
       '- Your Strategy Rules decide every entry and exit (a breakout aligned with the higher timeframe, a completed-bar retest that holds, momentum resuming). Trading Guidance adds no further gate; use the option cost discipline line below. For scalps use completed intraday bars (complete=true only) and record the bar timeframe; for swings use completed daily bars and the weekly trend.',
       dailyVolumeLine(),
       computedFieldsLine(),
-      '- Market-wide discovery (optional): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface names outside your start list. It is never required.',
+      `- Market-wide discovery (optional): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface ${outsideList}. It is never required.`,
     );
   }
   if (family === 'mean-reversion') {
@@ -248,6 +265,12 @@ export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, optio
     lines.push(...catalystLines(g));
   } else if (family === 'long-vol' || family === 'prophet') {
     // handled above: no extra definitions
+  } else if (family === 'support') {
+    // Guardian: calls on a pullback to tested support in an established uptrend; only the definitions its rules use.
+    lines.push(
+      nearSupportLine(g), flatRisingLine(g), dailyVolumeLine(), computedFieldsLine(),
+      `- Market-wide discovery (optional): prophet_get_alpaca_news with no symbols returns the newest market-wide headlines, which can surface ${outsideList}. It is never required.`,
+    );
   } else {
     // unknown strategy: every definition, each labelled with the kind of strategy that uses it
     lines.push(
@@ -261,10 +284,10 @@ export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, optio
     );
   }
   if (family === 'catalyst') {
-    lines.push(g.extraSymbolsPerScan > 0
+    if (hasStartList) lines.push(g.extraSymbolsPerScan > 0
       ? `- Catalyst coverage: the CATALYST UNIVERSE in your prompt is a start list, not a limit. Check each listed name for fresh company news, and also any other liquid large-cap optionable stock that appears in today's company news (up to ${g.extraSymbolsPerScan} more). A listed name you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP. Name what you checked.`
       : '- Catalyst coverage: check only the names in your CATALYST UNIVERSE; a listed name you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP.');
-  } else {
+  } else if (hasStartList) {
     lines.push(g.extraSymbolsPerScan > 0
       ? `- Scan coverage: your SCAN UNIVERSE is a start list, not a limit. Complete every listed symbol first; a listed symbol you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP. Then extend the search to up to ${g.extraSymbolsPerScan} more symbols that fit your strategy's universe. Count as extras only symbols that are not on the start list, and name them. If you checked no extras, say why.`
       : '- Scan coverage: check only the symbols in your SCAN UNIVERSE start list; a listed symbol you could not evaluate is INCOMPLETE_RESEARCH, not NO_SETUP.');

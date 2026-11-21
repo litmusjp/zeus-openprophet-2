@@ -9,6 +9,16 @@ import { DEFAULT_AGENT_MODEL, alpacaTradingUrl, resolveAgentModel } from './defa
 import { nativeOpenCodeEnv, stripOperatorSecrets } from './chatgpt-oauth.js';
 import * as secrets from './secrets-store.js';
 import * as configSecrets from './config-secrets.js';
+import { permissionPatchForFit, strategyOptionFit } from './agent-consistency.js';
+
+// The last agent switch per sandbox, read once by the route that triggered it (to restart the slot's backend when the
+// switch changed permissions). In memory only.
+const lastAgentSwitch = new Map();
+export function consumeAgentSwitch(sandboxId) {
+  const entry = lastAgentSwitch.get(sandboxId) || null;
+  lastAgentSwitch.delete(sandboxId);
+  return entry;
+}
 
 function configuredDefaultModel() {
   return resolveAgentModel();
@@ -1246,14 +1256,25 @@ export async function updateSandboxAgentSelection(sandboxId, updates) {
       ...(updates.overrides?.heartbeatOverrides || {}),
     },
   };
+  let permissionPatch = null;
   if (agentChanged) {
+    // The new agent runs its OWN identity, strategy, rules and cadence: nothing of the previous agent carries over. Anything the
+    // caller passes explicitly in the same request is kept (it was chosen for the new agent).
+    const explicit = updates.overrides || {};
     mergedOverrides = {
       ...mergedOverrides,
       agentId: nextActiveAgentId,
-      customStrategyRules: null,
-      customSystemPrompt: null,
-      systemPromptTemplate: null,
+      name: explicit.name ?? null,
+      description: explicit.description ?? null,
+      customStrategyRules: explicit.customStrategyRules ?? null,
+      customSystemPrompt: explicit.customSystemPrompt ?? null,
+      systemPromptTemplate: explicit.systemPromptTemplate ?? null,
+      strategyId: explicit.strategyId, // undefined = fall back to the new agent's own strategy (never null: null would mean "no strategy")
+      heartbeatOverrides: { ...(explicit.heartbeatOverrides || {}) },
     };
+    // The slot permission follows the new agent's strategy fit (see agent-consistency.js); unknown fit leaves it unchanged.
+    const strategy = getStrategyById(explicit.strategyId || newAgent.strategyId);
+    permissionPatch = permissionPatchForFit(strategyOptionFit(strategy, explicit.strategyId || newAgent.strategyId), sandbox.permissions || {});
   }
 
   _config.sandboxes[sandboxId] = mergeSandbox({
@@ -1265,8 +1286,13 @@ export async function updateSandboxAgentSelection(sandboxId, updates) {
       model: agentChanged ? (newAgent.model || sandbox.agent.model) : (updates.model || sandbox.agent.model),
       overrides: mergedOverrides,
     },
+    permissions: permissionPatch ? { ...(sandbox.permissions || {}), ...permissionPatch } : sandbox.permissions,
     updatedAt: new Date().toISOString(),
   }, _config);
+  if (agentChanged) {
+    lastAgentSwitch.set(sandboxId, { from: sandbox.agent.activeAgentId, to: nextActiveAgentId, permissionPatch });
+    console.log(`agent switch: ${sandboxId} ${sandbox.agent.activeAgentId} -> ${nextActiveAgentId}; permissions ${permissionPatch ? JSON.stringify(permissionPatch) : 'unchanged'}`);
+  }
 
   if (_config.activeSandboxId === sandboxId) syncLegacyAliases(_config);
   await saveConfig();

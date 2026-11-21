@@ -64,13 +64,18 @@ test.after(async () => {
 test('previews resolve identity and strategy per sandbox while sharing system instructions', async () => {
   await store.loadConfig();
   const config = store.getConfig();
+  // allowOptions: false renders the general (non-workflow) AlphaDesk wording that this test pins; the shared workflow variant for
+  // options agents is pinned in tool-discoverability.test.mjs and herald-contract-cleanup.test.mjs.
   const build = (sandboxId) => buildSystemPrompt(store.getResolvedAgentForSandbox(sandboxId), {
     getStrategyById: (id) => config.strategies.find(strategy => strategy.id === id),
+    allowOptions: false,
   });
 
   const [l1Prompt, l2Prompt] = await Promise.all([build('sbx_l1'), build('sbx_l2')]);
-  const l1Shared = l1Prompt.slice(l1Prompt.indexOf('## Available Tools'));
-  const l2Shared = l2Prompt.slice(l2Prompt.indexOf('## Available Tools'));
+  // Herald (catalyst) gets its focused tool menu on any slot; everything after the menu is shared text.
+  const afterMenu = prompt => { const rest = prompt.slice(prompt.indexOf('## Available Tools')); return rest.slice(rest.indexOf('OpenCode registers')); };
+  const l1Shared = afterMenu(l1Prompt);
+  const l2Shared = afterMenu(l2Prompt);
 
   assert.match(l1Prompt, /Herald identity/);
   assert.match(l1Prompt, /Herald strategy rules/);

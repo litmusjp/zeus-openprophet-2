@@ -1,0 +1,74 @@
+[
+  {
+    "id": "default",
+    "name": "Aggressive Options",
+    "description": "Trades options breakouts, mainly long calls or clearly bearish long puts, after a confirmed retest.",
+    "rulesFile": null,
+    "customRules": "- Trade liquid stocks and index ETFs mainly with long calls; use long puts only for clearly bearish setups, never as hedges. Label each position scalp or swing at entry and keep that horizon.\n- Choose expiration beyond the intended hold. Scalp entries remain conditional on verified intraday capability; record the supported bar timeframe.\n- Require a breakout aligned with the higher timeframe: intraday breakout with daily trend for scalps, daily breakout with weekly trend for swings.\n- Enter after a completed-bar retest holds the broken level and momentum resumes; do not assume a close-price fill.\n- Skip conflicting timeframes and choppy action. Never turn a failed scalp into a swing.\n- Exit when the retest fails or the higher-timeframe trend breaks. Take profit at established support/resistance or on exhausted momentum.\n- Scalp exits remain same-session. Exit a swing if no completed daily close moves in the intended direction beyond the recorded underlying entry reference over three completed sessions after entry.\n- For a swing you may use a same-expiry 1:1 debit vertical in the trade's direction (a bull call spread; a bear put spread only for a clearly bearish setup, never as a hedge) instead of one long option, with the short strike at or near the established support or resistance where you already take profit and your own exits unchanged. Scalps stay single-leg. Close it as one two-leg order.\n",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-11-21T05:52:25.197Z"
+  },
+  {
+    "id": "capital-preservation",
+    "name": "Capital Preservation Swing",
+    "description": "Buys calls on liquid large caps rebounding from tested support in established uptrends.",
+    "rulesFile": null,
+    "customRules": "- Trade pauses in healthy uptrends, not breakouts; intended hold is several sessions to two weeks.\n- Use liquid large-cap stocks and verified call quotes; choose expiration beyond the intended hold.\n- Require higher highs and higher lows, then a pullback to tested support or a rising trend average without a confirmed adverse catalyst.\n- Confirm support holds when a completed bar closes above the previous session's high; evaluate daily conditions on completed daily bars.\n- Skip weakening trends and scheduled binary events inside the intended hold.\n- Exit on a decisive completed daily close below defended support; take profit near the prior swing high.\n- Exit if no completed underlying daily close is above the recorded underlying entry reference by the end of the third completed trading session after entry.\n- You may express a qualified setup as a same-expiry 1:1 bull call debit spread instead of one long call, with the short strike at or near the prior swing high you already use for taking profit. Your support-based and time exits apply to the underlying. Close it as one two-leg order.\n",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-11-21T05:52:25.713Z"
+  },
+  {
+    "id": "equity-momentum",
+    "name": "Liquid Equity Momentum",
+    "description": "Buys calls on liquid stocks and broad ETFs after confirmed, volume-backed breakouts; intended hold is days to a few weeks.",
+    "rulesFile": null,
+    "customRules": "- Trade continuation from a clean multi-day range or established resistance; intended hold is days to a few weeks; this is a swing, not a scalp.\n- Use liquid large-cap stocks or broad ETFs with active options; choose expiration beyond the intended hold.\n- Require a completed daily close above a clearly bounded range on volume above its recent average, with market and sector context supportive.\n- Enter at a subsequent permitted evaluation while price remains near the broken level; skip extended moves, unverified headline breakouts, and earnings inside the hold.\n- Exit on a completed daily close back inside the range or below the latest higher swing low.\n- If established overhead resistance exists, take profit as price approaches it and momentum fades. If none exists, hold while structure holds; do not invent a target.\n- Exit if no completed daily close is above the breakout-session high within three completed trading sessions after entry.\n- Use a bull call debit spread only when overhead resistance exists to place the short strike at or just beyond it; otherwise use a single call. Never invent a target to fit a spread. Close it as one two-leg order.\n",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-11-21T05:52:25.956Z"
+  },
+  {
+    "id": "etf-mean-reversion",
+    "name": "Liquid ETF Mean Reversion",
+    "description": "Buys calls on liquid ETFs after a confirmed rebound from a short-term oversold move.",
+    "rulesFile": null,
+    "customRules": "- Trade liquid broad-market and sector ETFs after a sharp short-term selloff; intended hold is 1â€“10 trading sessions.\n- Buy calls with expiration beyond the intended hold; use only liquid contracts with verified quotes.\n- Require price below a flat or rising 20-day average and near a prior support area in a sideways or rising market.\n- Confirm a rebound when price undercuts the preceding **session's low** and then closes above its open; evaluate only completed bars.\n- Skip persistent news-driven declines and established downtrends; do not enter while price is falling.\n- Exit on a completed daily close below the reversal low. Take profit near the 20-day average or nearby range resistance.\n- Exit if no completed underlying daily close is above the recorded underlying entry reference by the end of the third completed trading session after entry.\n- You still buy calls. You may express a qualified setup as a same-expiry 1:1 bull call debit spread (the call you would have bought, plus a higher-strike call sold only as the short leg of that spread) with the short strike at or near the 20-day average or the range resistance you already target. Keep your own exits and close it as one two-leg order.\n",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-11-21T05:52:25.469Z"
+  },
+  {
+    "id": "macro-rotation",
+    "name": "Index & Macro Rotation",
+    "description": "Future share strategy rotating into ETF leaders when sustained relative strength and regime evidence agree.",
+    "rulesFile": null,
+    "customRules": "- Future phase only: ETF shares held weeks to months; not an options mandate and not activated.\n- Limit the universe to broad-market and major sector/style ETFs with high liquidity.\n- Require sustained relative strength versus the broad index plus improving breadth or supportive rates; one signal is insufficient.\n- Confirm leadership over several weeks, preferably entering on a pullback that holds relative strength.\n- Skip mixed macro evidence and attempts to predict an unconfirmed regime turn.\n- Exit when relative leadership breaks and corroborating evidence deteriorates; leadership may pass to a better-confirmed group.\n- Rotate out if relative strength stays flat for several weeks while corroborating evidence weakens.",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-10-25T08:29:19.948Z"
+  },
+  {
+    "id": "long-horizon-trend",
+    "name": "Long-Horizon Trend",
+    "description": "Future share strategy holding liquid stocks and index ETFs through durable multi-month uptrends.",
+    "rulesFile": null,
+    "customRules": "- Future phase only: shares held months to quarters; not an options mandate and not activated.\n- Use liquid large-cap stocks and broad index ETFs with established multi-month history; avoid erratic, gap-driven names.\n- Require higher weekly highs and lows with price above a rising 200-day average.\n- Enter after a pullback holds a rising intermediate trend average and price resumes higher; do not chase extended highs.\n- Exit after a sustained break of the 200-day average together with lower weekly swing lows; ordinary dips do not qualify.\n- Take no fixed profit target; hold while the confirmed long-term trend remains intact.\n- Consolidation alone is not a no-progress exit while the long-term trend holds.",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-10-25T08:29:20.204Z"
+  },
+  {
+    "id": "catalyst-news",
+    "name": "Catalyst & News Reaction",
+    "description": "Trades verified public catalysts over an intraday to few-session hold when the initial reaction continues.",
+    "rulesFile": null,
+    "customRules": "- Trade only verified, already-public earnings, guidance, or major confirmed headlines; never position ahead of a scheduled release; intended hold is intraday to a few sessions.\n- Use liquid large-cap options with expiration beyond the intended hold; calls for positive and puts for negative reactions.\n- Before entry, record the initial post-news range and its supported bar timeframe; judge the setup from completed bars.\n- Require a directional reaction and a completed-bar break of that range on stronger volume; enter only at a subsequent permitted evaluation.\n- Skip unverifiable news, exhausted gaps, or options already repriced beyond a plausible remaining move.\n- Exit if the range break fails or price reverses through the pre-reaction level. Take profit near the next visible support or resistance when price stalls.\n- Exit in the reaction session if continuation fails to develop; never extend a failed catalyst trade into a longer hold.\n- You may express a qualified setup as a same-expiry 1:1 debit vertical in the trade's direction (a bull call spread for a call setup, a bear put spread for a put setup) instead of one long option, only when you expect to hold beyond the reaction session and every entry, spread-cost and exit rule you already follow holds for the exact legs. Put the short strike at or near the next visible support or resistance you already use to take profit, keep your own range-failure and reaction-session exits on the underlying, and close it as one two-leg order.\n",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-11-21T05:52:24.943Z"
+  },
+  {
+    "id": "long-premium-volatility",
+    "name": "Long-Premium Volatility",
+    "description": "Buys reasonably priced options ahead of scheduled events, targets the captured anticipated premium gain, and exits before release.",
+    "rulesFile": null,
+    "customRules": "- Consider a dated event inside the intended hold and state a directional view consistent with the prevailing trend.\n- Buy a single call or put with expiration after the event and beyond the intended hold; never write options or build multi-leg positions.\n- Require evidence that premium is reasonably priced for the anticipated move: the at-the-money straddle's implied move and the event-expiry implied volatility compared with a nearer expiry and with the underlying's recent realized moves; without it, do not trade.\n- Record executable option premium at entry and the anticipated premium-gain level; compare later using fresh executable quotes. Underlying conditions use completed daily bars.\n- Take profit at the captured anticipated premium-gain level; exit on a decisive completed daily close against the directional view or before the event release in every case.\n- Exit if implied volatility rises while executable premium remains below entry; rising IV alone is not a reason to stay.\n- Also exit if executable premium has not improved by the end of the third completed trading session after entry.",
+    "createdAt": "2026-09-24T03:55:35.136Z",
+    "updatedAt": "2026-11-07T01:33:26.577Z"
+  }
+]

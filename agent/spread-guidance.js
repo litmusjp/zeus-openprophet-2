@@ -3,6 +3,8 @@
 // byte-identical to before. The agent's own Strategy Rules still decide WHEN a vertical is used; this module only supplies the
 // shared HOW and removes the sentences that would otherwise tell the agent spreads are impossible or price a spread like one leg.
 
+import { WORKFLOW_SPREAD_PAIRS } from './alphadesk-workflow.js';
+
 export const DEBIT_VERTICAL_STRUCTURES = ['bull_call_debit', 'bear_put_debit'];
 
 export function debitVerticalsAllowed(allowedStructures) {
@@ -47,9 +49,37 @@ export const SPREAD_TEXT_REPLACEMENTS = [
   ],
   // The heartbeat policy-facts line ("... quote of the exact contract, is above N%") is rendered per beat by
   // renderAlphaDeskPolicyFacts(facts, { twoLeg }), not here.
+  // The shared market-open workflow (alphadesk-workflow.js) is single-leg text; its three vertical sentences are applied here.
+  ...WORKFLOW_SPREAD_PAIRS,
 ];
 
 const ANCHOR = '- Use `prophet_place_options_order` for one OCC option symbol or, with `legs`';
+
+const CLOSING_RECIPE = ' CLOSING (only): reverse both legs. List the formerly long leg first with sell / sell_to_close, then the formerly short leg with buy / buy_to_close, and repeat the first leg at the top level (sell / sell_to_close). limit_price is the positive net credit per unit and quantity is the remaining units. Never reuse the opening buy / buy_to_open fields for a close.';
+const NEVER_LEG_OUT = ' Never leg out with separate orders (a single-leg close of a grouped leg is refused). A planned_for_next_session retry uses identical legs. Close a spread before its expiry session when the short leg is in the money; assignment handling is a backstop, not a plan.';
+const NET_QUOTES_CLOSE = ' Net quotes, from each leg\'s timestamped bid and ask read in the same beat: net bid = long bid minus short ask; net mid = long mid minus short mid. A due invalidation or stop exit uses a marketable limit at or just below the net bid; a target exit starts at the net mid and is repriced on a later heartbeat. Without fresh quotes for both legs you do not submit.';
+
+/**
+ * Shown in the heartbeat input when the sandbox holds an open two-leg group but the slot's permission does not list a debit
+ * vertical (for example after an agent switch): the agent may still have to manage and close it, so it gets the closing recipe.
+ * It never allows opening another spread.
+ */
+export function openGroupCloseReminder(openGroups = []) {
+  const groups = Array.isArray(openGroups) ? openGroups : [];
+  const named = groups.length ? ` (${groups.map(g => `${g.underlying || 'underlying'} ${g.structure || 'spread'}`).join(', ')})` : '';
+  return [
+    `\n\nOPEN SPREAD GROUP: this sandbox holds ${groups.length || 'an'} open two-leg group${groups.length === 1 ? '' : 's'}${named}, although your permissions do not list opening a vertical. You may manage and close it under your own Strategy Rules; you may not open another spread.`,
+    CLOSING_RECIPE,
+    NET_QUOTES_CLOSE,
+    NEVER_LEG_OUT,
+    ' Call `prophet_get_option_groups` to read each group\'s open units and status before you act. A group marked broken: the remaining leg is managed under your own rules, and you never trade assigned stock yourself.',
+  ].join('');
+}
+
+/** Same heartbeat when the group list could not be read: never guess, read it first. */
+export function openGroupReadFailedReminder() {
+  return '\n\nSPREAD GROUPS UNREADABLE this beat: before you manage or close any multi-leg position, call `prophet_get_option_groups`; a grouped leg is never closed on its own, and no new spread is opened from this heartbeat.';
+}
 
 export function debitVerticalMechanics(structures) {
   const names = structures.map(name => STRUCTURE_LABELS[name]).join(' and ');
@@ -58,12 +88,12 @@ export function debitVerticalMechanics(structures) {
     ' A vertical is one same-expiry 1:1 order. A bull call spread buys the lower-strike call and sells the higher-strike call; a bear put spread buys the higher-strike put and sells the lower-strike put.',
     ' Every vertical order uses `prophet_place_options_order` with `legs` (exactly two; each has symbol, side, position_intent and the positive quote price you used) and order_type limit. The top-level symbol, side and position_intent always repeat the FIRST leg you list. quantity counts spread units, and the 1-10 cap counts units (10 units are 20 leg contracts). Use one client_order_id for any assessment and the order. A retry keeps the identical legs, quantity and limit; a retry without `legs` is refused, never sent as a single leg.',
     ' OPENING (only): list the long leg first. Its side is buy and its position_intent is buy_to_open, so the top-level fields are the long leg with buy / buy_to_open; the second leg sells the other strike with sell_to_open. limit_price is the positive net debit per unit.',
-    ' CLOSING (only): reverse both legs. List the formerly long leg first with sell / sell_to_close, then the formerly short leg with buy / buy_to_close, and repeat the first leg at the top level (sell / sell_to_close). limit_price is the positive net credit per unit and quantity is the remaining units. Never reuse the opening buy / buy_to_open fields for a close.',
+    CLOSING_RECIPE,
     ' Net quotes, from each leg\'s timestamped bid and ask read in the same beat: net bid = long bid minus short ask; net ask = long ask minus short bid; net mid = long mid minus short mid. An entry starts at the net mid and never goes above the net ask. A due invalidation or stop exit uses a marketable limit at or just below the net bid. A target exit starts at the net mid and is repriced on a later heartbeat. Your existing exit triggers, second-heartbeat review of an unfilled order, immediate handling of a due stop and once-only target allocation are unchanged; a replacement still waits for a terminal cancel, the cumulative filled quantity and the remaining unreserved units, and without fresh quotes for both legs you do not submit.',
     ' The entry spread cap is judged on each leg and the widest leg counts, so choose a short strike whose own spread fits.',
     ' Size on the same sizing basis as a single option, measured on the spread\'s maximum loss (net debit x units x 100), never on the long leg alone; a vertical buys more units for the same amount, so the 10-unit cap may bind first, and then the cap wins.',
     ' Keep your stops, targets and time exits on the underlying exactly as for a single option. If your strategy or recorded plan calls for taking half off, close half the units in one two-leg order, rounded down; at 1 unit your own rule decides between closing all and holding.',
-    ' Never leg out with separate orders (a single-leg close of a grouped leg is refused). A planned_for_next_session retry uses identical legs. Close a spread before its expiry session when the short leg is in the money; assignment handling is a backstop, not a plan.',
+    NEVER_LEG_OUT,
     ' After a fill call `prophet_get_option_groups`: a group marked broken blocks new spreads for this sandbox until it is resolved; the remaining leg is then managed under your own rules, and you never trade assigned stock yourself. Never promise a fill.',
   ].join('');
 }

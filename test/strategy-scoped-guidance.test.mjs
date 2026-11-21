@@ -7,7 +7,10 @@ test('strategy ids map to a family; anything else is unknown', () => {
   assert.equal(strategyFamilyOf('etf-mean-reversion'), 'mean-reversion');
   assert.equal(strategyFamilyOf('equity-momentum'), 'breakout');
   assert.equal(strategyFamilyOf('catalyst-news'), 'catalyst');
-  assert.equal(strategyFamilyOf('capital-preservation'), 'unknown');
+  assert.equal(strategyFamilyOf('capital-preservation'), 'support');
+  assert.equal(strategyFamilyOf('macro-rotation'), 'shares');
+  assert.equal(strategyFamilyOf('long-horizon-trend'), 'shares');
+  assert.equal(strategyFamilyOf('some-custom-strategy'), 'unknown');
   assert.equal(strategyFamilyOf(undefined), 'unknown');
 });
 
@@ -98,7 +101,7 @@ test('every family keeps the shared rules: PASS wording, session quote context, 
 });
 
 test('an unknown strategy sees every definition, each labelled with the kind of strategy that uses it', () => {
-  const text = renderTradingGuidance(DEFAULT_TRADING_GUIDANCE, { strategyId: 'capital-preservation' });
+  const text = renderTradingGuidance(DEFAULT_TRADING_GUIDANCE, { strategyId: 'some-custom-strategy' });
   assert.match(text, /"Extended" means .*\(Used by breakout strategies; apply only if your Strategy Rules use it\.\)/);
   assert.match(text, /"Near support" means .*\(Used by mean-reversion strategies\.\)/);
   assert.match(text, /"Flat or rising average" means .*\(Used by mean-reversion strategies\.\)/);

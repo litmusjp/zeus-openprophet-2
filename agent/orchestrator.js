@@ -213,6 +213,11 @@ export class AgentOrchestrator extends EventEmitter {
         ]);
         return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true };
       },
+      getOptionGroups: async id => {
+        const client = this.getSandboxRuntime(id)?.goAxios;
+        if (!client) throw new Error('sandbox trading backend unavailable');
+        return (await client.get('/api/v1/options/groups', { timeout: 4000 })).data;
+      },
       getSessionLockFn: async id => {
         const client = this.getSandboxRuntime(id)?.goAxios;
         if (!client) throw new Error('sandbox trading backend unavailable');

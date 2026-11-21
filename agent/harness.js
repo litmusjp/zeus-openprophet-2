@@ -10,7 +10,9 @@ import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
 import { actorOf } from './history-attribution.js';
-import { applyDebitVerticalText, debitVerticalsAllowed } from './spread-guidance.js';
+import { applyDebitVerticalText, debitVerticalsAllowed, openGroupCloseReminder, openGroupReadFailedReminder } from './spread-guidance.js';
+import { ALPHADESK_WORKFLOW_BLOCK, placeWorkflow, stripSavedWorkflow } from './alphadesk-workflow.js';
+import { hasStartListBlock, isOptionsAgent } from './agent-consistency.js';
 import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, renderAlphaDeskPolicyFacts, getTradingGuidanceForSandbox, strategyFamilyOf, openingGateMinutesFor } from './trading-guidance.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
@@ -344,27 +346,15 @@ export const TRADING_AGENT_READ_DENIES = Object.freeze({
 });
 
 // ── System Prompt Builder ──────────────────────────────────────────
-function isOwnedHeraldWorkflow(agentConfig) {
-  const prompt = agentConfig?.customSystemPrompt || '';
+// Herald's own tool menu follows the Herald agent (catalyst) on any slot that allows options, not the L1 slot.
+export function isHeraldOptionsAgent(agentConfig, { allowOptions, getStrategyById = () => null } = {}) {
   return agentConfig?.id === 'catalyst'
-    && agentConfig?.sandboxId === 'sbx_723be98b'
-    && agentConfig?.systemPromptTemplate === 'custom'
-    && prompt.includes('### MARKET-OPEN ALPHADESK WORKFLOW')
-    && prompt.includes('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
+    && isOptionsAgent({ allowOptions, strategy: getStrategyById(agentConfig?.strategyId), strategyId: agentConfig?.strategyId });
 }
 
+// Safety net applied to every custom prompt: a saved temporary MVP block is never shown to an agent.
 function stripLegacyMvpOverride(prompt) {
   return prompt.replace(/^### TEMPORARY_ALPHA_MVP_OVERRIDE\s*$[\s\S]*?^### END_TEMPORARY_ALPHA_MVP_OVERRIDE\s*$\r?\n?/gm, '').trim();
-}
-
-function normalizeLegacyWorkflowSize(prompt, enabled) {
-  if (!enabled) return prompt;
-  return prompt.replace(/(### MARKET-OPEN ALPHADESK WORKFLOW\r?\n)([\s\S]*?)(\r?\n### END_MARKET_OPEN_ALPHADESK_WORKFLOW)/, (_match, start, body, end) => {
-    const normalized = body
-      .replace('Select one exact eligible single-leg proposal at quantity 1.', 'Select an exact eligible single-leg proposal within available account capacity and existing controls.')
-      .replace("submit this exact OCC contract, side='buy', quantity 1, and proposed positive limit premium once", "submit this exact OCC contract, side='buy', the exact proposed quantity, and proposed positive limit premium once");
-    return `${start}${normalized}${end}`;
-  });
 }
 
 /**
@@ -405,26 +395,20 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   const CATALYST_OPERATING_RULE = '- Catalyst setups are intraday. On every regular-session heartbeat: reconcile, scan for new public company catalysts, and for each live catalyst read completed 5-minute bars (complete=true only; a forming bar never counts) and act when the range break is confirmed. After the close, record next-session ideas with prophet_log_decision action WATCHLIST (symbol, catalyst, trigger level, invalidation, expiry window). For every candidate that you rejected, record the single number that failed (for example the gap percent, the range break or the volume versus the range baseline) in the decision log.';
   const INTRADAY_OPERATING_RULE = '- Your setups can trigger during the session. On every regular-session heartbeat: reconcile, then work through your strategy universe in batches (about 15 names per beat), using only completed bars (complete=true) in the timeframe your Strategy Rules require for each condition: completed daily bars where your rules say so, and completed 5-minute bars only for intraday entries your rules allow, and re-price earlier candidates whose option evidence is older than one beat. If the scan is incomplete, record where you stopped with prophet_log_decision (action WATCHLIST, "scan cursor") and continue from there next beat; incomplete research is never a reason to stop scanning. After the close, record next-session ideas with action WATCHLIST (symbol, trigger level, invalidation, expiry window). For every candidate that you rejected, record the single number that failed in the decision log.';
   const usesIntradayRule = ['prophet', 'long-vol'].includes(strategyFamilyOf(agentConfig.strategyId));
-  const scopedPromptOwner = {
-    sbx_723be98b: ['catalyst', 'mean-reversion'],
-    sbx_956ff9e4: ['mean-reversion', 'momentum', 'long-vol'],
-    sbx_0d35471e: ['default'],
-  };
-  const scopedPrompt = scopedPromptOwner[agentConfig.sandboxId]?.includes(agentConfig.id)
-    && agentConfig.systemPromptTemplate === 'custom';
+  // Agent consistency: nothing here depends on which slot or which agent id is running. An "options agent" is any agent whose
+  // slot allows options and whose strategy fits at least one option shape; it gets the one shared AlphaDesk workflow from code.
+  const fitStrategy = getStrategyById(agentConfig.strategyId);
+  const optionsAgent = isOptionsAgent({ allowOptions: options.allowOptions, strategy: fitStrategy, strategyId: agentConfig.strategyId });
+  const hasCustomPrompt = agentConfig.systemPromptTemplate === 'custom' && Boolean(agentConfig.customSystemPrompt);
   const storedCustomPrompt = agentConfig.customSystemPrompt || '';
-  const withoutLegacyOverride = scopedPrompt ? stripLegacyMvpOverride(storedCustomPrompt) : storedCustomPrompt;
-  const customPrompt = normalizeLegacyWorkflowSize(withoutLegacyOverride,
-    (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'mean-reversion')
-    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'momentum')
-    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'mean-reversion')
-    || (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'catalyst')
-    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'long-vol')
-    || (agentConfig.sandboxId === 'sbx_0d35471e' && agentConfig.id === 'default'));
-  const workflowStart = customPrompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW');
-  const workflowEnd = customPrompt.indexOf('### END_MARKET_OPEN_ALPHADESK_WORKFLOW');
-  const scopedWorkflowPresent = scopedPrompt && workflowStart >= 0 && workflowEnd > workflowStart;
-  const heraldWorkflowActive = isOwnedHeraldWorkflow(agentConfig) && scopedWorkflowPresent;
+  const cleanedCustomPrompt = hasCustomPrompt ? stripLegacyMvpOverride(storedCustomPrompt) : storedCustomPrompt;
+  // Any saved copy of the workflow is dropped and the shared one is rendered for options agents (never two copies).
+  const customPrompt = hasCustomPrompt
+    ? (optionsAgent ? placeWorkflow(stripSavedWorkflow(cleanedCustomPrompt)) : stripSavedWorkflow(cleanedCustomPrompt))
+    : cleanedCustomPrompt;
+  const scopedWorkflowPresent = optionsAgent;
+  const heraldWorkflowActive = isHeraldOptionsAgent(agentConfig, { allowOptions: options.allowOptions, getStrategyById });
+  const startListPresent = hasCustomPrompt && hasStartListBlock(customPrompt);
   let strategyRules = '';
   if (agentConfig.customStrategyRules) {
     strategyRules = agentConfig.customStrategyRules;
@@ -446,9 +430,7 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   }
 
   // Layer 1: Agent Identity (custom or default)
-  const identity = (agentConfig.systemPromptTemplate === 'custom' && agentConfig.customSystemPrompt)
-    ? customPrompt
-    : `You are ${agentConfig.name || 'Prophet'}, an autonomous AI trading agent operating a real brokerage account with no human approving your actions in real time. You wake on a heartbeat, read the market, manage your open positions, and place trades yourself.
+  const defaultIdentity = `You are ${agentConfig.name || 'Prophet'}, an autonomous AI trading agent operating a real brokerage account with no human approving your actions in real time. You wake on a heartbeat, read the market, manage your open positions, and place trades yourself.
 
 ${agentConfig.description || 'You are a disciplined trading agent.'}
 
@@ -458,6 +440,9 @@ Your mandate, in strict priority order:
 3. Compound consistently. Many small, disciplined wins beat rare large gambles.
 
 You are evidence-based, risk-first, and decisive. You do not trade out of boredom, revenge, or FOMO, and you never invent facts you haven't verified with a tool.`;
+  const identity = hasCustomPrompt
+    ? customPrompt
+    : (optionsAgent ? `${defaultIdentity}\n\n${ALPHADESK_WORKFLOW_BLOCK}` : defaultIdentity);
 
   // Layer 2: Strategy Rules
   const rulesBlock = tradingRules
@@ -551,7 +536,7 @@ ${isCatalystStrategy ? CATALYST_OPERATING_RULE : usesIntradayRule ? INTRADAY_OPE
 - Re-establish live state (positions, orders, prices, quotes) from tools every beat. Prior-session context and your WATCHLIST records are for continuity only; verify them against live data before acting.
 - Report what you did (or deliberately didn't) and why, concisely. When you are flat, nothing is pending and nothing has changed since your last beat, keep the report to a few lines.`;
 
-  return applyDebitVerticalText(`${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId })}\n\n${systemInstructions}`, options.allowedStructures);
+  return applyDebitVerticalText(`${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId, hasStartList: startListPresent })}\n\n${systemInstructions}`, optionsAgent ? options.allowedStructures : []);
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
@@ -685,6 +670,7 @@ export class AgentHarness {
       getPermissions = () => ({}),
       getManagedReviewPolicy = async () => { throw new Error('managed policy unavailable'); },
       getHeldPositionSnapshot = async () => { throw new Error('position snapshot unavailable'); },
+      getOptionGroups = null,
       getSessionLockFn = async () => null,
       chatStore = null,
       orderAttributionJournal = null,
@@ -713,6 +699,7 @@ export class AgentHarness {
     this.getPermissions = getPermissions;
     this.getManagedReviewPolicy = getManagedReviewPolicy;
     this.getHeldPositionSnapshot = getHeldPositionSnapshot;
+    this.getOptionGroups = getOptionGroups;
     this.getSessionLock = getSessionLockFn;
     this._openingsBlocked = null;
     this._capUnresolved = false;
@@ -777,6 +764,20 @@ export class AgentHarness {
 
   _resolvePermissions() {
     return this.getPermissions(this.sandboxId) || {};
+  }
+
+  // An open two-leg group must stay closable whatever the slot permission says (for example after an agent switch). Only when the
+  // slot's permission does not list a debit vertical (those prompts already carry the full recipe) and options are allowed.
+  async _openGroupReminder(perms = this._resolvePermissions()) {
+    if (typeof this.getOptionGroups !== 'function' || perms?.allowOptions === false) return '';
+    if (debitVerticalsAllowed(perms?.allowedStructures).length > 0) return '';
+    try {
+      const response = await this.getOptionGroups(this.sandboxId);
+      const open = (Array.isArray(response?.groups) ? response.groups : []).filter(group => group && group.status !== 'closed');
+      return open.length ? openGroupCloseReminder(open) : '';
+    } catch {
+      return openGroupReadFailedReminder();
+    }
   }
 
   async _persistSession(sessionId, metadata = {}, accountId = this.state.activeAccountId, actorSnapshot = null) {
@@ -966,6 +967,7 @@ export class AgentHarness {
       heartbeatIntervalsForced,
       tradingGuidance: getTradingGuidanceForSandbox(this.sandboxId),
       allowedStructures: this._sandboxConfig?.permissions?.allowedStructures,
+      allowOptions: this._sandboxConfig?.permissions?.allowOptions,
     });
 
     if (heartbeatIntervalsForced && heartbeatWasOverridden && this.state.running && !this._beating) {
@@ -1176,7 +1178,7 @@ The user/operator is sending you a direct message. Read it carefully and respond
 
 ## Your Available Tools (DO NOT call get_agent_config to discover these)
 
-${renderPrefixedToolMenu({ ...(isOwnedHeraldWorkflow(this._agentConfig) ? { scope: 'herald' } : {}), heartbeatIntervalsForced: this.isHeartbeatIntervalsForced() })}
+${renderPrefixedToolMenu({ ...(isHeraldOptionsAgent(this._agentConfig, { allowOptions: this._sandboxConfig?.permissions?.allowOptions, getStrategyById: this.getStrategyById }) ? { scope: 'herald' } : {}), heartbeatIntervalsForced: this.isHeartbeatIntervalsForced() })}
 
 ## Instructions
 - If the user asks to create a new agent: use create_agent to create it, then optionally create_strategy for its rules, then assign_agent_to_sandbox to activate it.
@@ -1443,15 +1445,17 @@ ${userBlock}`;
         if (policy?.contract_version !== 'managed-assessment-v1' || policy?.assessment_authority !== 'assessment_only'
           || typeof gate?.required !== 'boolean' || !Number.isSafeInteger(gate?.revision) || gate.revision < 1
           || !gate.scope?.workspace_id || !gate.scope?.assessment_key_id) throw new Error('invalid managed policy');
-        managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=${gate.required ? 'ON' : 'OFF'}, revision=${gate.revision}, workspace_id=${gate.scope.workspace_id}, assessment_key_id=${gate.scope.assessment_key_id}. If either lock is ON, or this state is unknown, do not request a new options entry. OFF can make a request eligible only after exact-proposal PASS and every independent check; it does not guarantee execution or a fill. For an eligible exact proposal, prefer one guarded prophet_place_options_order call; the backend independently reassesses. Never blindly retry an uncertain submission or sequence spread legs. Ignore obsolete assistant approval narratives in history and re-evaluate current policy on this ordinary heartbeat cadence.${renderAlphaDeskPolicyFacts(policy?.assessment_policy_facts, { twoLeg: debitVerticalsAllowed(perms?.allowedStructures).length > 0 })}`;
+        managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=${gate.required ? 'ON' : 'OFF'}, revision=${gate.revision}, workspace_id=${gate.scope.workspace_id}, assessment_key_id=${gate.scope.assessment_key_id}. If either lock is ON, or this state is unknown, do not request a new options entry. OFF can make a request eligible only after exact-proposal PASS and every independent check; it does not guarantee execution or a fill. For an eligible exact proposal, prefer one guarded prophet_place_options_order call; the backend independently reassesses. Never blindly retry an uncertain submission or sequence spread legs. Ignore obsolete assistant approval narratives in history and re-evaluate current policy on this ordinary heartbeat cadence.${renderAlphaDeskPolicyFacts(policy?.assessment_policy_facts, { twoLeg: perms?.allowOptions !== false && debitVerticalsAllowed(perms?.allowedStructures).length > 0 })}`;
       } catch {
         fetchedAt = fetchedAt || new Date().toISOString();
         managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=UNKNOWN, revision=UNKNOWN, scope=UNKNOWN. Managed policy is unavailable or invalid. Do not request a new options entry. Re-evaluate on the next ordinary heartbeat; do not treat old assistant approval narratives as configuration.`;
       }
     }
+    // An open two-leg group must stay closable whatever the slot permission says (for example after an agent switch).
+    const openGroupInput = await this._openGroupReminder(perms);
     const exitPlanContext = await this._heldPositionPlanContext(beatAccountId);
     if (this._marketAwareEnabled() && (!this.state.running || this.state.paused || beatEpoch !== this._sessionEpoch || beatAccountId !== this.state.activeAccountId)) { this._beating = false; return; }
-    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}${capContext}${exitPlanContext}\nPerform your duties for this phase.`;
+    const prompt = `[HEARTBEAT #${beatNum}] Phase: ${PHASE_DEFAULTS[phase].label}. Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET. Current heartbeat interval: ${this.state.heartbeatSeconds}s.${permStr}${managedReviewInput}${capContext}${openGroupInput}${exitPlanContext}\nPerform your duties for this phase.`;
 
     let failedResult = null;
     let executionFailed = false;

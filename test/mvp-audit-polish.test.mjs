@@ -126,7 +126,8 @@ test('legacy multi-session markers do not override strategy, settings, or provid
   const legacy = await build('sbx_723be98b', 'catalyst', 'legacy objective');
   assert.doesNotMatch(legacy, /during each U\.S\. regular session/i);
   const wrongOwner = await build('sbx_other', 'catalyst');
-  assert.match(wrongOwner, /ALPHA_MVP_MODE: MULTI_SESSION/, 'unowned custom prompt text is left intact');
+  // Agent consistency: the legacy block is stripped for every agent on every slot (no slot or agent scope table any more).
+  assert.doesNotMatch(wrongOwner, /ALPHA_MVP_MODE: MULTI_SESSION/, 'a saved temporary MVP block is never shown, on any slot');
   assert.doesNotMatch(wrongOwner, /two completed broker-confirmed entry-and-exit cycles.*across sessions/i);
   const incomplete = await build('sbx_723be98b', 'catalyst', marker, false);
   assert.doesNotMatch(incomplete, /two completed broker-confirmed entry-and-exit cycles.*across sessions/i);

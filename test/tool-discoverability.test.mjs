@@ -30,7 +30,7 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
     description: 'Test',
     systemPromptTemplate: 'custom',
     customSystemPrompt: 'You are a test agent.',
-  });
+  }, { allowOptions: false });
 
   assert.match(prompt, /prophet_assess_options_trade/);
   assert.match(prompt, /prophet_get_options_assessment_policy/);
@@ -45,6 +45,17 @@ test('generated system prompt documents the AlphaDesk assessment workflow', asyn
   assert.match(prompt, /Assessment PASS is trade-quality evidence only, never account permission or broker authorization/);
   assert.match(prompt, /independently reassesses the exact proposal at the final broker boundary/);
   assert.match(prompt, /For an eligible proposal, prefer one guarded `prophet_place_options_order` call; the backend independently obtains and enforces a fresh genuine PASS/);
+});
+
+test('an options agent gets the shared workflow and the focused AlphaDesk wording; a non-options agent gets neither', async () => {
+  const agent = { name: 'Test Agent', description: 'Test', systemPromptTemplate: 'custom', customSystemPrompt: 'You are a test agent.' };
+  const withOptions = await buildSystemPrompt(agent, {});
+  assert.equal(withOptions.split('### MARKET-OPEN ALPHADESK WORKFLOW').length - 1, 1);
+  assert.match(withOptions, /Standalone `prophet_assess_options_trade` is optional research, not a prerequisite/);
+  assert.match(withOptions, /prefer one guarded `prophet_place_options_order` call; the backend independently obtains and enforces a fresh genuine PASS/);
+  assert.match(withOptions, /On each normal entry-eligible regular-session heartbeat, seek qualifying opportunities/);
+  const without = await buildSystemPrompt(agent, { allowOptions: false });
+  assert.equal(without.includes('### MARKET-OPEN ALPHADESK WORKFLOW'), false);
 });
 
 test('generated system prompt clarifies zero maxOrderValue semantics', async () => {
@@ -66,7 +77,7 @@ test('generated system prompt contains the approved evidence and privacy clarifi
     description: 'Test',
     systemPromptTemplate: 'custom',
     customSystemPrompt: 'You are a test agent.',
-  });
+  }, { allowOptions: false });
 
   assert.match(prompt, /heartbeat interval comes from heartbeat context|heartbeat context.*guardrails/i);
   assert.match(prompt, /when its gate is enabled/);

@@ -38,7 +38,9 @@ test('strategy families: Vega and Prophet have their own; the others are unchang
   assert.equal(strategyFamilyOf('catalyst-news'), 'catalyst');
   assert.equal(strategyFamilyOf('equity-momentum'), 'breakout');
   assert.equal(strategyFamilyOf('etf-mean-reversion'), 'mean-reversion');
-  assert.equal(strategyFamilyOf('capital-preservation'), 'unknown');
+  assert.equal(strategyFamilyOf('capital-preservation'), 'support');
+  assert.equal(strategyFamilyOf('macro-rotation'), 'shares');
+  assert.equal(strategyFamilyOf('long-horizon-trend'), 'shares');
   assert.equal(strategyFamilyOf(undefined), 'unknown');
 });
 
@@ -147,10 +149,12 @@ test('Vega on L2 and Prophet on L3 are scoped: legacy MVP override stripped and 
   }
 });
 
-test('the scoping does not leak: other sandboxes and other agents keep their text', async () => {
+test('the shared workflow applies on every slot and to every options agent (no slot or agent scope table)', async () => {
   for (const extra of [{ sandboxId: 'sbx_723be98b' }, { sandboxId: 'sbx_0d35471e' }, { id: 'someone-else' }]) {
     const prompt = await buildSystemPrompt(agent(extra), deps);
-    assert.match(prompt, /Select one exact eligible single-leg proposal at quantity 1\./, JSON.stringify(extra));
+    assert.doesNotMatch(prompt, /quantity 1|TEMPORARY_ALPHA_MVP_OVERRIDE|forced entry text/, JSON.stringify(extra));
+    assert.equal(prompt.split('### MARKET-OPEN ALPHADESK WORKFLOW').length - 1, 1, JSON.stringify(extra));
+    assert.match(prompt, /Select an exact eligible single-leg proposal within available account capacity/, JSON.stringify(extra));
   }
 });
 

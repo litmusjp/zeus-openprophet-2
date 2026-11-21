@@ -19,9 +19,16 @@ test('Herald on L1 no longer carries the legacy quantity-one constraint', async 
   assert.match(prompt, /no less than 5% of current account equity/);
 });
 
-test('the normalisation stays scoped: other sandboxes and agents keep their text unchanged', async () => {
-  for (const extra of [{ sandboxId: 'sbx_956ff9e4' }, { id: 'someone-else' }]) {
+test('the shared workflow replaces a saved legacy copy on every slot and for every options agent', async () => {
+  for (const extra of [{ sandboxId: 'sbx_956ff9e4' }, { id: 'someone-else' }, { sandboxId: 'sbx_other', id: 'mean-reversion' }]) {
     const prompt = await buildSystemPrompt(agent(extra), deps);
-    assert.match(prompt, /Select one exact eligible single-leg proposal at quantity 1\./, JSON.stringify(extra));
+    assert.doesNotMatch(prompt, /quantity 1/, JSON.stringify(extra));
+    assert.equal(prompt.split('### MARKET-OPEN ALPHADESK WORKFLOW').length - 1, 1, `one workflow copy: ${JSON.stringify(extra)}`);
+    assert.match(prompt, /Select an exact eligible single-leg proposal within available account capacity and existing controls\./, JSON.stringify(extra));
   }
+});
+
+test('an agent whose slot does not allow options gets no workflow block', async () => {
+  const prompt = await buildSystemPrompt(agent(), { ...deps, allowOptions: false });
+  assert.equal(prompt.includes('### MARKET-OPEN ALPHADESK WORKFLOW'), false);
 });

@@ -104,14 +104,20 @@ test('the spread text is inserted once, right after the order-tool line', async 
   assert.ok(toolLine >= 0 && prompt.indexOf('- Debit vertical mechanics (your permissions allow') > toolLine);
 });
 
-test('saved workflow wording: the legacy size sentences are still normalised and the new two-leg wording is preserved', async () => {
-  const legacy = await build(agents.pendulum(OLD_WORKFLOW), undefined);
-  assert.match(legacy, /Select an exact eligible single-leg proposal within available account capacity and existing controls\./);
-  assert.match(legacy, /the exact proposed quantity, and proposed positive limit premium once/);
-  const updated = await build(agents.pendulum(NEW_WORKFLOW), ['bull_call_debit']);
-  assert.match(updated, /one single-leg order, or, where your Strategy Rules and permissions allow it, one two-leg debit vertical/);
-  assert.match(updated, /the exact proposed quantity \(spread units\)/);
-  assert.doesNotMatch(updated, /single-leg proposal/);
+test('saved workflow copies are replaced by the shared workflow: single-leg wording without a vertical, two-leg wording with one', async () => {
+  // Whatever workflow text an agent still has saved (old or new), the one shared copy from code is what renders.
+  for (const saved of [OLD_WORKFLOW, NEW_WORKFLOW]) {
+    const legacy = await build(agents.pendulum(saved), undefined);
+    assert.match(legacy, /Select an exact eligible single-leg proposal within available account capacity and existing controls\./);
+    assert.match(legacy, /the exact proposed quantity, and proposed positive limit premium once/);
+    assert.equal(legacy.split('### MARKET-OPEN ALPHADESK WORKFLOW').length - 1, 1);
+    const updated = await build(agents.pendulum(saved), ['bull_call_debit']);
+    assert.match(updated, /one single-leg order, or, where your Strategy Rules and permissions allow it, one two-leg debit vertical/);
+    assert.match(updated, /the exact proposed quantity \(spread units for a vertical\)/);
+    assert.match(updated, /Close a single option with sell_to_close for the broker-reconciled remaining quantity, and a spread with one two-leg closing order/);
+    assert.doesNotMatch(updated, /single-leg proposal/);
+    assert.equal(updated.split('### MARKET-OPEN ALPHADESK WORKFLOW').length - 1, 1);
+  }
 });
 
 test('the per-beat policy-facts line names the widest leg only when a vertical is allowed', () => {

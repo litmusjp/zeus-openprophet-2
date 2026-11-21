@@ -40,7 +40,8 @@ test('P2: the addition is exact: L2 Guardian, L2 Surge and L3 Prophet keep their
   assert.equal(surge.includes('quantity 1,'), false);
   const prophet = await build('sbx_0d35471e', 'default');
   assert.equal(prophet.includes('Select one exact eligible single-leg proposal at quantity 1.'), false);
-  // An unscoped mean-reversion agent (for example on L3, which is not wired for it) is not touched by this change.
+  // Agent consistency release: the shared workflow no longer depends on the slot, so Pendulum on L3 gets it too.
   const l3 = await build('sbx_0d35471e', 'mean-reversion');
-  assert.equal(l3.includes('Select one exact eligible single-leg proposal at quantity 1.'), true, 'L3 Pendulum is deliberately not wired by this change');
+  assert.equal(l3.includes('Select one exact eligible single-leg proposal at quantity 1.'), false, 'the shared workflow applies on every slot');
+  assert.match(l3, /Select an exact eligible single-leg proposal within available account capacity and existing controls\./);
 });

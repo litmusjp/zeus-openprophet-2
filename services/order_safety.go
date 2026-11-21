@@ -380,6 +380,17 @@ func buildAlpacaOptionsOrderRequest(order *interfaces.OptionsOrder) (alpaca.Plac
 	}
 	if len(order.Legs) > 0 {
 		req.OrderClass = alpaca.MLeg
+		// Alpaca's multi-leg request has no parent symbol, side or position intent (they are required "except for mleg"); the
+		// legs carry them. The quantity is the number of spread units.
+		req.Symbol = ""
+		req.Side = ""
+		req.PositionIntent = ""
+		// The internal price is always a positive magnitude. Only here is it signed: a credit exit is sent negative, a debit
+		// entry positive (Alpaca's documented mleg convention).
+		if order.LimitPrice != nil && order.PriceKind == "credit" {
+			signed := decimal.NewFromFloat(*order.LimitPrice).Neg()
+			req.LimitPrice = &signed
+		}
 		req.Legs = make([]alpaca.Leg, len(order.Legs))
 		for i, leg := range order.Legs {
 			req.Legs[i] = alpaca.Leg{Symbol: leg.Symbol, Side: alpaca.Side(leg.Side), PositionIntent: alpaca.PositionIntent(leg.PositionIntent), RatioQty: decimal.NewFromInt(int64(leg.RatioQty))}
@@ -579,6 +590,30 @@ func decimalPointersEqual(left, right *decimal.Decimal) bool {
 	return left.Equal(*right)
 }
 
+func legSymbolSubmitted(request *alpaca.PlaceOrderRequest, symbol string) bool {
+	for _, leg := range request.Legs {
+		if leg.Symbol == symbol {
+			return true
+		}
+	}
+	return false
+}
+
+func legSideSubmitted(request *alpaca.PlaceOrderRequest, side alpaca.Side) bool {
+	for _, leg := range request.Legs {
+		if leg.Side == side {
+			return true
+		}
+	}
+	return false
+}
+
+// isSignedCreditSpread reports whether the request is a multi-leg order priced as a credit (a negative net limit). Only
+// then are a negative limit and a negative or signed average fill accepted; every other order keeps the positive-only checks.
+func isSignedCreditSpread(request *alpaca.PlaceOrderRequest) bool {
+	return request != nil && request.OrderClass == alpaca.MLeg && request.LimitPrice != nil && request.LimitPrice.IsNegative()
+}
+
 func validateBrokerOrderIdentity(request *alpaca.PlaceOrderRequest, order *alpaca.Order) error {
 	if order == nil {
 		return fmt.Errorf("broker order identity payload is missing")
@@ -592,11 +627,22 @@ func validateBrokerOrderIdentity(request *alpaca.PlaceOrderRequest, order *alpac
 	if order.ClientOrderID != request.ClientOrderID {
 		return fmt.Errorf("broker client order ID %q does not match submitted ID %q", order.ClientOrderID, request.ClientOrderID)
 	}
-	if order.Symbol != request.Symbol {
-		return fmt.Errorf("broker symbol %q does not match submitted symbol %q", order.Symbol, request.Symbol)
-	}
-	if order.Side != request.Side {
-		return fmt.Errorf("broker side %q does not match submitted side %q", order.Side, request.Side)
+	if request.OrderClass == alpaca.MLeg {
+		// A multi-leg parent has no symbol or side of its own. The provider's documented response leaves them empty; if it
+		// fills them in, they must be one of the submitted legs. Anything else is a mismatch and stays uncertain.
+		if order.Symbol != "" && !legSymbolSubmitted(request, order.Symbol) {
+			return fmt.Errorf("broker symbol %q is not one of the submitted legs", order.Symbol)
+		}
+		if order.Side != "" && !legSideSubmitted(request, order.Side) {
+			return fmt.Errorf("broker side %q is not the side of any submitted leg", order.Side)
+		}
+	} else {
+		if order.Symbol != request.Symbol {
+			return fmt.Errorf("broker symbol %q does not match submitted symbol %q", order.Symbol, request.Symbol)
+		}
+		if order.Side != request.Side {
+			return fmt.Errorf("broker side %q does not match submitted side %q", order.Side, request.Side)
+		}
 	}
 	if order.Type != request.Type {
 		return fmt.Errorf("broker order type %q does not match submitted type %q", order.Type, request.Type)
@@ -681,8 +727,14 @@ func orderResultFromAlpacaOrder(request *alpaca.PlaceOrderRequest, order *alpaca
 	var filledAvgPrice *float64
 	if order.FilledAvgPrice != nil {
 		value := order.FilledAvgPrice.InexactFloat64()
-		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || (filledQty > 0 && value == 0) {
+		// A multi-leg credit exit may report a signed (negative) average fill; only then is a negative value valid, and it is
+		// stored as the positive magnitude the rest of OP2 uses. Every other order keeps the positive-only check.
+		signedCredit := isSignedCreditSpread(request)
+		if math.IsNaN(value) || math.IsInf(value, 0) || (value < 0 && !signedCredit) || (filledQty > 0 && value == 0) {
 			return uncertainOrderResult("Broker returned an invalid filled average price")
+		}
+		if signedCredit && value < 0 {
+			value = -value
 		}
 		filledAvgPrice = &value
 	}
@@ -704,6 +756,11 @@ func orderResultFromAlpacaOrder(request *alpaca.PlaceOrderRequest, order *alpaca
 	if clientOrderID == "" && request != nil {
 		clientOrderID = strings.TrimSpace(request.ClientOrderID)
 	}
+	limitOut := decimalToFloat(order.LimitPrice)
+	if isSignedCreditSpread(request) && limitOut != nil && *limitOut < 0 {
+		magnitude := -*limitOut
+		limitOut = &magnitude
+	}
 	return &interfaces.OrderResult{
 		BrokerAccountID:    identity.BrokerAccountID,
 		PaperLive:          identity.PaperLive,
@@ -723,10 +780,28 @@ func orderResultFromAlpacaOrder(request *alpaca.PlaceOrderRequest, order *alpaca
 		Qty:                requestedQty,
 		Type:               string(order.Type),
 		TimeInForce:        string(order.TimeInForce),
-		LimitPrice:         decimalToFloat(order.LimitPrice),
+		LimitPrice:         limitOut,
 		StopPrice:          decimalToFloat(order.StopPrice),
 		PositionIntent:     string(order.PositionIntent),
 		ExecutionConfirmed: executionConfirmed,
 		FullyFilled:        fullyFilled,
 	}
+}
+
+func optionsOrderHasLegSymbol(order *interfaces.OptionsOrder, symbol string) bool {
+	for _, leg := range order.Legs {
+		if leg.Symbol == symbol {
+			return true
+		}
+	}
+	return false
+}
+
+func optionsOrderHasLegSide(order *interfaces.OptionsOrder, side string) bool {
+	for _, leg := range order.Legs {
+		if leg.Side == side {
+			return true
+		}
+	}
+	return false
 }

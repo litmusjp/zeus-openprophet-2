@@ -1069,7 +1069,19 @@ func (s *AlpacaTradingService) PlaceOptionsOrder(ctx context.Context, order *int
 	result := orderResultFromAlpacaOrder(&req, alpacaOrder, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID})
 	result.Purpose = map[bool]string{true: "entry", false: "close"}[strings.HasSuffix(order.PositionIntent, "_to_open")]
 	result.AssetClass = "us_option"
-	if err := ValidateOrderResultIdentity(result, order.ClientOrderID, order.Symbol, order.Side, order.Qty, order.Type, order.TimeInForce, order.LimitPrice, nil, order.PositionIntent, result.Purpose); err != nil {
+	expectSymbol, expectSide, expectIntent := order.Symbol, order.Side, order.PositionIntent
+	if len(order.Legs) > 0 {
+		// A multi-leg parent carries no symbol, side or intent of its own (the request omits them); the provider leaves them
+		// empty or echoes one submitted leg. Anything else stays uncertain. Every other field is still compared.
+		if result.Symbol != "" && !optionsOrderHasLegSymbol(order, result.Symbol) {
+			return nil, &SubmissionUncertainError{Err: fmt.Errorf("broker result symbol %q is not one of the submitted legs", result.Symbol)}
+		}
+		if result.Side != "" && !optionsOrderHasLegSide(order, result.Side) {
+			return nil, &SubmissionUncertainError{Err: fmt.Errorf("broker result side %q is not the side of any submitted leg", result.Side)}
+		}
+		expectSymbol, expectSide, expectIntent = result.Symbol, result.Side, ""
+	}
+	if err := ValidateOrderResultIdentity(result, order.ClientOrderID, expectSymbol, expectSide, order.Qty, order.Type, order.TimeInForce, order.LimitPrice, nil, expectIntent, result.Purpose); err != nil {
 		return nil, &SubmissionUncertainError{Err: err}
 	}
 	if err := ValidateOrderResultIdentityForExecution(result, models.DurableIdentity{BrokerAccountID: s.expectedAccountID, PaperLive: map[bool]string{true: "paper", false: "live"}[s.expectedPaper], TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID}); err != nil {

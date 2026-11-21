@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -56,6 +57,14 @@ func (oc *OrderController) registerSpreadBeforeSubmission(order *interfaces.Opti
 			GroupID: order.ClientOrderID, Underlying: strings.ToUpper(strings.TrimSpace(order.Underlying)), Structure: structure, Status: "pending_entry",
 			LegsJSON: legs, EntryClientOrderID: order.ClientOrderID, EntryUnits: order.Qty, NetDebit: *order.LimitPrice,
 		}
+		// An identical retry of the same entry is idempotent and never rewrites the stored group (its status, close registrations and
+		// resolver claim stay as they are); a different record under the same id is refused.
+		if existing, err := store.GetOptionGroup(group.GroupID); err == nil {
+			if existing.EntryClientOrderID != group.EntryClientOrderID || existing.LegsJSON != group.LegsJSON || existing.Structure != group.Structure {
+				return "", fmt.Errorf("option group %s is already recorded with different legs or entry order", group.GroupID)
+			}
+			return existing.GroupID, nil
+		}
 		if err := store.SaveOptionGroup(group); err != nil {
 			return "", err
 		}
@@ -103,25 +112,34 @@ func (oc *OrderController) finishSpreadEntry(groupID string, order *interfaces.O
 	if store == nil {
 		return
 	}
-	group, err := store.GetOptionGroup(groupID)
-	if err != nil {
-		oc.logger.WithError(err).Warn("Could not reload the option group to record the entry outcome")
-		return
+	for attempt := 0; attempt < 3; attempt++ {
+		group, err := store.GetOptionGroup(groupID)
+		if err != nil {
+			oc.logger.WithError(err).Warn("Could not reload the option group to record the entry outcome")
+			return
+		}
+		next := group.Status
+		switch status {
+		case "void":
+			next = "void"
+		case "open":
+			next = "open"
+		}
+		if next == group.Status {
+			return
+		}
+		group.Status = next
+		err = store.SaveOptionGroup(group)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, database.ErrStaleOptionGroup) {
+			oc.logger.WithError(err).Warn("Could not record the option group entry outcome")
+			return
+		}
+		// Another writer changed the group since it was read: reload and apply the status again.
 	}
-	next := group.Status
-	switch status {
-	case "void":
-		next = "void"
-	case "open":
-		next = "open"
-	}
-	if next == group.Status {
-		return
-	}
-	group.Status = next
-	if err := store.SaveOptionGroup(group); err != nil {
-		oc.logger.WithError(err).Warn("Could not record the option group entry outcome")
-	}
+	oc.logger.Warn("Could not record the option group entry outcome after repeated concurrent changes")
 }
 
 // optionLegsMatch compares the identity of two multi-leg orders: the same legs with the same side, intent and ratio.

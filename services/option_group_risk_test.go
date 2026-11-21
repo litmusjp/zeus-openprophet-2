@@ -98,3 +98,21 @@ func TestConvertAlpacaOrderCarriesMultiLegIdentity(t *testing.T) {
 		t.Fatalf("a single-leg order must be unchanged: %+v", single)
 	}
 }
+
+// R2-02: the pending-entry flag reaches the policy's view, so a group with no recorded fill yet still owns its legs.
+func TestPendingEntryReachesTheRiskViewAndOwnsItsLegs(t *testing.T) {
+	state := groupState("g-lag", 0, 3.0, "open", "")
+	state.EntryPending = true
+	risks, err := OptionGroupRisksFromStates([]database.OptionGroupState{state})
+	if err != nil || len(risks) != 1 || !risks[0].EntryPending || risks[0].OpenUnits != 0 {
+		t.Fatalf("risks=%+v err=%v", risks, err)
+	}
+	if openGroupOwningSymbol(risks, callLow) != "g-lag" {
+		t.Fatal("an unreconciled entry must own its legs at the single-leg close boundary")
+	}
+	state.EntryPending = false
+	risks, _ = OptionGroupRisksFromStates([]database.OptionGroupState{state})
+	if openGroupOwningSymbol(risks, callLow) != "" {
+		t.Fatal("a terminal zero-fill group must not own its legs")
+	}
+}

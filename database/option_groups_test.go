@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -53,7 +54,7 @@ func TestOptionGroupRoundTripAndImmutableLegs(t *testing.T) {
 		t.Fatalf("round trip = %+v err=%v", got, err)
 	}
 	// The same group can be updated (status), and the revision moves.
-	update := testGroup("grp-1")
+	update := got
 	update.Status = "broken"
 	update.BrokenReason = "short leg assigned"
 	if err := storage.SaveOptionGroup(update); err != nil {
@@ -319,5 +320,93 @@ func TestResolverClaimIsAtomicPerUnderlyingAndSurvivesARestart(t *testing.T) {
 	// Re-claiming the same id is idempotent.
 	if ok, _, _ := reopened.ClaimResolverOperation(loser, "resolver-"+loser+"-1"); !ok {
 		t.Fatal("a repeated claim of the same operation must succeed")
+	}
+}
+
+// R2-01: a save built on an older read must never erase the close registrations or the resolver claim recorded since.
+func TestStaleGroupSaveCannotEraseCloseRegistrationOrResolverClaim(t *testing.T) {
+	storage, _ := newGroupStorage(t, "stale.db")
+	if err := storage.SaveOptionGroup(testGroup("grp-s1")); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := storage.GetOptionGroup("grp-s1") // a slower writer (for example an advisory waiting on a quote) reads here
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.AddOptionGroupCloseOrder("grp-s1", "close-1"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _, err := storage.ClaimResolverOperation("grp-s1", "resolver-grp-s1-1"); err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	stale.Advisory = "short leg near expiry"
+	err = storage.SaveOptionGroup(stale)
+	if !errors.Is(err, ErrStaleOptionGroup) {
+		t.Fatalf("a stale save must be refused with ErrStaleOptionGroup, got %v", err)
+	}
+	fresh, _ := storage.GetOptionGroup("grp-s1")
+	if fresh.CloseClientOrderIDs == "" || fresh.ResolverClientID != "resolver-grp-s1-1" || fresh.Advisory != "" {
+		t.Fatalf("the stored close registration and claim must be untouched: %+v", fresh)
+	}
+	// Reloading and saving again works, and keeps everything.
+	fresh.Advisory = "short leg near expiry"
+	if err := storage.SaveOptionGroup(fresh); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := storage.GetOptionGroup("grp-s1")
+	if after.Advisory == "" || after.CloseClientOrderIDs == "" || after.ResolverClientID == "" {
+		t.Fatalf("a current save must keep every durable field: %+v", after)
+	}
+	// A fresh object for an existing group is stale by definition.
+	if err := storage.SaveOptionGroup(testGroup("grp-s1")); !errors.Is(err, ErrStaleOptionGroup) {
+		t.Fatalf("an object not built from the stored row must be refused, got %v", err)
+	}
+}
+
+// R2-02: a group whose entry has not reached a terminal, reconciled state is pending, so its legs stay owned.
+func TestEntryPendingFollowsTheEntryOrderState(t *testing.T) {
+	storage, _ := newGroupStorage(t, "pending.db")
+	if err := storage.SaveOptionGroup(testGroup("grp-p1")); err != nil {
+		t.Fatal(err)
+	}
+	pending := func() bool {
+		states, err := storage.OptionGroupStates()
+		if err != nil || len(states) != 1 {
+			t.Fatalf("states=%d err=%v", len(states), err)
+		}
+		return states[0].EntryPending
+	}
+	if !pending() {
+		t.Fatal("an open group whose entry order is not recorded must be pending")
+	}
+	saveOrderFilled(t, storage, "grp-p1", "accepted", 3, 0)
+	if !pending() {
+		t.Fatal("an accepted entry with no recorded fill must be pending")
+	}
+	saveOrderFilled(t, storage, "grp-p1", "canceled", 3, 0)
+	if pending() {
+		t.Fatal("a terminal cancel with no fills must release the legs")
+	}
+
+	// Terminal orders cannot move back, so the other lifecycle cases use their own groups.
+	for id, c := range map[string]struct {
+		status string
+		filled float64
+		want   bool
+	}{"grp-p2": {"filled", 0, true}, "grp-p3": {"filled", 3, false}, "grp-p4": {"rejected", 0, false}} {
+		g := testGroup(id)
+		if err := storage.SaveOptionGroup(g); err != nil {
+			t.Fatal(err)
+		}
+		saveOrderFilled(t, storage, id, c.status, 3, c.filled)
+		states, err := storage.OptionGroupStates()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, st := range states {
+			if st.Group.GroupID == id && st.EntryPending != c.want {
+				t.Fatalf("%s (%s, filled %v): EntryPending = %v, want %v", id, c.status, c.filled, st.EntryPending, c.want)
+			}
+		}
 	}
 }

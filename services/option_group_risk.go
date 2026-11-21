@@ -77,6 +77,7 @@ func OptionGroupRisksFromStates(states []database.OptionGroupState) ([]OptionGro
 			StructureID:        group.Structure,
 			LegAllocations:     allocations,
 			ReservedCloseUnits: state.ReservedCloseUnits,
+			EntryPending:       state.EntryPending,
 		})
 	}
 	return groups, nil

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -244,6 +245,9 @@ func ReconcileOptionGroupsWith(store OptionGroupStore, positions []*interfaces.P
 			if group.Status != "broken" && (!group.StockBaselineSet || group.StockBaseline != finding.StockQty) {
 				group.StockBaseline, group.StockBaselineSet = finding.StockQty, true
 				if err := store.SaveOptionGroup(group); err != nil {
+					if errors.Is(err, database.ErrStaleOptionGroup) {
+						continue // the group changed since it was read: reload on the next pass
+					}
 					return report, fmt.Errorf("failed to record the stock baseline of option group %s: %w", group.GroupID, err)
 				}
 			}
@@ -263,6 +267,9 @@ func ReconcileOptionGroupsWith(store OptionGroupStore, positions []*interfaces.P
 			group.BrokenReason = finding.Reason
 			group.DetachedLegsJSON = encoded
 			if err := store.SaveOptionGroup(group); err != nil {
+				if errors.Is(err, database.ErrStaleOptionGroup) {
+					continue // the group changed since it was read: reload on the next pass
+				}
 				return report, fmt.Errorf("failed to record broken option group %s: %w", group.GroupID, err)
 			}
 			report.NewlyBroken = append(report.NewlyBroken, group.GroupID)
@@ -281,6 +288,9 @@ func ReconcileOptionGroupsWith(store OptionGroupStore, positions []*interfaces.P
 			// order is terminal: the surviving legs are already detached, so nothing is left to resolve.
 			group.Status = "closed"
 			if err := store.SaveOptionGroup(group); err != nil {
+				if errors.Is(err, database.ErrStaleOptionGroup) {
+					continue // the group changed since it was read: reload on the next pass
+				}
 				return report, fmt.Errorf("failed to close resolved option group %s: %w", group.GroupID, err)
 			}
 			report.ClosedWithoutStock = append(report.ClosedWithoutStock, group.GroupID)

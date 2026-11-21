@@ -347,3 +347,26 @@ func TestAWorkingCloseReservesItsUnitsAgainstAnotherClose(t *testing.T) {
 		t.Fatalf("with nothing reserved the full close is admitted: %v", err)
 	}
 }
+
+// R2-02: a known group whose entry fill the ledger has not recorded yet still owns its legs at the single-leg close boundary,
+// and releases them once the entry is terminal with no fills.
+func TestSingleLegCloseOfAPendingEntryGroupIsRefusedUntilTheEntryIsTerminal(t *testing.T) {
+	pending := OptionGroupRisk{ID: "grp-lag", LegSymbols: []string{callLow, callHigh}, OpenUnits: 0, EntryPending: true}
+	price := 4.0
+	single := &interfaces.OptionsOrder{Symbol: callLow, Underlying: "AAPL", Qty: 2, Side: "sell", PositionIntent: "sell_to_close", Type: "limit", TimeInForce: "day", LimitPrice: &price}
+	if _, err := spreadPolicy("").ValidateOptionsOrder(single, spreadSnapshot(pending)); err == nil || !strings.Contains(err.Error(), "cannot be closed by a single-leg order") {
+		t.Fatalf("a leg of a group whose entry is not yet reconciled must not be closed singly, got %v", err)
+	}
+	// A terminal cancel with no fills releases the legs, and an unrelated contract was never blocked.
+	released := pending
+	released.EntryPending = false
+	if _, err := spreadPolicy("").ValidateOptionsOrder(single, spreadSnapshot(released)); err != nil {
+		t.Fatalf("a terminal zero-fill group must release its legs: %v", err)
+	}
+	other := &interfaces.OptionsOrder{Symbol: "NVDA261218C00150000", Underlying: "NVDA", Qty: 2, Side: "sell", PositionIntent: "sell_to_close", Type: "limit", TimeInForce: "day", LimitPrice: &price}
+	snap := spreadSnapshot(pending)
+	snap.Positions = append(snap.Positions, optPos("NVDA261218C00150000", 2))
+	if _, err := spreadPolicy("").ValidateOptionsOrder(other, snap); err != nil {
+		t.Fatalf("unrelated single-leg management must not be blocked: %v", err)
+	}
+}

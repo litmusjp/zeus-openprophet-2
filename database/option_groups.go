@@ -2,6 +2,7 @@ package database
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -19,6 +20,9 @@ import (
 
 var groupWriteMu sync.Mutex
 
+// ErrStaleOptionGroup is returned when a group save was built on an older revision than the stored one.
+var ErrStaleOptionGroup = errors.New("stale option group revision")
+
 // OptionGroupState is a group together with the quantities derived from the order ledger.
 type OptionGroupState struct {
 	Group        *models.DBOptionGroup
@@ -27,6 +31,9 @@ type OptionGroupState struct {
 	OpenUnits    float64
 	CloseOrders  []string
 	PendingClose bool // a recorded close order is still working or uncertain
+	// EntryPending: the entry order is missing, working, uncertain, or filled with no recorded quantity, so the ledger cannot yet
+	// say whether the group owns its legs. A terminal entry with no fills (cancelled, rejected, expired) is not pending.
+	EntryPending bool
 	// ReservedCloseUnits is the unfilled quantity of recorded close orders that are still working or uncertain (a close recorded
 	// but not yet persisted as an order reserves every open unit, its quantity being unknown). The close named by the exclude
 	// argument is the candidate being evaluated and never reserves against itself.
@@ -62,6 +69,12 @@ func (s *LocalStorage) saveOptionGroupLocked(group *models.DBOptionGroup) error 
 	if err == nil {
 		if existing.EntryClientOrderID != group.EntryClientOrderID || existing.LegsJSON != group.LegsJSON || existing.Structure != group.Structure {
 			return fmt.Errorf("option group %s is already recorded with different legs or entry order", group.GroupID)
+		}
+		// Compare-and-set: the caller must have read the current revision. A save built on an older read (a slower writer, or a
+		// fresh object for an existing group) would otherwise overwrite the close registrations and the resolver claim that were
+		// recorded since; it is refused and the caller reloads on its next pass.
+		if group.Revision != existing.Revision {
+			return fmt.Errorf("%w: option group %s is at revision %d, the save was built on revision %d", ErrStaleOptionGroup, group.GroupID, existing.Revision, group.Revision)
 		}
 		group.ID = existing.ID
 		group.CreatedAt = existing.CreatedAt
@@ -191,7 +204,11 @@ func (s *LocalStorage) OptionGroupStatesExcluding(exclude string) ([]OptionGroup
 			var entry models.DBOrder
 			if err := s.identityQuery(s.db.Where("client_order_id = ?", group.EntryClientOrderID)).First(&entry).Error; err == nil {
 				state.EntryFilled = entry.FilledQty
-			} else if err != gorm.ErrRecordNotFound {
+				// Not yet reconciled: the entry may still fill (or already has at the broker) without the ledger knowing.
+				state.EntryPending = !isTerminalOrderStatus(entry.Status) || (strings.EqualFold(strings.TrimSpace(entry.Status), "filled") && entry.FilledQty <= 0)
+			} else if err == gorm.ErrRecordNotFound {
+				state.EntryPending = group.Status == "pending_entry" || group.Status == "open"
+			} else {
 				return nil, fmt.Errorf("failed to read entry order of group %s: %w", group.GroupID, err)
 			}
 		}

@@ -51,6 +51,9 @@ type OptionGroupRisk struct {
 	LegAllocations map[string]float64
 	// ReservedCloseUnits is the unfilled quantity of this group's working or uncertain close orders (the candidate close excluded).
 	ReservedCloseUnits float64
+	// EntryPending: the entry has not reached a terminal, reconciled state, so the group may already own its legs at the broker
+	// although no fill is recorded yet. Its legs cannot be closed singly until the ledger catches up.
+	EntryPending bool
 }
 
 type BrokerRiskSnapshot struct {
@@ -525,8 +528,17 @@ func (p TradingPolicy) ValidateOptionsOrder(order *interfaces.OptionsOrder, snap
 
 // openGroupOwningSymbol returns the id of the open (not fully closed) group that still holds this leg, or "".
 func openGroupOwningSymbol(groups []OptionGroupRisk, symbol string) string {
+	return openGroupOwningSymbolExcept(groups, symbol, "")
+}
+
+// openGroupOwningSymbolExcept is openGroupOwningSymbol ignoring one group: the candidate entry's own just-registered group, which
+// never overlaps with itself.
+func openGroupOwningSymbolExcept(groups []OptionGroupRisk, symbol, exceptGroupID string) string {
 	for _, group := range groups {
-		if group.OpenUnits <= 0 {
+		if exceptGroupID != "" && group.ID == exceptGroupID {
+			continue
+		}
+		if group.OpenUnits <= 0 && !group.EntryPending {
 			continue
 		}
 		for _, leg := range group.LegSymbols {
@@ -587,7 +599,7 @@ func (p TradingPolicy) validateSpreadOptionsOrder(order *interfaces.OptionsOrder
 			}
 		}
 		for _, leg := range order.Legs {
-			if owner := openGroupOwningSymbol(snapshot.Groups, leg.Symbol); owner != "" {
+			if owner := openGroupOwningSymbolExcept(snapshot.Groups, leg.Symbol, order.ClientOrderID); owner != "" {
 				return 0, fmt.Errorf("leg %s already belongs to open spread group %s; overlapping spread allocations are refused (manage or close the existing group first)", leg.Symbol, owner)
 			}
 		}

@@ -304,7 +304,8 @@ func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot Bro
 		}
 	}
 	for _, group := range snapshot.Groups {
-		if group.OpenUnits <= 0 {
+		if group.OpenUnits <= 0 || group.Broken {
+			// A broken group's surviving legs are ordinary positions counted above; the group itself holds no spread risk.
 			continue
 		}
 		// One open position per group, with its maximum loss as the amount deployed.
@@ -526,6 +527,11 @@ func (p TradingPolicy) validateSpreadOptionsOrder(order *interfaces.OptionsOrder
 		return 0, fmt.Errorf("a debit vertical closes for a net credit")
 	}
 	if opening {
+		for _, group := range snapshot.Groups {
+			if group.Broken {
+				return 0, fmt.Errorf("new spread entries are refused while spread group %s is broken and unresolved; single-leg trading continues", group.ID)
+			}
+		}
 		if !p.allowsStructure(structure) {
 			return 0, fmt.Errorf("structure %s is not allowed for this sandbox", structure)
 		}

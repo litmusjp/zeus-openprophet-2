@@ -119,6 +119,7 @@ func newLocalStorage(dbPath string, readOnly bool) (*LocalStorage, error) {
 			&models.DBSignal{},
 			&models.DBManagedOrder{},
 			&models.DBManagedPosition{},
+			&models.DBOptionGroup{},
 		); err != nil {
 			return nil, fmt.Errorf("failed to migrate database: %w", err)
 		}

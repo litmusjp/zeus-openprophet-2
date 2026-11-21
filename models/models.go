@@ -242,3 +242,30 @@ func (DBManagedOrder) TableName() string {
 func (DBManagedPosition) TableName() string {
 	return "managed_positions"
 }
+
+// DBOptionGroup is the durable record of one multi-leg option group (Phase C): a same-expiry 1:1 debit vertical opened
+// as one atomic order and closed as one atomic order. The group id is the entry order's client order id, so the record
+// can be written before submission and found again after any restart. Open units are never stored: they are derived from
+// the entry order's filled quantity minus the filled quantity of its recorded close orders, so a restart cannot disagree
+// with the order ledger.
+type DBOptionGroup struct {
+	gorm.Model
+	DurableIdentity
+	GroupID             string `gorm:"uniqueIndex"` // the entry order's client order id
+	Underlying          string `gorm:"index"`
+	Structure           string // bull_call_debit or bear_put_debit
+	Status              string `gorm:"index"` // pending_entry, open, closed, broken, void
+	LegsJSON            string // JSON array of the exact attached legs
+	DetachedLegsJSON    string // legs durably detached into ordinary single-leg management (assignment, missing leg)
+	EntryClientOrderID  string `gorm:"index"`
+	EntryUnits          float64 // spread units requested at entry
+	NetDebit            float64 // positive net debit per unit at the entry limit
+	CloseClientOrderIDs string  // JSON array of the group's close orders' client order ids
+	BrokenReason        string
+	ResolverClientID    string // the one durable resolver operation that owns linked stock for this group (A2)
+	Revision            int64
+}
+
+func (DBOptionGroup) TableName() string {
+	return "option_groups"
+}

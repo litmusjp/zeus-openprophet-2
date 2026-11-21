@@ -416,6 +416,7 @@ export async function buildSystemPrompt(agentConfig, options = {}) {
   const customPrompt = normalizeLegacyWorkflowSize(withoutLegacyOverride,
     (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'mean-reversion')
     || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'momentum')
+    || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'mean-reversion')
     || (agentConfig.sandboxId === 'sbx_723be98b' && agentConfig.id === 'catalyst')
     || (agentConfig.sandboxId === 'sbx_956ff9e4' && agentConfig.id === 'long-vol')
     || (agentConfig.sandboxId === 'sbx_0d35471e' && agentConfig.id === 'default'));

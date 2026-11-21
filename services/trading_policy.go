@@ -29,12 +29,32 @@ type TradingPolicy struct {
 	MaxOpenPositions     int
 	MaxDailyLoss         float64
 	InvalidConfiguration bool
+	// AllowedStructures gates NEW option exposure by structure (Phase C): a canonical, sorted, comma separated allow-list
+	// (a string so the policy stays comparable). Empty means the default (single long legs only). It never blocks reads,
+	// reconciliation or a valid grouped reducing close.
+	AllowedStructures string
+}
+
+// OptionGroupRisk is the risk view of one open multi-leg group: its exact leg symbols, the units still open and the
+// maximum loss that is counted against the position, deployed and open-position limits (a debit vertical's maximum
+// loss is its net debit x units x 100).
+type OptionGroupRisk struct {
+	ID          string
+	LegSymbols  []string
+	OpenUnits   float64
+	MaxLoss     float64
+	Broken      bool
+	Closing     bool
+	StructureID string
 }
 
 type BrokerRiskSnapshot struct {
 	Account       *interfaces.Account
 	Positions     []*interfaces.Position
 	PendingOrders []*interfaces.Order
+	// Groups are the open multi-leg groups of this sandbox, read from the durable group ledger. A leg that belongs to an
+	// open group is counted once, through its group, and cannot be closed by a single-leg order.
+	Groups []OptionGroupRisk
 	// Lock is the persisted per-session daily-loss lock; LockErr is set when it could not be read.
 	Lock    *interfaces.DailyLossLockStatus
 	LockErr error
@@ -148,7 +168,9 @@ func TradingPolicyFromEnv(isPaper bool) *TradingPolicy {
 	maxDeployedPct, deployedPctOK := strictFloatEnv("OPENPROPHET_MAX_DEPLOYED_PCT", 0)
 	maxOpenPositions, openPositionsOK := strictIntEnv("OPENPROPHET_MAX_OPEN_POSITIONS", 0)
 	maxDailyLoss, dailyLossOK := strictFloatEnv("OPENPROPHET_MAX_DAILY_LOSS", 0)
+	allowedStructures, structuresOK := canonicalAllowedStructures(os.Getenv("OPENPROPHET_ALLOWED_STRUCTURES"))
 	return &TradingPolicy{
+		AllowedStructures:    allowedStructures,
 		IsPaper:              isPaper,
 		AllowLiveTrading:     allowLive,
 		AllowPaperTrading:    allowPaper,
@@ -161,7 +183,7 @@ func TradingPolicyFromEnv(isPaper bool) *TradingPolicy {
 		MaxDeployedPct:       maxDeployedPct,
 		MaxOpenPositions:     maxOpenPositions,
 		MaxDailyLoss:         maxDailyLoss,
-		InvalidConfiguration: !(liveOK && paperOK && optionsOK && stocksOK && dteOK && confirmationOK && orderValueOK && positionPctOK && deployedPctOK && openPositionsOK && dailyLossOK),
+		InvalidConfiguration: !(liveOK && paperOK && optionsOK && stocksOK && dteOK && confirmationOK && orderValueOK && positionPctOK && deployedPctOK && openPositionsOK && dailyLossOK && structuresOK),
 	}
 }
 
@@ -268,10 +290,30 @@ func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot Bro
 		if position == nil || position.Qty == 0 {
 			continue
 		}
+		if openGroupOwningSymbol(snapshot.Groups, position.Symbol) != "" {
+			// A grouped leg is counted once, through its group (below), never as a position of its own.
+			if strings.EqualFold(position.Symbol, symbol) {
+				knownSymbol = true
+			}
+			continue
+		}
 		openPositions++
 		deployed += math.Abs(position.MarketValue)
 		if strings.EqualFold(position.Symbol, symbol) {
 			knownSymbol = true
+		}
+	}
+	for _, group := range snapshot.Groups {
+		if group.OpenUnits <= 0 {
+			continue
+		}
+		// One open position per group, with its maximum loss as the amount deployed.
+		openPositions++
+		deployed += group.MaxLoss
+		for _, leg := range group.LegSymbols {
+			if strings.EqualFold(leg, symbol) {
+				knownSymbol = true
+			}
 		}
 	}
 	for _, pending := range snapshot.PendingOrders {
@@ -383,7 +425,15 @@ func (p TradingPolicy) ValidateOptionsOrder(order *interfaces.OptionsOrder, snap
 	if err := validateOptionsOrder(order); err != nil {
 		return 0, err
 	}
+	if len(order.Legs) > 0 {
+		return p.validateSpreadOptionsOrder(order, snapshot)
+	}
 	opening := strings.HasSuffix(order.PositionIntent, "_to_open")
+	if !opening {
+		if groupID := openGroupOwningSymbol(snapshot.Groups, order.Symbol); groupID != "" {
+			return 0, fmt.Errorf("%s belongs to open spread group %s and cannot be closed by a single-leg order; close the spread as one order", order.Symbol, groupID)
+		}
+	}
 	if !opening && !p.hasMatchingExposure(order.Symbol, order.Side, order.Qty, snapshot.Positions) {
 		return 0, fmt.Errorf("options close order is not backed by matching broker exposure")
 	}
@@ -408,6 +458,121 @@ func (p TradingPolicy) ValidateOptionsOrder(order *interfaces.OptionsOrder, snap
 		return 0, err
 	}
 	return notional, nil
+}
+
+// openGroupOwningSymbol returns the id of the open (not fully closed) group that still holds this leg, or "".
+func openGroupOwningSymbol(groups []OptionGroupRisk, symbol string) string {
+	for _, group := range groups {
+		if group.OpenUnits <= 0 {
+			continue
+		}
+		for _, leg := range group.LegSymbols {
+			if strings.EqualFold(strings.TrimSpace(leg), strings.TrimSpace(symbol)) {
+				return group.ID
+			}
+		}
+	}
+	return ""
+}
+
+// findGroupForLegs returns the open group whose attached legs are exactly this order's leg symbols.
+func findGroupForLegs(groups []OptionGroupRisk, legs []interfaces.OptionLeg) *OptionGroupRisk {
+	for i := range groups {
+		group := &groups[i]
+		if group.OpenUnits <= 0 || len(group.LegSymbols) != len(legs) {
+			continue
+		}
+		matched := 0
+		for _, leg := range legs {
+			for _, symbol := range group.LegSymbols {
+				if strings.EqualFold(strings.TrimSpace(symbol), strings.TrimSpace(leg.Symbol)) {
+					matched++
+					break
+				}
+			}
+		}
+		if matched == len(legs) {
+			return group
+		}
+	}
+	return nil
+}
+
+// validateSpreadOptionsOrder is the group-aware policy for an atomic two-leg vertical. The structure comes from the exact
+// legs; the permission gates new exposure only; a close must be backed by the group's own open units and by broker
+// exposure on every leg; the amount counted against the caps is the spread's maximum loss (net debit x units x 100).
+func (p TradingPolicy) validateSpreadOptionsOrder(order *interfaces.OptionsOrder, snapshot BrokerRiskSnapshot) (float64, error) {
+	structure, err := ClassifyOptionsStructure(order)
+	if err != nil {
+		return 0, err
+	}
+	opening, _ := legsDirection(order.Legs)
+	if order.Type != "limit" {
+		return 0, fmt.Errorf("spread orders must be limit orders")
+	}
+	kind := strings.TrimSpace(order.PriceKind)
+	if kind == "" {
+		if opening {
+			kind = PriceKindDebit
+		} else {
+			kind = PriceKindCredit
+		}
+	}
+	if opening && kind != PriceKindDebit {
+		return 0, fmt.Errorf("a debit vertical opens for a net debit")
+	}
+	if !opening && kind != PriceKindCredit {
+		return 0, fmt.Errorf("a debit vertical closes for a net credit")
+	}
+	if opening {
+		if !p.allowsStructure(structure) {
+			return 0, fmt.Errorf("structure %s is not allowed for this sandbox", structure)
+		}
+	} else {
+		group := findGroupForLegs(snapshot.Groups, order.Legs)
+		if group == nil {
+			return 0, fmt.Errorf("spread close is not backed by an open spread group")
+		}
+		if group.Broken {
+			return 0, fmt.Errorf("spread group %s is broken; its remaining legs are managed as single legs", group.ID)
+		}
+		if order.Qty > group.OpenUnits+1e-9 {
+			return 0, fmt.Errorf("spread close of %.0f units exceeds the %.0f open units of group %s", order.Qty, group.OpenUnits, group.ID)
+		}
+		for _, leg := range order.Legs {
+			if !p.hasMatchingExposure(leg.Symbol, leg.Side, order.Qty*float64(leg.RatioQty), snapshot.Positions) {
+				return 0, fmt.Errorf("spread close leg %s is not backed by matching broker exposure", leg.Symbol)
+			}
+		}
+	}
+	if err := p.validateCommon(order.Side, "us_option", opening); err != nil {
+		return 0, err
+	}
+	if !opening {
+		return 0, nil
+	}
+	if !p.Allow0DTE {
+		_, expiry, _, _, ok := parseOCCOptionSymbol(order.Symbol)
+		if ok && sameUTCDay(expiry, PolicyNow()) {
+			return 0, fmt.Errorf("0DTE options are disabled by broker policy")
+		}
+	}
+	price, err := optionPrice(order)
+	if err != nil {
+		return 0, err
+	}
+	width, err := SpreadWidth(order.Legs)
+	if err != nil {
+		return 0, err
+	}
+	if price > width+1e-9 {
+		return 0, fmt.Errorf("net debit %.2f exceeds the spread width %.2f", price, width)
+	}
+	maxLoss := price * order.Qty * 100
+	if err := p.validateCaps(maxLoss, true, snapshot, order.Symbol); err != nil {
+		return 0, err
+	}
+	return maxLoss, nil
 }
 
 // PolicyNow is the clock the 0DTE rule reads. Production leaves it on the real clock; tests that use

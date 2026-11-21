@@ -255,10 +255,6 @@ type OptionsOrder struct {
 	Type                    string // "market", "limit"
 	TimeInForce             string // "day", "gtc"
 	LimitPrice              *float64
-	// PriceKind says which way money moves for a multi-leg order: "debit" (a vertical opens for a net debit) or "credit"
-	// (a vertical closes for a net credit). LimitPrice stays a positive magnitude; only the broker adapter signs it.
-	// Empty for single-leg orders, whose behaviour is unchanged.
-	PriceKind               string `json:"price_kind,omitempty"`
 	SubmissionAttempted     bool
 	CapRevision             *int64                           `json:"-"` // the entry spread cap revision confirmed for this opening (checked by the order guards)
 	MarketScannerFeatures   any                              `json:"-"`
@@ -273,6 +269,11 @@ type OptionsOrder struct {
 	AssessmentExpiresAt     time.Time                        `json:"-"`
 	StrategyType            string                           `json:"-"`
 	Legs                    []OptionLeg                      `json:"legs,omitempty"`
+
+	// PriceKind says which way money moves for a multi-leg order: "debit" (a vertical opens for a net debit) or "credit"
+	// (a vertical closes for a net credit). LimitPrice stays a positive magnitude; only the broker adapter signs it.
+	// Empty for single-leg orders, whose behaviour is unchanged.
+	PriceKind string `json:"price_kind,omitempty"`
 }
 
 // OptionLeg is one exact leg of an atomic multi-leg options order.

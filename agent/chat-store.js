@@ -480,6 +480,40 @@ function adPreBrokerBlock(record) {
   if (!/"execution_confirmed":\s*false/.test(text) || !/"filled_qty":\s*0(?![.\d])/.test(text)) return null;
   return `${AD_BLOCK_PREFIX} (${decision})`;
 }
+// B1 (Nov 21): a single-position lookup of an exact contract the account does not hold and has no order for. The lookup must be
+// an unambiguous structured 404; the same activity must hold at least one successful positions read and every such read must list
+// positions without the contract; every orders read must be complete and show no order of the contract, at least one complete orders
+// read must exist, and the contract must never be ordered in the activity; and the activity must show one broker account at most.
+// A label only: a 404 is never proof that anything closed, and any missing, partial, failed or ambiguous evidence leaves the
+// lookup an essential failure, so a management, authentication or transport failure is never hidden by it.
+const PRE_ENTRY_PROBE_WARNING = 'get_options_position not found for a contract not held';
+function isPreEntryProbeNotFound(record, records) {
+  if (!isStrictPositionNotFound(record)) return false;
+  const symbol = trimmedText(record.args?.symbol ?? record.input?.symbol);
+  if (!symbol || records.indexOf(record) < 0) return false;
+  if (activityAccountIds(records).size > 1) return false;
+  let positionReads = 0;
+  let completeOrderReads = 0;
+  for (const read of records) {
+    if (!isToolCallRecord(read)) continue;
+    const tool = toolNameOf(read);
+    if (tool === 'place_options_order' && trimmedText(read.args?.symbol) === symbol) return false;
+    if (tool === 'get_options_positions') {
+      if (hasStructuredFailure(read)) return false;
+      const rows = positionRowsFor(read, symbol);
+      if (rows === null || rows.length) return false;
+      positionReads += 1;
+    } else if (tool === 'get_orders') {
+      if (hasStructuredFailure(read)) return false;
+      const orders = completeOrdersRead(read);
+      if (orders === null) return false;
+      const mine = rowsForSymbol(orders, symbol);
+      if (mine === null || mine.length) return false;
+      completeOrderReads += 1;
+    }
+  }
+  return positionReads > 0 && completeOrderReads > 0;
+}
 /** Split an activity's failing records into essential failures and optional-research warnings. */
 export function classifyFailures(records) {
   const essential = [];
@@ -493,13 +527,14 @@ export function classifyFailures(records) {
     else if (isUnfilledOpeningPositionNotFound(record, records)) warnings.push(UNFILLED_OPENING_WARNING);
     else if (isConfirmedFullClosePositionNotFound(record, records)) warnings.push(CLOSED_POSITION_WARNING);
     else if (isConfirmedCancelPositionNotFound(record, records)) warnings.push(CANCELED_ORDER_WARNING);
+    else if (isPreEntryProbeNotFound(record, records)) warnings.push(PRE_ENTRY_PROBE_WARNING);
     else if (isMarketClosedChain(record)) warnings.push(MARKET_CLOSED_CHAIN_WARNING);
     else if (isRangeNotCovered(record)) warnings.push(RANGE_NOT_COVERED_WARNING);
     else essential.push(record);
   }
   return { essential, warnings: [...new Set(warnings)] };
 }
-const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, CLOSED_POSITION_WARNING, CANCELED_ORDER_WARNING, MARKET_CLOSED_CHAIN_WARNING, RANGE_NOT_COVERED_WARNING]);
+const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, CLOSED_POSITION_WARNING, CANCELED_ORDER_WARNING, PRE_ENTRY_PROBE_WARNING, MARKET_CLOSED_CHAIN_WARNING, RANGE_NOT_COVERED_WARNING]);
 function activityOutcome({ recovery, status, essential, warnings }) {
   // A warning is appended to a Recorded or Recovered outcome, so it is never hidden by a recorded order status or a recovery.
   // An essential failure that was not recovered is never hidden: a recorded status or a recovery marker does not erase it, and
@@ -514,6 +549,7 @@ function activityOutcome({ recovery, status, essential, warnings }) {
   if (warnings.includes(UNFILLED_OPENING_WARNING)) parts.push(UNFILLED_OPENING_WARNING);
   if (warnings.includes(CLOSED_POSITION_WARNING)) parts.push(CLOSED_POSITION_WARNING);
   if (warnings.includes(CANCELED_ORDER_WARNING)) parts.push(CANCELED_ORDER_WARNING);
+  if (warnings.includes(PRE_ENTRY_PROBE_WARNING)) parts.push(PRE_ENTRY_PROBE_WARNING);
   if (warnings.includes(MARKET_CLOSED_CHAIN_WARNING)) parts.push(MARKET_CLOSED_CHAIN_WARNING);
   if (warnings.includes(RANGE_NOT_COVERED_WARNING)) parts.push(RANGE_NOT_COVERED_WARNING);
   const warning = parts.length ? ` (warning: ${parts.join('; ')})` : '';

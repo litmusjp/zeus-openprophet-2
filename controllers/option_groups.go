@@ -164,11 +164,15 @@ func (oc *OrderController) GetOptionGroups(c *gin.Context) {
 		return
 	}
 	groups := make([]gin.H, 0, len(states))
+	advisories := []string{}
 	broken := 0
 	for _, state := range states {
 		g := state.Group
 		if g.Status == "broken" {
 			broken++
+		}
+		if g.Advisory != "" {
+			advisories = append(advisories, g.GroupID+": "+g.Advisory)
 		}
 		var legs []interfaces.OptionLeg
 		_ = json.Unmarshal([]byte(g.LegsJSON), &legs)
@@ -176,12 +180,12 @@ func (oc *OrderController) GetOptionGroups(c *gin.Context) {
 			"group_id": g.GroupID, "underlying": g.Underlying, "structure": g.Structure, "status": g.Status,
 			"legs": legs, "entry_units": g.EntryUnits, "entry_filled_units": state.EntryFilled, "closed_units": state.CloseFilled, "open_units": state.OpenUnits,
 			"net_debit_per_unit": g.NetDebit, "close_order_client_ids": state.CloseOrders, "close_order_pending": state.PendingClose,
-			"broken_reason": g.BrokenReason, "resolver_client_order_id": g.ResolverClientID,
+			"broken_reason": g.BrokenReason, "resolver_client_order_id": g.ResolverClientID, "advisory": g.Advisory,
 		})
 	}
 	note := "A spread is closed as one order with both legs. One leg of an open group cannot be closed on its own."
 	if broken > 0 {
 		note = "A group is broken: new spread entries are refused for this sandbox until it is resolved; single-leg trading continues; the backend resolves linked assignment stock on its own and leaves anything it cannot match exactly alone."
 	}
-	c.JSON(200, gin.H{"status": "ok", "groups": groups, "broken_groups": broken, "note": note})
+	c.JSON(200, gin.H{"status": "ok", "groups": groups, "broken_groups": broken, "advisories": advisories, "note": note})
 }

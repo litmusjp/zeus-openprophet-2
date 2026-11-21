@@ -62,10 +62,7 @@ type AssignmentResolver struct {
 	// the start of every pass that has live groups, so fills of entries, closes and resolver orders advance the derived group
 	// state during normal operation, not only at startup.
 	Refresh func(ctx context.Context)
-	// Advise, when set, records information-only advisories on live groups (for example a short leg near expiry in the money).
-	Advise func(ctx context.Context, states []database.OptionGroupState)
-
-	mu sync.Mutex // one pass at a time in this process
+	mu      sync.Mutex // one pass at a time in this process
 }
 
 // ResolverAction is one thing the resolver did or decided to wait on, for the beat report and the logs.
@@ -189,10 +186,8 @@ func (r *AssignmentResolver) ResolveOnce(ctx context.Context) (ResolverReport, e
 		}
 		report.Actions = append(report.Actions, action)
 	}
-	if r.Advise != nil {
-		if live, err := r.Store.OptionGroupStates(); err == nil {
-			r.Advise(ctx, live)
-		}
+	if live, err := r.Store.OptionGroupStates(); err == nil {
+		r.advise(ctx, live) // information only (short leg near expiry in the money); never an order
 	}
 	return report, nil
 }

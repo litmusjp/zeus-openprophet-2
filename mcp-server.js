@@ -1139,7 +1139,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_option_groups',
-        description: 'Read-only status of this sandbox\'s multi-leg option groups (debit verticals): each live group with its legs, open units, status (open, broken), the reason a group is broken and the backend resolver order that owns any linked assignment stock. A broken group refuses new spread entries for this sandbox until it is resolved; single-leg trading continues; the backend resolves linked stock on its own. It changes nothing and places no order.',
+        description: 'Read-only status of this sandbox\'s multi-leg option groups (debit verticals): each live group with its legs, open units, status (open, broken), the reason a group is broken and the backend resolver order that owns any linked assignment stock, and an information-only advisory when a short leg is near expiry and in the money (nothing is closed or rolled automatically). A broken group refuses new spread entries for this sandbox until it is resolved; single-leg trading continues; the backend resolves linked stock on its own. It changes nothing and places no order.',
         inputSchema: {
           type: 'object',
           properties: {},

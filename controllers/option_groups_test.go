@@ -333,3 +333,30 @@ func TestReconciliationRefusesABrokerOrderWhoseLegsDiffer(t *testing.T) {
 		t.Fatalf("no fill may be applied from a different order, got %v", states[0].EntryFilled)
 	}
 }
+
+func TestGetOptionGroupsShowsTheInformationOnlyAdvisory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oc, storage := groupController(t)
+	if _, err := oc.registerSpreadBeforeSubmission(gEntry("grp-a1")); err != nil {
+		t.Fatal(err)
+	}
+	group, _ := storage.GetOptionGroup("grp-a1")
+	group.Advisory = "short leg AAPL261218C00210000 expires in 2 day(s) and is in the money (assignment risk); information only: nothing is closed, rolled or changed automatically"
+	if err := storage.SaveOptionGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest("GET", "/options/groups", nil)
+	oc.GetOptionGroups(c)
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	advisories, _ := body["advisories"].([]any)
+	g := body["groups"].([]any)[0].(map[string]any)
+	if len(advisories) != 1 || !strings.Contains(advisories[0].(string), "grp-a1") || !strings.Contains(g["advisory"].(string), "information only") {
+		t.Fatalf("the advisory must be shown per group and in the advisories list: %v", body)
+	}
+	if body["broken_groups"].(float64) != 0 {
+		t.Fatal("an advisory is not a broken group and changes nothing")
+	}
+}

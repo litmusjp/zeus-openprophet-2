@@ -156,3 +156,38 @@ func TestOptionGroupStatesListOnlyNonTerminalGroups(t *testing.T) {
 		t.Error("recording a close order on an unknown group must be refused")
 	}
 }
+
+func TestOptionGroupSurvivesARestart(t *testing.T) {
+	storage, path := newGroupStorage(t, "restart.db")
+	if err := storage.SaveOptionGroup(testGroup("grp-r1")); err != nil {
+		t.Fatal(err)
+	}
+	saveOrderFilled(t, storage, "grp-r1", "filled", 3, 3)
+	if err := storage.AddOptionGroupCloseOrder("grp-r1", "grp-r1-close-1"); err != nil {
+		t.Fatal(err)
+	}
+	saveOrderFilled(t, storage, "grp-r1-close-1", "partially_filled", 3, 1)
+	group, _ := storage.GetOptionGroup("grp-r1")
+	group.Status, group.BrokenReason, group.ResolverClientID = "broken", "short leg missing", "resolver-grp-r1-1"
+	if err := storage.SaveOptionGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	storage.Close()
+
+	reopened, err := NewLocalStorage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	states, err := reopened.OptionGroupStates()
+	if err != nil || len(states) != 1 {
+		t.Fatalf("a reopened ledger must return the live group: %d err=%v", len(states), err)
+	}
+	s := states[0]
+	if s.Group.Status != "broken" || s.Group.ResolverClientID != "resolver-grp-r1-1" || s.Group.BrokenReason == "" {
+		t.Fatalf("the broken status and the resolver operation must survive a restart: %+v", s.Group)
+	}
+	if s.EntryFilled != 3 || s.CloseFilled != 1 || s.OpenUnits != 2 || !s.PendingClose {
+		t.Fatalf("units must be derived identically after a restart: %+v", s)
+	}
+}

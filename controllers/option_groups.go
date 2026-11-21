@@ -1,8 +1,11 @@
 package controllers
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
@@ -145,4 +148,40 @@ func optionLegsMatch(local, broker []interfaces.OptionLeg) bool {
 		}
 	}
 	return true
+}
+
+// GetOptionGroups is the read-only status of this sandbox's live multi-leg groups (Phase C): what is open, what is
+// broken and why, and which resolver operation owns any linked stock. It changes nothing and places no order.
+func (oc *OrderController) GetOptionGroups(c *gin.Context) {
+	store := oc.optionGroups()
+	if store == nil {
+		c.JSON(503, gin.H{"status": "unavailable", "error": "the durable option group ledger is unavailable"})
+		return
+	}
+	states, err := store.OptionGroupStates()
+	if err != nil {
+		c.JSON(500, gin.H{"status": "error", "error": err.Error()})
+		return
+	}
+	groups := make([]gin.H, 0, len(states))
+	broken := 0
+	for _, state := range states {
+		g := state.Group
+		if g.Status == "broken" {
+			broken++
+		}
+		var legs []interfaces.OptionLeg
+		_ = json.Unmarshal([]byte(g.LegsJSON), &legs)
+		groups = append(groups, gin.H{
+			"group_id": g.GroupID, "underlying": g.Underlying, "structure": g.Structure, "status": g.Status,
+			"legs": legs, "entry_units": g.EntryUnits, "entry_filled_units": state.EntryFilled, "closed_units": state.CloseFilled, "open_units": state.OpenUnits,
+			"net_debit_per_unit": g.NetDebit, "close_order_client_ids": state.CloseOrders, "close_order_pending": state.PendingClose,
+			"broken_reason": g.BrokenReason, "resolver_client_order_id": g.ResolverClientID,
+		})
+	}
+	note := "A spread is closed as one order with both legs. One leg of an open group cannot be closed on its own."
+	if broken > 0 {
+		note = "A group is broken: new spread entries are refused for this sandbox until it is resolved; single-leg trading continues; the backend resolves linked assignment stock on its own and leaves anything it cannot match exactly alone."
+	}
+	c.JSON(200, gin.H{"status": "ok", "groups": groups, "broken_groups": broken, "note": note})
 }

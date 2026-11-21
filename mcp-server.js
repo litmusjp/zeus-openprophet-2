@@ -1138,6 +1138,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'get_option_groups',
+        description: 'Read-only status of this sandbox\'s multi-leg option groups (debit verticals): each live group with its legs, open units, status (open, broken), the reason a group is broken and the backend resolver order that owns any linked assignment stock. A broken group refuses new spread entries for this sandbox until it is resolved; single-leg trading continues; the backend resolves linked stock on its own. It changes nothing and places no order.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
         name: 'get_options_chain',
         description: 'Get options contracts with indicative/testing_only provider data. LatestTradeSize is one trade, not daily Volume; unknown Volume and OpenInterest are omitted and OpenInterestPresent is false. PAPER_ADVISORY_OP2 assessment still requires exact fresh OCC bid/ask/depth and strategy/risk checks.',
         inputSchema: {
@@ -2384,6 +2392,11 @@ ${allNews.map((article, i) =>
       case 'get_options_quote': {
         // Read-only exact-contract quote of a held contract. Refusals keep their structured answer (returnAvailability), never an order.
         const data = await callTradingBot(`/options/quote/${encodeURIComponent(String(args.symbol || '').trim())}`, 'GET', null, { returnAvailability: true });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'get_option_groups': {
+        const data = await callTradingBot('/options/groups', 'GET', null, { returnAvailability: true });
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

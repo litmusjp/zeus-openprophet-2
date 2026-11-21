@@ -1,9 +1,13 @@
 package controllers
 
 import (
+	"encoding/json"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
@@ -202,5 +206,49 @@ func TestBrokerOrderMatchingUsesTheLegsForAMultiLegOrder(t *testing.T) {
 	brokerSingle.Symbol = "AAPL261218C00210000"
 	if brokerOrderMatchesLocal(single, brokerSingle) {
 		t.Fatal("a single-leg order with another symbol must not match")
+	}
+}
+
+func TestGetOptionGroupsIsReadOnlyStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oc, storage := groupController(t)
+	if _, err := oc.registerSpreadBeforeSubmission(gEntry("grp-s1")); err != nil {
+		t.Fatal(err)
+	}
+	fillEntry(t, storage, "grp-s1", 2)
+	call := func() (int, map[string]any) {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest("GET", "/options/groups", nil)
+		oc.GetOptionGroups(c)
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+	code, body := call()
+	groups, _ := body["groups"].([]any)
+	if code != 200 || len(groups) != 1 || body["broken_groups"].(float64) != 0 {
+		t.Fatalf("status = %d body = %v", code, body)
+	}
+	g := groups[0].(map[string]any)
+	if g["group_id"] != "grp-s1" || g["structure"] != "bull_call_debit" || g["open_units"].(float64) != 2 || g["net_debit_per_unit"].(float64) != 3 {
+		t.Fatalf("group = %v", g)
+	}
+	// A broken group is reported with its reason and the note says new entries are refused; nothing is written by reading.
+	group, _ := storage.GetOptionGroup("grp-s1")
+	group.Status, group.BrokenReason, group.ResolverClientID = "broken", "short leg missing", "resolver-grp-s1-1"
+	if err := storage.SaveOptionGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	_, body = call()
+	g = body["groups"].([]any)[0].(map[string]any)
+	if body["broken_groups"].(float64) != 1 || g["broken_reason"] != "short leg missing" || g["resolver_client_order_id"] != "resolver-grp-s1-1" || !strings.Contains(body["note"].(string), "refused") {
+		t.Fatalf("broken status = %v", body)
+	}
+	before, _ := storage.GetOptionGroup("grp-s1")
+	call()
+	after, _ := storage.GetOptionGroup("grp-s1")
+	if before.Revision != after.Revision {
+		t.Fatal("reading the status must not write anything")
 	}
 }

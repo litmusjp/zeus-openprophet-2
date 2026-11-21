@@ -119,3 +119,15 @@ test('the single-leg schema is unchanged: the required list is the same and legs
   assert.match(source, /Never simulate a spread with sequential single-leg orders\./);
   assert.doesNotMatch(source, /Agent tool does not expose atomic multi-leg execution/);
 });
+
+test('get_option_groups is a read-only status call that passes the backend answer through', async () => {
+  const { startFakeBackend } = await import('./nov17-support.mjs');
+  const payload = { status: 'ok', groups: [{ group_id: 'g1', structure: 'bull_call_debit', status: 'broken', open_units: 2, broken_reason: 'short leg missing', resolver_client_order_id: 'resolver-g1-1' }], broken_groups: 1, note: 'A group is broken' };
+  const backend = await startFakeBackend({ 'GET /options/groups': () => ({ body: payload }) });
+  try {
+    const result = await callMcpTool(backend.url, 'get_option_groups', {});
+    assert.equal(result.isError, false, result.text);
+    assert.deepEqual(JSON.parse(result.text), payload);
+    assert.equal(backend.requests.filter(r => r.method !== 'GET').length, 0, 'the status call must only read');
+  } finally { await backend.close(); }
+});

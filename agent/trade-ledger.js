@@ -58,6 +58,21 @@ function entryAssessment(order) {
     ...(typeof confidence === 'number' && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1 ? { catalystConfidence: confidence } : {}) };
 }
 
+// A multi-leg (spread) order is one trade in the ledger: its key is its sorted leg symbols, an opening is a buy at the net
+// debit and a closing is a sell at the net credit (both positive magnitudes), so a closed spread realises
+// (credit - debit) x units x 100. Orders without legs are never affected. A spread whose legs neither all open nor all close is skipped.
+function spreadOrder(order) {
+  const legs = order?.option_legs ?? order?.OptionLegs;
+  if (!Array.isArray(legs) || legs.length < 2) return null;
+  const symbols = legs.map(leg => canonicalSymbol(leg?.symbol ?? leg?.Symbol)).filter(Boolean);
+  if (symbols.length !== legs.length) return null;
+  const intents = legs.map(leg => String(leg?.position_intent ?? leg?.PositionIntent ?? '').toLowerCase());
+  const opening = intents.every(intent => intent.endsWith('_to_open'));
+  const closing = intents.every(intent => intent.endsWith('_to_close'));
+  if (!opening && !closing) return null;
+  return { symbol: `spread:${[...symbols].sort().join('+')}`, side: opening ? 'buy' : 'sell', legs: [...symbols].sort() };
+}
+
 export function buildTradeLedger(orders = [], metadata = {}) {
   const recordMetadata = { ...metadata };
   delete recordMetadata.agentId;
@@ -78,12 +93,15 @@ export function buildTradeLedger(orders = [], metadata = {}) {
   const realized = [];
 
   for (const { order, time } of sorted) {
-    const symbol = canonicalSymbol(field(order, 'Symbol', 'symbol'));
-    const side = String(field(order, 'Side', 'side') || '').toLowerCase();
+    const spread = spreadOrder(order);
+    const hasLegs = Array.isArray(order?.option_legs ?? order?.OptionLegs) && (order.option_legs ?? order.OptionLegs).length >= 2;
+    if (hasLegs && !spread) continue; // mixed or unreadable legs: never attributed as a single-leg trade
+    const symbol = spread ? spread.symbol : canonicalSymbol(field(order, 'Symbol', 'symbol'));
+    const side = spread ? spread.side : String(field(order, 'Side', 'side') || '').toLowerCase();
     if (!symbol || (side !== 'buy' && side !== 'sell')) continue;
     let remaining = number(field(order, 'FilledQty', 'filledQty'));
     const price = number(field(order, 'FilledAvgPrice', 'filledAvgPrice'));
-    const multiplier = isOption(symbol) ? 100 : 1;
+    const multiplier = spread || isOption(symbol) ? 100 : 1;
     const queue = lots.get(symbol) || [];
 
     while (remaining > 0 && queue.length && queue[0].side !== side) {
@@ -109,6 +127,7 @@ export function buildTradeLedger(orders = [], metadata = {}) {
         timestamp: time,
         status: 'realized',
         assetType: multiplier === 100 ? 'option' : 'stock',
+        ...(spread ? { structure: 'spread', legs: spread.legs } : {}),
         entryAssessment: lot.entryAssessment,
         ...recordMetadata,
         agentId: lot.agentId,

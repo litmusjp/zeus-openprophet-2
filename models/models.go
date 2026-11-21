@@ -251,13 +251,13 @@ func (DBManagedPosition) TableName() string {
 type DBOptionGroup struct {
 	gorm.Model
 	DurableIdentity
-	GroupID             string `gorm:"uniqueIndex"` // the entry order's client order id
-	Underlying          string `gorm:"index"`
-	Structure           string // bull_call_debit or bear_put_debit
-	Status              string `gorm:"index"` // pending_entry, open, closed, broken, void
-	LegsJSON            string // JSON array of the exact attached legs
-	DetachedLegsJSON    string // legs durably detached into ordinary single-leg management (assignment, missing leg)
-	EntryClientOrderID  string `gorm:"index"`
+	GroupID             string  `gorm:"uniqueIndex"` // the entry order's client order id
+	Underlying          string  `gorm:"index"`
+	Structure           string  // bull_call_debit or bear_put_debit
+	Status              string  `gorm:"index"` // pending_entry, open, closed, broken, void
+	LegsJSON            string  // JSON array of the exact attached legs
+	DetachedLegsJSON    string  // legs durably detached into ordinary single-leg management (assignment, missing leg)
+	EntryClientOrderID  string  `gorm:"index"`
 	EntryUnits          float64 // spread units requested at entry
 	NetDebit            float64 // positive net debit per unit at the entry limit
 	CloseClientOrderIDs string  // JSON array of the group's close orders' client order ids

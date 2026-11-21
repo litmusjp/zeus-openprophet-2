@@ -53,6 +53,9 @@ type AlpacaTradingService struct {
 	optionsChainProvider    func(context.Context, string, time.Time) ([]*interfaces.OptionContract, error)
 	optionsSnapshotBaseURL  string
 	optionsSnapshotHTTP     *http.Client
+	resolverMu              sync.Mutex
+	resolverGrants          map[string]*interfaces.AssignmentResolutionGrant
+	stockQuoteProvider      func(context.Context, string) (bid, ask float64, at time.Time, err error) // test seam; nil uses the data client
 }
 
 const brokerQuoteMaxAge = 2 * time.Minute
@@ -374,6 +377,12 @@ func quoteTimestampFresh(timestamp time.Time) bool {
 }
 
 func (s *AlpacaTradingService) validateEquityPolicy(ctx context.Context, order *interfaces.Order) error {
+	if order.ResolverGrant != nil {
+		// An assignment-resolution grant is honoured only when it is exactly the one this service issued for this order.
+		if err := s.verifyResolverGrant(order); err != nil {
+			return &PreSubmissionRejectionError{Err: err}
+		}
+	}
 	if s.policy == nil {
 		return nil
 	}
@@ -566,6 +575,7 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 	if err := s.markSubmissionBoundary(order); err != nil {
 		return nil, err
 	}
+	s.consumeResolverGrant(order) // a grant authorises one submission: it is spent the moment the order crosses the boundary
 	alpacaOrder, err := placeOrder(req)
 	if err != nil {
 		// Startup reconciliation is handled by OrderController.ReconcileOpenOrders.

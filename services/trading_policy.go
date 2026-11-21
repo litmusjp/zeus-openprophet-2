@@ -401,6 +401,9 @@ func (p TradingPolicy) ValidateOrder(order *interfaces.Order, snapshot BrokerRis
 	if order.Purpose != "entry" && order.Purpose != "close" && order.Purpose != "protection" {
 		return 0, fmt.Errorf("order purpose must be one of entry, close, or protection")
 	}
+	if order.ResolverGrant != nil {
+		return p.validateResolverOrder(order, snapshot)
+	}
 	reducing := order.Purpose == "close" || order.Purpose == "protection"
 	if reducing && !p.hasMatchingExposure(order.Symbol, order.Side, order.Qty, snapshot.Positions) {
 		return 0, fmt.Errorf("%s order is not backed by matching broker exposure", order.Purpose)
@@ -421,6 +424,45 @@ func (p TradingPolicy) ValidateOrder(order *interfaces.Order, snapshot BrokerRis
 		return 0, err
 	}
 	return notional, nil
+}
+
+// validateResolverOrder is the policy for an assignment-resolution stock reduction (Phase C, D10/A1). It never consults
+// AllowStocks (the agent's stock permission stays off and is not changed), but it keeps every other protection:
+// paper only, configuration valid, an operator-wide RequireConfirmation stop is respected, and the order can only be a
+// limit order that reduces broker-held stock of exactly the granted symbol and side, up to the granted quantity.
+func (p TradingPolicy) validateResolverOrder(order *interfaces.Order, snapshot BrokerRiskSnapshot) (float64, error) {
+	grant := order.ResolverGrant
+	if p.InvalidConfiguration {
+		return 0, fmt.Errorf("trading policy configuration is invalid; execution is blocked")
+	}
+	if !p.IsPaper {
+		return 0, fmt.Errorf("live trading is prohibited; only paper accounts may submit orders")
+	}
+	if !p.AllowPaperTrading {
+		return 0, fmt.Errorf("allowPaperTrading policy is disabled for paper trading")
+	}
+	if !p.AllowOptions {
+		return 0, fmt.Errorf("assignment resolution applies only to a sandbox that may trade options")
+	}
+	if p.RequireConfirmation {
+		return 0, fmt.Errorf("operator confirmation is required by broker policy; the assignment resolver waits")
+	}
+	if order.Purpose != "close" {
+		return 0, fmt.Errorf("an assignment-resolution order must be a close")
+	}
+	if order.Type != "limit" || order.LimitPrice == nil || !isPositiveFinite(*order.LimitPrice) {
+		return 0, fmt.Errorf("an assignment-resolution order must be a limit order with a positive price")
+	}
+	if order.Symbol != grant.Symbol || order.Side != grant.Side || (order.Side != "buy" && order.Side != "sell") {
+		return 0, fmt.Errorf("assignment-resolution order does not match its grant")
+	}
+	if order.Qty > grant.Qty+1e-9 {
+		return 0, fmt.Errorf("assignment-resolution order exceeds the granted quantity")
+	}
+	if !p.hasMatchingExposure(order.Symbol, order.Side, order.Qty, snapshot.Positions) {
+		return 0, fmt.Errorf("assignment-resolution order is not backed by matching broker stock exposure")
+	}
+	return 0, nil
 }
 
 func (p TradingPolicy) ValidateOptionsOrder(order *interfaces.OptionsOrder, snapshot BrokerRiskSnapshot) (float64, error) {

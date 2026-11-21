@@ -92,6 +92,25 @@ type Order struct {
 	SubmissionAttempted bool        // broker call may have occurred; never blind-retry when true
 	Metadata            string      `json:"metadata,omitempty"` // server-produced audit metadata; never credentials
 	OptionLegs          []OptionLeg `json:"option_legs,omitempty"`
+
+	// ResolverGrant is the server-created authority for one assignment-resolution stock reduction (Phase C, D10/A1). It is
+	// never serialised, so no HTTP or agent request can carry it, and the trading service honours it only when it is the
+	// exact grant it issued itself.
+	ResolverGrant *AssignmentResolutionGrant `json:"-"`
+}
+
+// AssignmentResolutionGrant authorises exactly one reduction of stock that an option assignment or exercise left in an
+// options-only sandbox: a sell of assigned long stock or a buy to cover assigned short stock, up to Qty shares, for one
+// group. It does not switch on stock trading for the agent.
+type AssignmentResolutionGrant struct {
+	Token           string
+	BrokerAccountID string
+	TenantID        string
+	SandboxID       string
+	GroupID         string
+	Symbol          string
+	Side            string
+	Qty             float64
 }
 
 type OrderRequest struct {

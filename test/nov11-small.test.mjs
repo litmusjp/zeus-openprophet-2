@@ -107,7 +107,7 @@ test('openings above 10 contracts get a specific local error; closes and 10-cont
   await invoke({ ...base, side: 'sell', position_intent: 'sell_to_close', quantity: 14 });
   assert.equal(calls.length, 2, 'a closing order is never limited here');
   assert.ok((await invoke({ ...base, quantity: 11 })).isError, 'a missing intent is treated as an opening, like isOpeningIntent');
-  assert.ok(source.includes('Place one single-leg OCC options order (openings: 1-10 contracts)'));
+  assert.ok(source.includes('Place one OCC options order: a single leg or, with the optional `legs`, one atomic two-leg debit vertical (openings: 1-10 contracts, or 1-10 spread units for a vertical)'));
 });
 
 // ── C3, C5, C6: rendered prompt text ─────────────────────────────────────────────────────────

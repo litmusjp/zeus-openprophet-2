@@ -1527,6 +1527,7 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
       getStrategyById,
       heartbeatIntervalsForced: Boolean(getSandbox(sandboxId)?.heartbeat?.forceHeartbeatIntervals),
       tradingGuidance: getTradingGuidanceForSandbox(sandboxId),
+      allowedStructures: getPermissionsForSandbox(sandboxId)?.allowedStructures,
     });
     res.json({ prompt, agentId: agentConfig.id, agentName: agentConfig.name, sandboxId });
   } catch (err) { res.status(500).json({ error: err.message }); }

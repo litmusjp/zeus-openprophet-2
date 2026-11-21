@@ -159,7 +159,7 @@ const factNumber = value => (typeof value === 'number' && Number.isFinite(value)
  * explain why an assessment can fail and never create a trade, a rule or a reason to skip one. Returns '' when the policy
  * carried no facts (nothing is stated that is not known).
  */
-export function renderAlphaDeskPolicyFacts(facts) {
+export function renderAlphaDeskPolicyFacts(facts, { twoLeg = false } = {}) {
   if (!facts || typeof facts !== 'object' || Array.isArray(facts)) return '';
   const score = factNumber(facts.minimum_signal_score);
   const confidence = factNumber(facts.minimum_catalyst_confidence);
@@ -170,7 +170,7 @@ export function renderAlphaDeskPolicyFacts(facts) {
   if (minDte !== null && maxDte !== null) parts.push(`option expiry ${minDte} to ${maxDte} calendar days`);
   if (facts.require_price_action_confirmation === true) parts.push('price must be on the matching side of today\'s open');
   const cap = factNumber(facts.op2_option_spread_cap_pct);
-  if (cap !== null) parts.push(`OP2 refuses an opening whose spread, on AlphaDesk's own quote of the exact contract, is above ${cap}% (that quote can be wider than the one you saw)`);
+  if (cap !== null) parts.push(`OP2 refuses an opening whose spread, on AlphaDesk's own quote of the exact contract${twoLeg ? ' (for a two-leg order, of its widest leg)' : ''}, is above ${cap}% (that quote can be wider than the one you saw)`);
   if (!parts.length) return '';
   const lines = [`\nALPHADESK POLICY FACTS (read now; information only, never order authority): ${parts.join('; ')}. These settings are shared by every agent that uses this AlphaDesk key.`];
   if (facts.score_profile === 'catalyst_momentum_v2') {

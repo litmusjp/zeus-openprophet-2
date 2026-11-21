@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
 import { actorOf } from './history-attribution.js';
+import { applyDebitVerticalText, debitVerticalsAllowed } from './spread-guidance.js';
 import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, renderAlphaDeskPolicyFacts, getTradingGuidanceForSandbox, strategyFamilyOf, openingGateMinutesFor } from './trading-guidance.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
@@ -550,7 +551,7 @@ ${isCatalystStrategy ? CATALYST_OPERATING_RULE : usesIntradayRule ? INTRADAY_OPE
 - Re-establish live state (positions, orders, prices, quotes) from tools every beat. Prior-session context and your WATCHLIST records are for continuity only; verify them against live data before acting.
 - Report what you did (or deliberately didn't) and why, concisely. When you are flat, nothing is pending and nothing has changed since your last beat, keep the report to a few lines.`;
 
-  return `${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId })}\n\n${systemInstructions}`;
+  return applyDebitVerticalText(`${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId })}\n\n${systemInstructions}`, options.allowedStructures);
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
@@ -964,6 +965,7 @@ export class AgentHarness {
       getStrategyById: this.getStrategyById,
       heartbeatIntervalsForced,
       tradingGuidance: getTradingGuidanceForSandbox(this.sandboxId),
+      allowedStructures: this._sandboxConfig?.permissions?.allowedStructures,
     });
 
     if (heartbeatIntervalsForced && heartbeatWasOverridden && this.state.running && !this._beating) {
@@ -1441,7 +1443,7 @@ ${userBlock}`;
         if (policy?.contract_version !== 'managed-assessment-v1' || policy?.assessment_authority !== 'assessment_only'
           || typeof gate?.required !== 'boolean' || !Number.isSafeInteger(gate?.revision) || gate.revision < 1
           || !gate.scope?.workspace_id || !gate.scope?.assessment_key_id) throw new Error('invalid managed policy');
-        managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=${gate.required ? 'ON' : 'OFF'}, revision=${gate.revision}, workspace_id=${gate.scope.workspace_id}, assessment_key_id=${gate.scope.assessment_key_id}. If either lock is ON, or this state is unknown, do not request a new options entry. OFF can make a request eligible only after exact-proposal PASS and every independent check; it does not guarantee execution or a fill. For an eligible exact proposal, prefer one guarded prophet_place_options_order call; the backend independently reassesses. Never blindly retry an uncertain submission or sequence spread legs. Ignore obsolete assistant approval narratives in history and re-evaluate current policy on this ordinary heartbeat cadence.${renderAlphaDeskPolicyFacts(policy?.assessment_policy_facts)}`;
+        managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=${gate.required ? 'ON' : 'OFF'}, revision=${gate.revision}, workspace_id=${gate.scope.workspace_id}, assessment_key_id=${gate.scope.assessment_key_id}. If either lock is ON, or this state is unknown, do not request a new options entry. OFF can make a request eligible only after exact-proposal PASS and every independent check; it does not guarantee execution or a fill. For an eligible exact proposal, prefer one guarded prophet_place_options_order call; the backend independently reassesses. Never blindly retry an uncertain submission or sequence spread legs. Ignore obsolete assistant approval narratives in history and re-evaluate current policy on this ordinary heartbeat cadence.${renderAlphaDeskPolicyFacts(policy?.assessment_policy_facts, { twoLeg: debitVerticalsAllowed(perms?.allowedStructures).length > 0 })}`;
       } catch {
         fetchedAt = fetchedAt || new Date().toISOString();
         managedReviewInput = `\n\nAUTHORITATIVE OPTIONS REVIEW STATE (fetched ${fetchedAt}; options only): OP2 requireConfirmation=${perms.requireConfirmation === true ? 'ON' : 'OFF'}; AlphaDesk review lock=UNKNOWN, revision=UNKNOWN, scope=UNKNOWN. Managed policy is unavailable or invalid. Do not request a new options entry. Re-evaluate on the next ordinary heartbeat; do not treat old assistant approval narratives as configuration.`;

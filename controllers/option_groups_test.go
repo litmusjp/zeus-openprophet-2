@@ -360,3 +360,28 @@ func TestGetOptionGroupsShowsTheInformationOnlyAdvisory(t *testing.T) {
 		t.Fatal("an advisory is not a broken group and changes nothing")
 	}
 }
+
+// Phase C2: a spread intent can only be retried with its identical legs. A retry that drops `legs` (so that the long leg would
+// go out as a single-leg order at the net-debit price) does not match the persisted intent and is refused.
+func TestSpreadIntentRetryWithoutLegsOrWithOtherLegsIsRefused(t *testing.T) {
+	price := 3.0
+	legs := []interfaces.OptionLeg{gLeg(gCallLow, "buy", "buy_to_open"), gLeg(gCallHigh, "sell", "sell_to_open")}
+	existing := &interfaces.Order{
+		Symbol: gCallLow, Underlying: "AAPL", Qty: 2, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day",
+		LimitPrice: &price, OptionLegs: legs,
+	}
+	same := OptionsOrderRequest{Symbol: gCallLow, Underlying: "AAPL", Qty: 2, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: &price, OptionLegs: legs}
+	if !plannedOptionsMatch(existing, same) {
+		t.Fatal("an identical retry must match the persisted spread intent")
+	}
+	noLegs := same
+	noLegs.OptionLegs = nil
+	if plannedOptionsMatch(existing, noLegs) {
+		t.Fatal("a retry without legs must not match a spread intent (it would send the long leg alone)")
+	}
+	other := same
+	other.OptionLegs = []interfaces.OptionLeg{gLeg(gCallLow, "buy", "buy_to_open"), gLeg("AAPL261218C00220000", "sell", "sell_to_open")}
+	if plannedOptionsMatch(existing, other) {
+		t.Fatal("a retry with different legs must not match")
+	}
+}

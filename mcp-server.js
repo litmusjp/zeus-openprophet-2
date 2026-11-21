@@ -19,6 +19,7 @@ import { futureHistoricalBarsError } from './historical-bars-time.js';
 import { getRangeConfirmation } from './range-confirmation.js';
 import { getEarningsDates } from './earnings-batching.js';
 import { normalizeOptionLimitPrice } from './option-price.js';
+import { spreadLegsRequest } from './spread-legs.js';
 import { sessionFields, openingGateDecision, parseMinOpeningMinutes } from './session-clock.js';
 import { ordersFrom, isOptionExitOrder, buildPostCancelCheck, unverifiedPostCancelCheck } from './cancel-check.js';
 
@@ -977,7 +978,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'place_options_order',
-        description: 'Place one single-leg OCC options order (openings: 1-10 contracts). Agent tool does not expose atomic multi-leg execution; never simulate a spread with sequential single-leg orders. Reconcile option positions first; long entries use buy_to_open and reductions use sell_to_close on the same OCC contract for the broker-reconciled remaining quantity. Supply exact-contract timestamped bid/ask and sizes from the chain; missing evidence blocks entry. Managed-position tools are equities-only and do not provide broker-held option stops or OCO. AlphaDesk assessment applies only to new exposure; FAIL/UNAVAILABLE blocks openings but not reducing a long. Backend controls still apply. Accepted/new/open acknowledge only; positive filled quantity confirms execution. A PASS response also carries assessment_signal_score, assessment_catalyst_confidence (the 0-1 confidence itself, not its weighted share of the score), assessment_observed_spread_pct (AlphaDesk worst-leg spread) and assessment_score_profile; record these values instead of looking them up. They describe the assessment, not a fill.',
+        description: 'Place one single-leg OCC options order (openings: 1-10 contracts). A two-leg debit vertical (bull call debit or bear put debit, same expiry, 1:1) goes through the optional legs parameter as ONE atomic order and only when this sandbox allows that structure: give both legs with the quote price you used for each, repeat legs[0] in symbol, side and position_intent, set order_type limit, limit_price = the net debit per unit when opening or the net credit per unit when closing, and quantity = spread units. Close a spread as one order with both legs; one leg of an open spread cannot be closed on its own. Never simulate a spread with sequential single-leg orders. Reconcile option positions first; long entries use buy_to_open and reductions use sell_to_close on the same OCC contract for the broker-reconciled remaining quantity. Supply exact-contract timestamped bid/ask and sizes from the chain; missing evidence blocks entry. Managed-position tools are equities-only and do not provide broker-held option stops or OCO. AlphaDesk assessment applies only to new exposure; FAIL/UNAVAILABLE blocks openings but not reducing a long. Backend controls still apply. Accepted/new/open acknowledge only; positive filled quantity confirms execution. A PASS response also carries assessment_signal_score, assessment_catalyst_confidence (the 0-1 confidence itself, not its weighted share of the score), assessment_observed_spread_pct (AlphaDesk worst-leg spread) and assessment_score_profile; record these values instead of looking them up. They describe the assessment, not a fill.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1031,6 +1032,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             market_scanner_features: {
               type: 'object',
               description: 'Provider-owned scanner features for the exact trade, if available; do not invent values or turn a missing score into a zero score.',
+            },
+            legs: {
+              type: 'array',
+              description: 'Optional: exactly two legs of a same-expiry 1:1 debit vertical, submitted as one atomic order. Omit for a single-leg order.',
+              minItems: 2,
+              maxItems: 2,
+              items: {
+                type: 'object',
+                properties: {
+                  symbol: { type: 'string', description: 'OCC symbol of the leg' },
+                  side: { type: 'string', enum: ['buy', 'sell'] },
+                  position_intent: { type: 'string', enum: ['buy_to_open', 'buy_to_close', 'sell_to_open', 'sell_to_close'] },
+                  ratio_qty: { type: 'number', description: 'Must be 1' },
+                  price: { type: 'number', description: 'The positive quote price you used for this leg' },
+                },
+                required: ['symbol', 'side', 'position_intent', 'price'],
+              },
             },
           },
           required: ['client_order_id', 'symbol', 'underlying', 'quantity', 'side', 'position_intent', 'order_type'],
@@ -2240,6 +2258,13 @@ ${allNews.map((article, i) =>
             isError: true,
           };
         }
+        // Optional two-leg debit vertical (Phase C). Single-leg calls skip this entirely and behave exactly as before.
+        let spreadLegs;
+        if (args.legs !== undefined) {
+          const checked = spreadLegsRequest(args);
+          if (checked.error) return { content: [{ type: 'text', text: JSON.stringify({ error: checked.error, category: 'local_validation', execution_confirmed: false, filled_qty: 0 }) }], isError: true };
+          spreadLegs = checked;
+        }
         // Opening-range backstop. The minimum comes only from the harness environment (set for the news-catalyst
         // strategy from its own range length); it is never read from tool arguments. Reducing orders are unaffected.
         if (isOpeningIntent(args.position_intent)) {
@@ -2280,6 +2305,10 @@ ${allNews.map((article, i) =>
           ...(args.market_scanner_features && { market_scanner_features: args.market_scanner_features }),
           ...(capRevision !== undefined && { cap_revision: capRevision })
         };
+        if (spreadLegs) {
+          requestData.option_legs = spreadLegs.legs;
+          requestData.price_kind = spreadLegs.priceKind;
+        }
         const data = await callTradingBot('/options/order', 'POST', requestData);
         if (isOpeningIntent(args.position_intent)) void autoStoreSetup({ ...args, ...data }, args.side || 'buy');
         return orderResponse(data, args);

@@ -254,7 +254,7 @@ func TestAnOmittedPriceKindIsCanonicalisedNeverDispatchedAsTheWrongKind(t *testi
 		t.Fatalf("an opening with the kind omitted must be sent as a debit (positive), got %v err=%v", req.LimitPrice, err)
 	}
 	// Policy and adapter agree: the same canonical kind admits and dispatches the order.
-	group := OptionGroupRisk{ID: "g", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600}
+	group := OptionGroupRisk{ID: "g", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600, LegAllocations: map[string]float64{callLow: 2, callHigh: -2}}
 	if _, err := spreadPolicy("").ValidateOptionsOrder(closing, spreadSnapshot(group)); err != nil {
 		t.Fatalf("a close with the kind omitted must be admitted as a credit: %v", err)
 	}

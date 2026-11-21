@@ -179,7 +179,7 @@ func TestSpreadOpeningRefusals(t *testing.T) {
 }
 
 func TestSpreadCloseIsAlwaysAllowedButMustBeBackedByTheGroup(t *testing.T) {
-	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600, StructureID: StructureBullCallDebit}
+	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600, StructureID: StructureBullCallDebit, LegAllocations: map[string]float64{callLow: 2, callHigh: -2}}
 	// Permission off (the default) still lets a valid grouped close through.
 	if _, err := spreadPolicy("").ValidateOptionsOrder(bullCallClose(), spreadSnapshot(group)); err != nil {
 		t.Fatalf("a valid grouped reducing close must be allowed with the permission off: %v", err)
@@ -215,7 +215,7 @@ func TestSpreadCloseIsAlwaysAllowedButMustBeBackedByTheGroup(t *testing.T) {
 }
 
 func TestSingleLegCloseOfAGroupedLegIsRefused(t *testing.T) {
-	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600}
+	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600, LegAllocations: map[string]float64{callLow: 2, callHigh: -2}}
 	price := 4.0
 	single := &interfaces.OptionsOrder{Symbol: callLow, Underlying: "AAPL", Qty: 2, Side: "sell", PositionIntent: "sell_to_close", Type: "limit", TimeInForce: "day", LimitPrice: &price}
 	if _, err := spreadPolicy("").ValidateOptionsOrder(single, spreadSnapshot(group)); err == nil || !strings.Contains(err.Error(), "cannot be closed by a single-leg order") {
@@ -238,7 +238,7 @@ func TestGroupedLegsAreCountedOnceThroughTheGroup(t *testing.T) {
 	// and the legs of the spread are never double counted as two positions.
 	p := spreadPolicy("bull_call_debit,long_call,long_put")
 	p.MaxOpenPositions = 2
-	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600}
+	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600, LegAllocations: map[string]float64{callLow: 2, callHigh: -2}}
 	snap := spreadSnapshot(group)
 	snap.Positions = append(snap.Positions, &interfaces.Position{Symbol: "MSFT261218C00300000", Qty: 1, Side: "long", MarketValue: 500})
 	price := 2.0
@@ -256,7 +256,7 @@ func TestGroupedLegsAreCountedOnceThroughTheGroup(t *testing.T) {
 func TestSpreadMaxLossCountsAgainstTheDeployedCap(t *testing.T) {
 	p := spreadPolicy("bull_call_debit")
 	p.MaxDeployedPct = 1 // 1% of 100,000 = 1,000
-	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 900}
+	group := OptionGroupRisk{ID: "grp-1", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 900, LegAllocations: map[string]float64{callLow: 2, callHigh: -2}}
 	snap := spreadSnapshot(group)
 	// A new spread of 600 max loss on top of the group's 900 is 1,500 > 1,000: refused. The legs' market values (800 and -400) are not what is counted.
 	other := bullCallOpen()
@@ -264,5 +264,86 @@ func TestSpreadMaxLossCountsAgainstTheDeployedCap(t *testing.T) {
 	other.Legs = []interfaces.OptionLeg{leg("AAPL261218C00220000", "buy", "buy_to_open"), leg("AAPL261218C00230000", "sell", "sell_to_open")}
 	if _, err := p.ValidateOptionsOrder(other, snap); err == nil || !strings.Contains(err.Error(), "max deployed percentage") {
 		t.Fatalf("a group's max loss must count against the deployed cap, got %v", err)
+	}
+}
+
+func ownedGroup(id string, units float64, legs ...string) OptionGroupRisk {
+	allocations := map[string]float64{}
+	for i, symbol := range legs {
+		qty := units
+		if i%2 == 1 {
+			qty = -units
+		}
+		allocations[symbol] = qty
+	}
+	return OptionGroupRisk{ID: id, LegSymbols: legs, OpenUnits: units, MaxLoss: units * 300, LegAllocations: allocations}
+}
+
+func TestGroupPlusStandaloneSurplusOfTheSameContractBothCountAgainstTheDeployedCap(t *testing.T) {
+	// Hermes C03: the group owns 2 of the 5 contracts held; the other 3 are ordinary exposure that must still count.
+	p := spreadPolicy("bull_call_debit,long_call,long_put")
+	p.MaxDeployedPct = 2 // 2,000 of 100,000
+	price := 5.0
+	single := &interfaces.OptionsOrder{Symbol: "NVDA261218C00150000", Underlying: "NVDA", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: &price}
+	group := ownedGroup("grp-1", 2, callLow, callHigh)
+	withSurplus := spreadSnapshot(group)
+	withSurplus.Positions = []*interfaces.Position{{Symbol: callLow, Qty: 5, Side: "long", MarketValue: 2000}, {Symbol: callHigh, Qty: -2, Side: "short", MarketValue: -400}}
+	// group 600 + surplus 3/5 of 2,000 = 1,200 + new 500 = 2,300 > 2,000
+	if _, err := p.ValidateOptionsOrder(single, withSurplus); err == nil || !strings.Contains(err.Error(), "max deployed percentage") {
+		t.Fatalf("the standalone surplus must count against the deployed cap, got %v", err)
+	}
+	// Without the surplus (the group owns every contract held) the same order fits: 600 + 500 = 1,100.
+	owned := spreadSnapshot(group)
+	owned.Positions = []*interfaces.Position{{Symbol: callLow, Qty: 2, Side: "long", MarketValue: 800}, {Symbol: callHigh, Qty: -2, Side: "short", MarketValue: -400}}
+	if _, err := p.ValidateOptionsOrder(single, owned); err != nil {
+		t.Fatalf("a disjoint two-leg group still counts once at its net-debit maximum loss: %v", err)
+	}
+}
+
+func TestEveryDistinctGroupConsumesAPositionSlotAndOverlapIsRefused(t *testing.T) {
+	// Hermes C03: a second new group may not skip the position-count test by reusing a known leg, and overlapping allocations are refused.
+	p := spreadPolicy("bull_call_debit,long_call,long_put")
+	p.MaxOpenPositions = 1
+	group := ownedGroup("grp-1", 2, callLow, callHigh)
+	snap := spreadSnapshot(group)
+	disjoint := bullCallOpen()
+	disjoint.Symbol = "AAPL261218C00220000"
+	disjoint.Legs = []interfaces.OptionLeg{leg("AAPL261218C00220000", "buy", "buy_to_open"), leg("AAPL261218C00230000", "sell", "sell_to_open")}
+	if _, err := p.ValidateOptionsOrder(disjoint, snap); err == nil || !strings.Contains(err.Error(), "max open positions") {
+		t.Fatalf("a distinct new group must consume a slot and breach a cap of 1, got %v", err)
+	}
+	overlapping := bullCallOpen() // shares callLow with the open group
+	if _, err := p.ValidateOptionsOrder(overlapping, snap); err == nil || !strings.Contains(err.Error(), "already belongs to open spread group") {
+		t.Fatalf("an overlapping allocation must be refused, got %v", err)
+	}
+	// Two groups that each claim the same broker contracts are clamped to the quantity actually held: no double count.
+	other := ownedGroup("grp-2", 2, callLow, callHigh)
+	p.MaxOpenPositions = 10
+	p.MaxDeployedPct = 80
+	two := spreadSnapshot(group, other)
+	if _, err := p.ValidateOptionsOrder(disjoint, two); err != nil {
+		t.Fatalf("clamped overlapping claims must still leave the account usable: %v", err)
+	}
+}
+
+func TestAWorkingCloseReservesItsUnitsAgainstAnotherClose(t *testing.T) {
+	// Hermes C04: two units, one close already working for both; another close must be refused, one that fits the remainder admitted.
+	group := ownedGroup("grp-1", 2, callLow, callHigh)
+	group.ReservedCloseUnits = 2
+	if _, err := spreadPolicy("").ValidateOptionsOrder(bullCallClose(), spreadSnapshot(group)); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("a second full-size close must be refused while the first owns the units, got %v", err)
+	}
+	group.ReservedCloseUnits = 1
+	if _, err := spreadPolicy("").ValidateOptionsOrder(bullCallClose(), spreadSnapshot(group)); err == nil {
+		t.Fatal("a 2-unit close must be refused when only 1 unit is unreserved")
+	}
+	one := bullCallClose()
+	one.Qty = 1
+	if _, err := spreadPolicy("").ValidateOptionsOrder(one, spreadSnapshot(group)); err != nil {
+		t.Fatalf("a close that fits the unreserved remainder must be admitted: %v", err)
+	}
+	group.ReservedCloseUnits = 0
+	if _, err := spreadPolicy("").ValidateOptionsOrder(bullCallClose(), spreadSnapshot(group)); err != nil {
+		t.Fatalf("with nothing reserved the full close is admitted: %v", err)
 	}
 }

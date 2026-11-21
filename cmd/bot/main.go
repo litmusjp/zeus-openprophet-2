@@ -181,45 +181,13 @@ func main() {
 			return pending, nil
 		})
 		// The durable multi-leg group ledger feeds the risk snapshot (grouped legs counted once, single-leg close of a grouped leg refused).
-		tradingService.SetOptionGroupProvider(func(context.Context) ([]services.OptionGroupRisk, error) {
-			states, err := storageService.OptionGroupStates()
+		tradingService.SetOptionGroupProvider(func(_ context.Context, excludeClientOrderID string) ([]services.OptionGroupRisk, error) {
+			states, err := storageService.OptionGroupStatesExcluding(excludeClientOrderID)
 			if err != nil {
 				return nil, err
 			}
 			return services.OptionGroupRisksFromStates(states)
 		})
-		if executionEnabled {
-			// The assignment resolver (D10): reconciles multi-leg groups against the broker and reduces stock that an option
-			// assignment left behind, nothing else. It does nothing while no group exists, and never places an order outside
-			// the regular session. It runs only in an execution-capable process.
-			resolver := &services.AssignmentResolver{Store: storageService, Orders: storageService, Broker: tradingService}
-			go func() {
-				ticker := time.NewTicker(time.Minute)
-				defer ticker.Stop()
-				for range ticker.C {
-					func() {
-						defer func() {
-							if recovered := recover(); recovered != nil {
-								logger.WithField("panic", recovered).Error("Assignment resolver pass panicked; it will run again next minute")
-							}
-						}()
-						ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-						defer cancel()
-						report, err := resolver.ResolveOnce(ctx)
-						if err != nil {
-							logger.WithError(err).Warn("Assignment resolver pass failed")
-							return
-						}
-						for _, action := range report.Actions {
-							logger.WithFields(logrus.Fields{"group": action.GroupID, "symbol": action.Symbol, "outcome": action.Outcome, "client_order_id": action.ClientID}).Info("Assignment resolver: " + action.Detail)
-						}
-						for _, id := range report.Reconcile.NewlyBroken {
-							logger.WithField("group", id).Warn("Spread group marked broken; new spread entries are refused until it is resolved")
-						}
-					}()
-				}
-			}()
-		}
 		accountKey := os.Getenv("ALPACA_ACCOUNT_ID")
 		accountHash := sha256.Sum256([]byte(accountKey))
 		lockPath := filepath.Join(filepath.Dir(filepath.Dir(cfg.DatabasePath)), "account-"+hex.EncodeToString(accountHash[:])[:24]+".opening.lock")
@@ -295,6 +263,43 @@ func main() {
 		}
 	} else {
 		logger.Error("Trading execution remains blocked because the trading service is unavailable")
+	}
+
+	if executionEnabled && tradingService != nil && storageService != nil {
+		// The assignment resolver (D10): reconciles multi-leg groups against the broker and reduces stock that an option
+		// assignment left behind, nothing else. It does nothing while no group exists, and never places an order outside
+		// the regular session. It runs only in an execution-capable process.
+		resolver := &services.AssignmentResolver{Store: storageService, Orders: storageService, Broker: tradingService,
+			// Fills of group entries, closes and resolver orders reach the durable ledger through the validated order-reconciliation owner
+			// during normal operation (it runs only while a live group exists), not only at startup.
+			Refresh: func(ctx context.Context) { orderController.ReconcileOpenOrders(ctx) },
+		}
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				func() {
+					defer func() {
+						if recovered := recover(); recovered != nil {
+							logger.WithField("panic", recovered).Error("Assignment resolver pass panicked; it will run again next minute")
+						}
+					}()
+					ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+					defer cancel()
+					report, err := resolver.ResolveOnce(ctx)
+					if err != nil {
+						logger.WithError(err).Warn("Assignment resolver pass failed")
+						return
+					}
+					for _, action := range report.Actions {
+						logger.WithFields(logrus.Fields{"group": action.GroupID, "symbol": action.Symbol, "outcome": action.Outcome, "client_order_id": action.ClientID}).Info("Assignment resolver: " + action.Detail)
+					}
+					for _, id := range report.Reconcile.NewlyBroken {
+						logger.WithField("group", id).Warn("Spread group marked broken; new spread entries are refused until it is resolved")
+					}
+				}()
+			}
+		}()
 	}
 
 	// Start background tasks

@@ -1,7 +1,9 @@
 package database
 
 import (
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"prophet-trader/interfaces"
@@ -189,5 +191,133 @@ func TestOptionGroupSurvivesARestart(t *testing.T) {
 	}
 	if s.EntryFilled != 3 || s.CloseFilled != 1 || s.OpenUnits != 2 || !s.PendingClose {
 		t.Fatalf("units must be derived identically after a restart: %+v", s)
+	}
+}
+
+func TestReservedCloseUnitsFollowTheWorkingClosesAndExcludeTheCandidate(t *testing.T) {
+	storage, _ := newGroupStorage(t, "reserve.db")
+	if err := storage.SaveOptionGroup(testGroup("grp-q1")); err != nil {
+		t.Fatal(err)
+	}
+	saveOrderFilled(t, storage, "grp-q1", "filled", 3, 3)
+	reserved := func(exclude string) (float64, float64) {
+		states, err := storage.OptionGroupStatesExcluding(exclude)
+		if err != nil || len(states) != 1 {
+			t.Fatalf("states=%d err=%v", len(states), err)
+		}
+		return states[0].ReservedCloseUnits, states[0].OpenUnits
+	}
+	if r, o := reserved(""); r != 0 || o != 3 {
+		t.Fatalf("no close yet: reserved=%v open=%v", r, o)
+	}
+	// A close recorded before it is persisted reserves every open unit (its quantity is unknown), except for itself.
+	if err := storage.AddOptionGroupCloseOrder("grp-q1", "grp-q1-close-a"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := reserved(""); r != 3 {
+		t.Fatalf("an unpersisted close must reserve all open units, got %v", r)
+	}
+	if r, _ := reserved("grp-q1-close-a"); r != 0 {
+		t.Fatalf("the candidate must never reserve against itself, got %v", r)
+	}
+	// Accepted for 3 with 1 filled: 2 unfilled units stay reserved; open units drop by the fill.
+	saveOrderFilled(t, storage, "grp-q1-close-a", "partially_filled", 3, 1)
+	if r, o := reserved(""); r != 2 || o != 2 {
+		t.Fatalf("a partial close must reserve its unfilled 2 of the 2 open units, got reserved=%v open=%v", r, o)
+	}
+	// A second close registered alongside is itself reserved (clamped to what is open).
+	if err := storage.AddOptionGroupCloseOrder("grp-q1", "grp-q1-close-b"); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := reserved("grp-q1-close-b"); r != 2 {
+		t.Fatalf("with the second close excluded only the first reserves: %v", r)
+	}
+	// A terminal cancel releases the remainder: the 1 filled unit stays closed, nothing is reserved.
+	saveOrderFilled(t, storage, "grp-q1-close-a", "canceled", 3, 1)
+	saveOrderFilled(t, storage, "grp-q1-close-b", "canceled", 2, 0)
+	if r, o := reserved(""); r != 0 || o != 2 {
+		t.Fatalf("after terminal cancels nothing is reserved and 2 units remain open: reserved=%v open=%v", r, o)
+	}
+}
+
+func TestAddOptionGroupCloseOrderNeverLosesIdsUnderOverlap(t *testing.T) {
+	storage, _ := newGroupStorage(t, "overlap.db")
+	if err := storage.SaveOptionGroup(testGroup("grp-o1")); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := storage.AddOptionGroupCloseOrder("grp-o1", fmt.Sprintf("grp-o1-close-%d", i)); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	states, _ := storage.OptionGroupStates()
+	if len(states[0].CloseOrders) != 12 {
+		t.Fatalf("no close id may be lost under overlapping registrations, got %d of 12", len(states[0].CloseOrders))
+	}
+}
+
+func TestResolverClaimIsAtomicPerUnderlyingAndSurvivesARestart(t *testing.T) {
+	storage, path := newGroupStorage(t, "claim.db")
+	for _, id := range []string{"grp-c1", "grp-c2"} {
+		if err := storage.SaveOptionGroup(testGroup(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Barrier-synchronised overlapping claims by two groups of the same underlying: exactly one wins.
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wins := make([]bool, 2)
+	owners := make([]string, 2)
+	for i, id := range []string{"grp-c1", "grp-c2"} {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			<-start
+			ok, owner, err := storage.ClaimResolverOperation(id, "resolver-"+id+"-1")
+			if err != nil {
+				t.Error(err)
+			}
+			wins[i], owners[i] = ok, owner
+		}(i, id)
+	}
+	close(start)
+	wg.Wait()
+	if wins[0] == wins[1] {
+		t.Fatalf("exactly one overlapping claim may win: %v", wins)
+	}
+	winner, loser := "grp-c1", "grp-c2"
+	if wins[1] {
+		winner, loser = loser, winner
+	}
+	// The claim is durable across a restart and the loser is still refused while the owner's order is missing or working.
+	storage.Close()
+	reopened, err := NewLocalStorage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if g, _ := reopened.GetOptionGroup(winner); g.ResolverClientID != "resolver-"+winner+"-1" {
+		t.Fatalf("the winning claim must survive a restart, got %q", g.ResolverClientID)
+	}
+	if ok, owner, _ := reopened.ClaimResolverOperation(loser, "resolver-"+loser+"-1"); ok || owner != "resolver-"+winner+"-1" {
+		t.Fatalf("the loser must be refused while the owner's order is not terminal: ok=%v owner=%q", ok, owner)
+	}
+	saveOrderFilled(t, reopened, "resolver-"+winner+"-1", "accepted", 200, 0)
+	if ok, _, _ := reopened.ClaimResolverOperation(loser, "resolver-"+loser+"-1"); ok {
+		t.Fatal("a working owner order must still block the other group")
+	}
+	saveOrderFilled(t, reopened, "resolver-"+winner+"-1", "canceled", 200, 0)
+	if ok, _, err := reopened.ClaimResolverOperation(loser, "resolver-"+loser+"-1"); !ok || err != nil {
+		t.Fatalf("once the owner's order is terminal the other group may claim: ok=%v err=%v", ok, err)
+	}
+	// Re-claiming the same id is idempotent.
+	if ok, _, _ := reopened.ClaimResolverOperation(loser, "resolver-"+loser+"-1"); !ok {
+		t.Fatal("a repeated claim of the same operation must succeed")
 	}
 }

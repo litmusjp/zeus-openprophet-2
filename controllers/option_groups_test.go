@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
+	"prophet-trader/services"
 )
 
 // Phase C, Step 4: the controller side of the group ledger and the multi-leg order matching.
@@ -250,5 +252,84 @@ func TestGetOptionGroupsIsReadOnlyStatus(t *testing.T) {
 	after, _ := storage.GetOptionGroup("grp-s1")
 	if before.Revision != after.Revision {
 		t.Fatal("reading the status must not write anything")
+	}
+}
+
+func brokerSpreadOrder(clientID, status string, filled float64, legs []interfaces.OptionLeg) *interfaces.Order {
+	avg := 3.0
+	order := &interfaces.Order{ID: "broker-" + clientID, ClientOrderID: clientID, Qty: 2, Type: "limit", TimeInForce: "day", Status: status, FilledQty: filled, AssetClass: "us_option", Purpose: "entry", OptionLegs: legs}
+	if filled > 0 {
+		order.FilledAvgPrice = &avg
+	}
+	return order
+}
+
+func TestOrdinaryReconciliationAdvancesGroupUnitsFromBrokerFills(t *testing.T) {
+	// Hermes C02: an entry acknowledged with zero fills fills later; the validated reconciliation owner persists the fills and
+	// the derived group units (and therefore grouped-leg ownership) advance during normal operation.
+	oc, storage := groupController(t)
+	entry := gEntry("grp-rc1")
+	if _, err := oc.registerSpreadBeforeSubmission(entry); err != nil {
+		t.Fatal(err)
+	}
+	local := &interfaces.Order{ClientOrderID: "grp-rc1", Symbol: gCallLow, Underlying: "AAPL", AssetClass: "us_option", Qty: 2, Side: "buy", Type: "limit", TimeInForce: "day",
+		Status: "accepted", PositionIntent: "buy_to_open", Purpose: "entry", SubmissionAttempted: true, LimitPrice: entry.LimitPrice, OptionLegs: entry.Legs}
+	if err := storage.SaveOrder(local); err != nil {
+		t.Fatal(err)
+	}
+	units := func() float64 {
+		states, err := storage.OptionGroupStates()
+		if err != nil || len(states) != 1 {
+			t.Fatalf("states=%d err=%v", len(states), err)
+		}
+		return states[0].OpenUnits
+	}
+	if units() != 0 {
+		t.Fatalf("an unfilled entry owns nothing, got %v", units())
+	}
+	brokerLegs := []interfaces.OptionLeg{{Symbol: gCallHigh, Side: "sell", PositionIntent: "sell_to_open", RatioQty: 1}, {Symbol: gCallLow, Side: "buy", PositionIntent: "buy_to_open", RatioQty: 1}}
+	trading := &reconciliationTradingService{orders: map[string]*interfaces.Order{"grp-rc1": brokerSpreadOrder("grp-rc1", "partially_filled", 1, brokerLegs)}}
+	oc = NewOrderController(trading, nil, storage)
+	if reconciled, skipped := oc.ReconcileOpenOrders(context.Background()); reconciled != 1 || skipped != 0 {
+		t.Fatalf("the partial fill must be merged: reconciled=%d skipped=%d", reconciled, skipped)
+	}
+	if units() != 1 {
+		t.Fatalf("a partial entry fill must advance the group to 1 open unit, got %v", units())
+	}
+	trading.orders["grp-rc1"] = brokerSpreadOrder("grp-rc1", "filled", 2, brokerLegs)
+	if reconciled, _ := oc.ReconcileOpenOrders(context.Background()); reconciled != 1 {
+		t.Fatalf("the full fill must be merged, reconciled=%d", reconciled)
+	}
+	if units() != 2 {
+		t.Fatalf("the full entry fill must give 2 open units, got %d", int(units()))
+	}
+	// The group now owns its legs: a single-leg close of one of them is refused by the risk view.
+	states, _ := storage.OptionGroupStates()
+	risks, _ := services.OptionGroupRisksFromStates(states)
+	if len(risks) != 1 || risks[0].LegAllocations[gCallLow] != 2 || risks[0].LegAllocations[gCallHigh] != -2 {
+		t.Fatalf("ownership must follow the fills: %+v", risks)
+	}
+}
+
+func TestReconciliationRefusesABrokerOrderWhoseLegsDiffer(t *testing.T) {
+	oc, storage := groupController(t)
+	entry := gEntry("grp-rc2")
+	if _, err := oc.registerSpreadBeforeSubmission(entry); err != nil {
+		t.Fatal(err)
+	}
+	local := &interfaces.Order{ClientOrderID: "grp-rc2", Symbol: gCallLow, Underlying: "AAPL", AssetClass: "us_option", Qty: 2, Side: "buy", Type: "limit", TimeInForce: "day",
+		Status: "accepted", PositionIntent: "buy_to_open", Purpose: "entry", SubmissionAttempted: true, LimitPrice: entry.LimitPrice, OptionLegs: entry.Legs}
+	if err := storage.SaveOrder(local); err != nil {
+		t.Fatal(err)
+	}
+	other := []interfaces.OptionLeg{{Symbol: gCallLow, Side: "buy", PositionIntent: "buy_to_open", RatioQty: 1}, {Symbol: "AAPL261218C00220000", Side: "sell", PositionIntent: "sell_to_open", RatioQty: 1}}
+	trading := &reconciliationTradingService{orders: map[string]*interfaces.Order{"grp-rc2": brokerSpreadOrder("grp-rc2", "filled", 2, other)}}
+	oc = NewOrderController(trading, nil, storage)
+	if reconciled, skipped := oc.ReconcileOpenOrders(context.Background()); reconciled != 0 || skipped != 1 {
+		t.Fatalf("a leg mismatch must not be applied: reconciled=%d skipped=%d", reconciled, skipped)
+	}
+	states, _ := storage.OptionGroupStates()
+	if states[0].EntryFilled != 0 {
+		t.Fatalf("no fill may be applied from a different order, got %v", states[0].EntryFilled)
 	}
 }

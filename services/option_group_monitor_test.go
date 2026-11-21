@@ -30,12 +30,19 @@ func stockPos(qty float64) *interfaces.Position {
 
 func callSpreadState(units float64) database.OptionGroupState {
 	legs, _ := EncodeGroupLegs([]interfaces.OptionLeg{leg(callLow, "buy", "buy_to_open"), leg(callHigh, "sell", "sell_to_open")})
-	return database.OptionGroupState{Group: &models.DBOptionGroup{GroupID: "gc", Underlying: "AAPL", Structure: StructureBullCallDebit, Status: "open", LegsJSON: legs, NetDebit: 3}, OpenUnits: units}
+	return database.OptionGroupState{Group: &models.DBOptionGroup{GroupID: "gc", Underlying: "AAPL", Structure: StructureBullCallDebit, Status: "open", LegsJSON: legs, NetDebit: 3, StockBaselineSet: true}, OpenUnits: units}
+}
+
+// unbaselinedCall is a group for which no stock position was ever recorded while it was intact (no provenance).
+func unbaselinedCall(units float64) database.OptionGroupState {
+	state := callSpreadState(units)
+	state.Group.StockBaselineSet = false
+	return state
 }
 
 func putSpreadState(units float64) database.OptionGroupState {
 	legs, _ := EncodeGroupLegs([]interfaces.OptionLeg{leg(putHigh, "buy", "buy_to_open"), leg(putLow, "sell", "sell_to_open")})
-	return database.OptionGroupState{Group: &models.DBOptionGroup{GroupID: "gp", Underlying: "AAPL", Structure: StructureBearPutDebit, Status: "open", LegsJSON: legs, NetDebit: 3}, OpenUnits: units}
+	return database.OptionGroupState{Group: &models.DBOptionGroup{GroupID: "gp", Underlying: "AAPL", Structure: StructureBearPutDebit, Status: "open", LegsJSON: legs, NetDebit: 3, StockBaselineSet: true}, OpenUnits: units}
 }
 
 func TestEvaluateOptionGroup(t *testing.T) {
@@ -62,7 +69,7 @@ func TestEvaluateOptionGroup(t *testing.T) {
 		{"a group with no open units owns nothing", callSpreadState(0), []*interfaces.Position{stockPos(-200)}, true, false, false, 0, 0, 0},
 	}
 	for _, tc := range cases {
-		got, err := EvaluateOptionGroup(tc.state, tc.positions)
+		got, err := EvaluateOptionGroup(tc.state, tc.positions, 0)
 		if err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
@@ -76,7 +83,7 @@ func TestEvaluateOptionGroup(t *testing.T) {
 	}
 	bad := callSpreadState(1)
 	bad.Group.LegsJSON = "{nope"
-	if _, err := EvaluateOptionGroup(bad, nil); err == nil || !strings.Contains(err.Error(), "unreadable legs") {
+	if _, err := EvaluateOptionGroup(bad, nil, 0); err == nil || !strings.Contains(err.Error(), "unreadable legs") {
 		t.Errorf("unreadable legs must be an error, got %v", err)
 	}
 }
@@ -93,6 +100,10 @@ func (m *memGroupStore) OptionGroupStates() ([]database.OptionGroupState, error)
 		return nil, m.listErr
 	}
 	return m.states, nil
+}
+
+func (m *memGroupStore) ClaimResolverOperation(groupID, clientID string) (bool, string, error) {
+	return true, "", nil
 }
 
 func (m *memGroupStore) SaveOptionGroup(group *models.DBOptionGroup) error {

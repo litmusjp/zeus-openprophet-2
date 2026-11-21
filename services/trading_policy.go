@@ -46,6 +46,11 @@ type OptionGroupRisk struct {
 	Broken      bool
 	Closing     bool
 	StructureID string
+	// LegAllocations is the signed number of broker contracts of each attached leg that THIS group owns (long positive, short
+	// negative). Only these contracts are allocated to the group; any surplus of the same contract is ordinary exposure.
+	LegAllocations map[string]float64
+	// ReservedCloseUnits is the unfilled quantity of this group's working or uncertain close orders (the candidate close excluded).
+	ReservedCloseUnits float64
 }
 
 type BrokerRiskSnapshot struct {
@@ -286,12 +291,30 @@ func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot Bro
 	deployed := 0.0
 	openPositions := 0
 	knownSymbol := false
+	owned := map[string]float64{} // contracts of each symbol that live groups own (absolute, summed)
+	for _, group := range snapshot.Groups {
+		if group.OpenUnits <= 0 || group.Broken {
+			continue
+		}
+		for leg, qty := range group.LegAllocations {
+			owned[strings.ToUpper(strings.TrimSpace(leg))] += math.Abs(qty)
+		}
+	}
 	for _, position := range snapshot.Positions {
 		if position == nil || position.Qty == 0 {
 			continue
 		}
-		if openGroupOwningSymbol(snapshot.Groups, position.Symbol) != "" {
-			// A grouped leg is counted once, through its group (below), never as a position of its own.
+		key := strings.ToUpper(strings.TrimSpace(position.Symbol))
+		if allocated, ok := owned[key]; ok {
+			// Only the contracts the groups own are counted through their groups; any surplus of the same contract is ordinary
+			// exposure and is counted here at its share of the position value. Claims beyond the broker quantity are clamped.
+			total := math.Abs(position.Qty)
+			residual := total - math.Min(allocated, total)
+			if residual <= 1e-9 {
+				continue
+			}
+			openPositions++
+			deployed += math.Abs(position.MarketValue) * residual / total
 			if strings.EqualFold(position.Symbol, symbol) {
 				knownSymbol = true
 			}
@@ -308,14 +331,10 @@ func (p TradingPolicy) validateCaps(notional float64, opening bool, snapshot Bro
 			// A broken group's surviving legs are ordinary positions counted above; the group itself holds no spread risk.
 			continue
 		}
-		// One open position per group, with its maximum loss as the amount deployed.
+		// One open position per group, with its maximum loss as the amount deployed. A group never makes a symbol "known":
+		// every distinct new group consumes its own position slot.
 		openPositions++
 		deployed += group.MaxLoss
-		for _, leg := range group.LegSymbols {
-			if strings.EqualFold(leg, symbol) {
-				knownSymbol = true
-			}
-		}
 	}
 	for _, pending := range snapshot.PendingOrders {
 		if pending == nil || pending.Qty <= 0 || pending.Purpose == "close" || pending.Purpose == "protection" || strings.HasSuffix(strings.ToLower(pending.PositionIntent), "_to_close") {
@@ -567,6 +586,11 @@ func (p TradingPolicy) validateSpreadOptionsOrder(order *interfaces.OptionsOrder
 				return 0, fmt.Errorf("new spread entries are refused while spread group %s is broken and unresolved; single-leg trading continues", group.ID)
 			}
 		}
+		for _, leg := range order.Legs {
+			if owner := openGroupOwningSymbol(snapshot.Groups, leg.Symbol); owner != "" {
+				return 0, fmt.Errorf("leg %s already belongs to open spread group %s; overlapping spread allocations are refused (manage or close the existing group first)", leg.Symbol, owner)
+			}
+		}
 		if !p.allowsStructure(structure) {
 			return 0, fmt.Errorf("structure %s is not allowed for this sandbox", structure)
 		}
@@ -580,6 +604,9 @@ func (p TradingPolicy) validateSpreadOptionsOrder(order *interfaces.OptionsOrder
 		}
 		if order.Qty > group.OpenUnits+1e-9 {
 			return 0, fmt.Errorf("spread close of %.0f units exceeds the %.0f open units of group %s", order.Qty, group.OpenUnits, group.ID)
+		}
+		if available := group.OpenUnits - group.ReservedCloseUnits; order.Qty > available+1e-9 {
+			return 0, fmt.Errorf("spread close of %.0f units exceeds the %.0f unreserved units of group %s (%.0f are reserved by working or uncertain close orders)", order.Qty, available, group.ID, group.ReservedCloseUnits)
 		}
 		for _, leg := range order.Legs {
 			if !p.hasMatchingExposure(leg.Symbol, leg.Side, order.Qty*float64(leg.RatioQty), snapshot.Positions) {
@@ -611,7 +638,8 @@ func (p TradingPolicy) validateSpreadOptionsOrder(order *interfaces.OptionsOrder
 		return 0, fmt.Errorf("net debit %.2f exceeds the spread width %.2f", price, width)
 	}
 	maxLoss := price * order.Qty * 100
-	if err := p.validateCaps(maxLoss, true, snapshot, order.Symbol); err != nil {
+	// A new group is a new position: no symbol is passed, so reusing a leg of another position can never skip the position-count test.
+	if err := p.validateCaps(maxLoss, true, snapshot, ""); err != nil {
 		return 0, err
 	}
 	return maxLoss, nil

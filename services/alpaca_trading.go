@@ -41,7 +41,7 @@ type AlpacaTradingService struct {
 	expectedTenantID        string
 	expectedSandboxID       string
 	localOrderProvider      func(context.Context) ([]*interfaces.Order, error)
-	optionGroupProvider     func(context.Context) ([]OptionGroupRisk, error)
+	optionGroupProvider     func(ctx context.Context, excludeClientOrderID string) ([]OptionGroupRisk, error)
 	openingReservationMu    sync.Mutex
 	openingReservationPath  string
 	dailyLossLock           *DailyLossLockStore
@@ -157,7 +157,7 @@ func (s *AlpacaTradingService) enrichOptionsAssessment(ctx context.Context, orde
 
 // SetOptionGroupProvider binds the durable multi-leg group ledger to the broker risk snapshot. With no provider the
 // snapshot carries no groups and every order behaves exactly as before.
-func (s *AlpacaTradingService) SetOptionGroupProvider(provider func(context.Context) ([]OptionGroupRisk, error)) {
+func (s *AlpacaTradingService) SetOptionGroupProvider(provider func(ctx context.Context, excludeClientOrderID string) ([]OptionGroupRisk, error)) {
 	s.optionGroupProvider = provider
 }
 
@@ -352,7 +352,7 @@ func (s *AlpacaTradingService) brokerRiskSnapshot(ctx context.Context, excludeCl
 	snapshot := BrokerRiskSnapshot{Account: account, Positions: positions, PendingOrders: pendingOrders}
 	if s.optionGroupProvider != nil {
 		// Fail closed: with the group ledger unreadable, a grouped leg could be closed on its own or counted twice.
-		groups, groupErr := s.optionGroupProvider(ctx)
+		groups, groupErr := s.optionGroupProvider(ctx, excludeClientOrderID)
 		if groupErr != nil {
 			return BrokerRiskSnapshot{}, fmt.Errorf("option group ledger unavailable: %w", groupErr)
 		}

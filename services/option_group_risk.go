@@ -59,14 +59,24 @@ func OptionGroupRisksFromStates(states []database.OptionGroupState) ([]OptionGro
 				symbols = append(symbols, leg.Symbol)
 			}
 		}
+		allocations := map[string]float64{}
+		for _, leg := range legs {
+			symbol := strings.ToUpper(strings.TrimSpace(leg.Symbol))
+			if gone[symbol] {
+				continue
+			}
+			allocations[symbol] += legExpectedQty(leg, state.OpenUnits)
+		}
 		groups = append(groups, OptionGroupRisk{
-			ID:          group.GroupID,
-			LegSymbols:  symbols,
-			OpenUnits:   state.OpenUnits,
-			MaxLoss:     group.NetDebit * state.OpenUnits * 100,
-			Broken:      group.Status == "broken",
-			Closing:     state.PendingClose,
-			StructureID: group.Structure,
+			ID:                 group.GroupID,
+			LegSymbols:         symbols,
+			OpenUnits:          state.OpenUnits,
+			MaxLoss:            group.NetDebit * state.OpenUnits * 100,
+			Broken:             group.Status == "broken",
+			Closing:            state.PendingClose,
+			StructureID:        group.Structure,
+			LegAllocations:     allocations,
+			ReservedCloseUnits: state.ReservedCloseUnits,
 		})
 	}
 	return groups, nil

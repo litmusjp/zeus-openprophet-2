@@ -13,8 +13,9 @@ import (
 // Phase C, Step 4 (B07): detecting a broken multi-leg group. Reconciliation compares each live group's attached legs with
 // the broker's positions. A leg that is missing or short of its expected quantity (assigned, exercised, expired or closed
 // outside OP2) breaks the group. A broken group is recorded, its surviving legs are detached into ordinary single-leg
-// management, new spread entries for the sandbox are refused while it is unresolved, and any stock the assignment left
-// in the options-only sandbox is only ever acted on when it matches the missing leg exactly (see the resolver).
+// management, new spread entries for the sandbox are refused while it is unresolved, and stock is only ever acted on when
+// its CHANGE from the stock position recorded while the group was intact equals exactly what the missing legs imply
+// (provenance), never because a share count happens to match.
 
 const sharesPerContract = 100.0
 
@@ -31,9 +32,14 @@ type GroupFinding struct {
 	ImpliedStock float64
 	// StockQty is the signed broker stock position in the underlying (zero when none).
 	StockQty float64
-	// Linked is true only when StockQty equals ImpliedStock exactly and is not zero: the stock is the assignment of this group.
+	// BaselineKnown says whether a stock position was recorded for this group while it was intact. StockDelta is the change
+	// from that baseline (the stock this event left behind). Without a baseline there is no provenance: any stock is left alone.
+	BaselineKnown bool
+	StockDelta    float64
+	// Linked is true only when the baseline is known, StockDelta is not zero and equals ImpliedStock plus the shares the
+	// resolver has already delivered: the stock is the assignment of this group and nothing else.
 	Linked   bool
-	Mismatch string // stock present that does not match this group's gone legs
+	Mismatch string // stock change that cannot be attributed to this group's gone legs
 }
 
 func signedPositionQty(position *interfaces.Position) float64 {
@@ -74,14 +80,15 @@ func impliedStockForGoneLeg(leg interfaces.OptionLeg, missingContracts float64) 
 	}
 }
 
-// EvaluateOptionGroup compares one live group with the broker's positions. A group with no open units is intact by
-// definition (it owns nothing). An unreadable record is an error, never a guess.
-func EvaluateOptionGroup(state database.OptionGroupState, positions []*interfaces.Position) (GroupFinding, error) {
+// EvaluateOptionGroup compares one live group with the broker's positions. resolvedShares is the signed shares the
+// resolver has already delivered for this group (a buy to cover is positive, a sale is negative), so a partly resolved
+// event keeps its linkage. A group with no open units is intact by definition. An unreadable record is an error.
+func EvaluateOptionGroup(state database.OptionGroupState, positions []*interfaces.Position, resolvedShares float64) (GroupFinding, error) {
 	group := state.Group
 	if group == nil {
 		return GroupFinding{}, fmt.Errorf("option group is required")
 	}
-	finding := GroupFinding{GroupID: group.GroupID, Underlying: strings.ToUpper(strings.TrimSpace(group.Underlying)), Intact: true}
+	finding := GroupFinding{GroupID: group.GroupID, Underlying: strings.ToUpper(strings.TrimSpace(group.Underlying)), Intact: true, BaselineKnown: group.StockBaselineSet}
 	if state.OpenUnits <= 0 {
 		return finding, nil
 	}
@@ -141,12 +148,23 @@ func EvaluateOptionGroup(state database.OptionGroupState, positions []*interface
 	default:
 		finding.Reason = "a leg is missing or short at the broker"
 	}
-	if stock != 0 {
-		if finding.ImpliedStock != 0 && math.Abs(stock-finding.ImpliedStock) < 1e-9 {
-			finding.Linked = true
-		} else {
-			finding.Mismatch = fmt.Sprintf("stock position %.0f in %s does not match the %.0f shares implied by the missing legs", stock, finding.Underlying, finding.ImpliedStock)
-		}
+	switch {
+	case group.StockBaselineSet:
+		finding.StockDelta = stock - group.StockBaseline
+	case stock == 0:
+		finding.StockDelta = 0 // no stock at all: nothing was left behind
+	default:
+		finding.StockDelta = stock
+		finding.Mismatch = fmt.Sprintf("stock position %.0f in %s exists but no pre-event stock baseline was recorded for this group, so it cannot be attributed to the missing legs", stock, finding.Underlying)
+		return finding, nil
+	}
+	if finding.StockDelta == 0 {
+		return finding, nil
+	}
+	if finding.ImpliedStock != 0 && math.Abs(finding.StockDelta-(finding.ImpliedStock+resolvedShares)) < 1e-9 {
+		finding.Linked = true
+	} else {
+		finding.Mismatch = fmt.Sprintf("a stock change of %.0f shares in %s does not match the %.0f shares implied by the missing legs (already delivered by the resolver: %.0f)", finding.StockDelta, finding.Underlying, finding.ImpliedStock, resolvedShares)
 	}
 	return finding, nil
 }
@@ -155,6 +173,21 @@ func EvaluateOptionGroup(state database.OptionGroupState, positions []*interface
 type OptionGroupStore interface {
 	OptionGroupStates() ([]database.OptionGroupState, error)
 	SaveOptionGroup(group *models.DBOptionGroup) error
+	// ClaimResolverOperation atomically makes clientID the one resolver operation for the group's underlying, refusing (and
+	// naming the owner) when another group's resolver order on the same underlying is missing, working or uncertain.
+	ClaimResolverOperation(groupID, clientID string) (claimed bool, owner string, err error)
+}
+
+// ResolverCoverage is what the group's resolver orders have done so far, read from the order ledger.
+type ResolverCoverage struct {
+	SignedShares float64 // a buy to cover is positive, a sale negative, summed over cumulative fills of every attempt
+	Working      bool    // a resolver order is still working
+	Uncertain    bool    // a resolver order is uncertain (or its state is unknown)
+}
+
+// ReconcileDeps lets the resolver supply the order-ledger facts the pure monitor cannot see.
+type ReconcileDeps struct {
+	Coverage func(group *models.DBOptionGroup) (ResolverCoverage, error)
 }
 
 // OptionGroupReconcileReport is what one reconciliation pass found and recorded.
@@ -162,34 +195,60 @@ type OptionGroupReconcileReport struct {
 	Findings           []GroupFinding // every non-intact group, newly or already broken
 	NewlyBroken        []string       // groups marked broken in this pass
 	ClosedWithoutStock []string       // broken groups with nothing left to resolve, closed in this pass
-	NeedsResolver      []GroupFinding // broken groups whose stock matches the missing legs exactly
-	Unresolved         []GroupFinding // broken groups with stock that does not match: left alone and reported
+	NeedsResolver      []GroupFinding // broken groups whose stock change matches the missing legs exactly
+	Unresolved         []GroupFinding // broken groups with stock that cannot be attributed: left alone and reported
+	Waiting            []GroupFinding // broken groups with nothing left to trade but a resolver order not yet terminal
 }
 
-// ReconcileOptionGroups evaluates every live group against the broker positions and records the result durably:
-//   - an intact group is untouched;
+// ReconcileOptionGroups is ReconcileOptionGroupsWith with no resolver coverage: any group that already has a resolver
+// operation is then treated as unresolved rather than closed.
+func ReconcileOptionGroups(store OptionGroupStore, positions []*interfaces.Position) (OptionGroupReconcileReport, error) {
+	return ReconcileOptionGroupsWith(store, positions, ReconcileDeps{})
+}
+
+// ReconcileOptionGroupsWith evaluates every live group against the broker positions and records the result durably:
+//   - an intact group keeps its stock baseline current (the provenance for any later event);
 //   - a newly broken group is marked broken with its reason and its surviving legs are durably detached into ordinary
 //     single-leg management (only then may that leg be closed on its own);
-//   - a broken group with no stock to resolve is closed (nothing is left to resolve);
-//   - a broken group whose stock matches its missing legs exactly is returned for the resolver;
-//   - a broken group with stock that does not match, or no stock but a leg gone, is left broken and reported (never guessed at).
+//   - a broken group whose stock change matches its missing legs exactly (net of what the resolver delivered) is returned
+//     for the resolver;
+//   - a broken group with no stock change is closed only when its resolver orders (if any) are all terminal; otherwise it
+//     stays broken and is reported as waiting;
+//   - a broken group with stock that cannot be attributed is left broken and reported (never guessed at).
 //
 // It places no order. Spread entries stay refused for the sandbox while any group is broken.
-func ReconcileOptionGroups(store OptionGroupStore, positions []*interfaces.Position) (OptionGroupReconcileReport, error) {
+func ReconcileOptionGroupsWith(store OptionGroupStore, positions []*interfaces.Position, deps ReconcileDeps) (OptionGroupReconcileReport, error) {
 	var report OptionGroupReconcileReport
 	states, err := store.OptionGroupStates()
 	if err != nil {
 		return report, err
 	}
 	for _, state := range states {
-		finding, err := EvaluateOptionGroup(state, positions)
+		group := state.Group
+		if group == nil || state.OpenUnits <= 0 {
+			continue
+		}
+		var coverage ResolverCoverage
+		if group.ResolverClientID != "" {
+			if deps.Coverage == nil {
+				coverage.Uncertain = true
+			} else if coverage, err = deps.Coverage(group); err != nil {
+				return report, err
+			}
+		}
+		finding, err := EvaluateOptionGroup(state, positions, coverage.SignedShares)
 		if err != nil {
 			return report, err
 		}
 		if finding.Intact {
+			if group.Status != "broken" && (!group.StockBaselineSet || group.StockBaseline != finding.StockQty) {
+				group.StockBaseline, group.StockBaselineSet = finding.StockQty, true
+				if err := store.SaveOptionGroup(group); err != nil {
+					return report, fmt.Errorf("failed to record the stock baseline of option group %s: %w", group.GroupID, err)
+				}
+			}
 			continue
 		}
-		group := state.Group
 		if group.Status != "broken" {
 			detached, err := decodeGroupLegs(group.DetachedLegsJSON)
 			if err != nil {
@@ -212,16 +271,19 @@ func ReconcileOptionGroups(store OptionGroupStore, positions []*interfaces.Posit
 		switch {
 		case finding.Linked:
 			report.NeedsResolver = append(report.NeedsResolver, finding)
-		case finding.StockQty == 0:
-			// A leg is gone and no stock was left behind (expired worthless or closed outside OP2): the surviving legs are
-			// already detached into single-leg management, so nothing is left to resolve.
+		case finding.Mismatch != "":
+			report.Unresolved = append(report.Unresolved, finding)
+		case coverage.Working || coverage.Uncertain:
+			// Nothing is left to trade, but a resolver order is not yet terminal: only all-flat, all-terminal state clears the block.
+			report.Waiting = append(report.Waiting, finding)
+		default:
+			// A leg is gone and no stock change was left behind (expired worthless or closed outside OP2), and any resolver
+			// order is terminal: the surviving legs are already detached, so nothing is left to resolve.
 			group.Status = "closed"
 			if err := store.SaveOptionGroup(group); err != nil {
 				return report, fmt.Errorf("failed to close resolved option group %s: %w", group.GroupID, err)
 			}
 			report.ClosedWithoutStock = append(report.ClosedWithoutStock, group.GroupID)
-		default:
-			report.Unresolved = append(report.Unresolved, finding)
 		}
 	}
 	return report, nil

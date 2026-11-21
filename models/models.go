@@ -263,7 +263,13 @@ type DBOptionGroup struct {
 	CloseClientOrderIDs string  // JSON array of the group's close orders' client order ids
 	BrokenReason        string
 	ResolverClientID    string // the one durable resolver operation that owns linked stock for this group (A2)
-	Revision            int64
+	// StockBaseline is the broker stock position (signed shares) in the underlying the last time this group was intact; it is
+	// the provenance for assignment stock: only a change from this baseline that equals what the missing legs imply is linked.
+	StockBaseline    float64
+	StockBaselineSet bool
+	// Advisory is an information-only note (for example a short leg near expiry in the money). It never closes or rolls anything.
+	Advisory string
+	Revision int64
 }
 
 func (DBOptionGroup) TableName() string {

@@ -92,8 +92,8 @@ func (f *fakeResolverBroker) RegularSessionOpen(context.Context) (bool, error) {
 func (f *fakeResolverBroker) LatestStockQuote(context.Context, string) (float64, float64, time.Time, error) {
 	return f.bid, f.ask, f.quoteAt, nil
 }
-func (f *fakeResolverBroker) IssueAssignmentResolutionGrant(groupID, symbol, side string, qty float64) (*interfaces.AssignmentResolutionGrant, error) {
-	g := &interfaces.AssignmentResolutionGrant{Token: fmt.Sprintf("tok-%d", len(f.grants)+1), GroupID: groupID, Symbol: symbol, Side: side, Qty: qty}
+func (f *fakeResolverBroker) IssueAssignmentResolutionGrant(groupID, clientOrderID, symbol, side string, qty float64) (*interfaces.AssignmentResolutionGrant, error) {
+	g := &interfaces.AssignmentResolutionGrant{Token: fmt.Sprintf("tok-%d", len(f.grants)+1), GroupID: groupID, ClientOrderID: clientOrderID, Symbol: symbol, Side: side, Qty: qty}
 	f.grants = append(f.grants, g)
 	return g, nil
 }

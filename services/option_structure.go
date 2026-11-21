@@ -184,3 +184,22 @@ func (p TradingPolicy) allowsStructure(structure string) bool {
 	allowed, ok := ParseAllowedStructures(p.AllowedStructures)
 	return ok && allowed[structure]
 }
+
+// EffectivePriceKind is the one canonical price kind of a multi-leg order: the explicit value when given, otherwise debit for an
+// opening and credit for a closing. Policy, the broker adapter and the controller all read it, so an omitted kind can never
+// be admitted as a credit close and then dispatched as a debit.
+func EffectivePriceKind(order *interfaces.OptionsOrder) string {
+	if order == nil || len(order.Legs) == 0 {
+		return ""
+	}
+	if kind := strings.TrimSpace(order.PriceKind); kind != "" {
+		return kind
+	}
+	if opening, ok := legsDirection(order.Legs); ok {
+		if opening {
+			return PriceKindDebit
+		}
+		return PriceKindCredit
+	}
+	return ""
+}

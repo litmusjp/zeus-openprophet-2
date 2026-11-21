@@ -25,67 +25,82 @@ func (s *AlpacaTradingService) resolverIdentityReady() bool {
 	return s.expectedPaper && strings.TrimSpace(s.expectedAccountID) != "" && strings.TrimSpace(s.expectedTenantID) != "" && strings.TrimSpace(s.expectedSandboxID) != ""
 }
 
-// IssueAssignmentResolutionGrant creates a grant for one reduction. side is "sell" for assigned long stock or "buy" to
-// cover assigned short stock.
-func (s *AlpacaTradingService) IssueAssignmentResolutionGrant(groupID, symbol, side string, qty float64) (*interfaces.AssignmentResolutionGrant, error) {
+// IssueAssignmentResolutionGrant creates a grant for one reduction by one durable resolver order. side is "sell" for
+// assigned long stock or "buy" to cover assigned short stock. The registry keeps its own private copy and hands the caller
+// a separate copy, so nothing the caller does to the returned object can change what the service trusts.
+func (s *AlpacaTradingService) IssueAssignmentResolutionGrant(groupID, clientOrderID, symbol, side string, qty float64) (*interfaces.AssignmentResolutionGrant, error) {
 	if !s.resolverIdentityReady() {
 		return nil, fmt.Errorf("assignment resolution needs a verified paper account, tenant and sandbox")
 	}
-	if strings.TrimSpace(groupID) == "" || !validEquitySymbol(symbol) || (side != "buy" && side != "sell") || qty <= 0 || math.IsNaN(qty) || math.IsInf(qty, 0) {
-		return nil, fmt.Errorf("assignment resolution grant needs a group, an equity symbol, a side and a positive quantity")
+	if strings.TrimSpace(groupID) == "" || strings.TrimSpace(clientOrderID) == "" || !validEquitySymbol(symbol) || (side != "buy" && side != "sell") || qty <= 0 || math.IsNaN(qty) || math.IsInf(qty, 0) {
+		return nil, fmt.Errorf("assignment resolution grant needs a group, a client order id, an equity symbol, a side and a positive quantity")
 	}
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		return nil, fmt.Errorf("could not create a grant token: %w", err)
 	}
-	grant := &interfaces.AssignmentResolutionGrant{
+	trusted := interfaces.AssignmentResolutionGrant{
 		Token: hex.EncodeToString(raw), BrokerAccountID: s.expectedAccountID, TenantID: s.expectedTenantID, SandboxID: s.expectedSandboxID,
-		GroupID: groupID, Symbol: symbol, Side: side, Qty: qty,
+		GroupID: groupID, ClientOrderID: clientOrderID, Symbol: symbol, Side: side, Qty: qty,
 	}
 	s.resolverMu.Lock()
 	defer s.resolverMu.Unlock()
 	if s.resolverGrants == nil {
-		s.resolverGrants = map[string]*interfaces.AssignmentResolutionGrant{}
+		s.resolverGrants = map[string]interfaces.AssignmentResolutionGrant{}
 	}
-	s.resolverGrants[grant.Token] = grant
-	return grant, nil
+	s.resolverGrants[trusted.Token] = trusted
+	handed := trusted
+	return &handed, nil
 }
 
-// verifyResolverGrant requires the order's grant to be exactly the live grant this service issued, for this identity,
-// and the order to match it. A copied, altered, spent or foreign grant is refused.
-func (s *AlpacaTradingService) verifyResolverGrant(order *interfaces.Order) error {
+// checkResolverGrantLocked requires the order's grant to equal the live grant this service issued, for this identity, and
+// the order to match it exactly (symbol, side, quantity within the grant, the one bound client order id, a close). The
+// caller holds resolverMu.
+func (s *AlpacaTradingService) checkResolverGrantLocked(order *interfaces.Order) error {
 	grant := order.ResolverGrant
-	if grant == nil {
-		return nil
-	}
 	if !s.resolverIdentityReady() {
 		return fmt.Errorf("assignment resolution needs a verified paper account, tenant and sandbox")
 	}
-	s.resolverMu.Lock()
 	issued, ok := s.resolverGrants[grant.Token]
-	s.resolverMu.Unlock()
-	if !ok || issued == nil || grant.Token == "" {
+	if !ok || grant.Token == "" {
 		return fmt.Errorf("assignment resolution grant was not issued by this service or is already spent")
 	}
-	if *issued != *grant {
+	if issued != *grant {
 		return fmt.Errorf("assignment resolution grant does not match the grant that was issued")
 	}
 	if issued.BrokerAccountID != s.expectedAccountID || issued.TenantID != s.expectedTenantID || issued.SandboxID != s.expectedSandboxID {
 		return fmt.Errorf("assignment resolution grant belongs to a different account, tenant or sandbox")
 	}
-	if order.Purpose != "close" || order.Symbol != issued.Symbol || order.Side != issued.Side || order.Qty > issued.Qty+1e-9 {
+	if order.Purpose != "close" || order.Symbol != issued.Symbol || order.Side != issued.Side || order.Qty > issued.Qty+1e-9 || order.ClientOrderID != issued.ClientOrderID {
 		return fmt.Errorf("assignment resolution order does not match its grant")
 	}
 	return nil
 }
 
-func (s *AlpacaTradingService) consumeResolverGrant(order *interfaces.Order) {
+// verifyResolverGrant is the early, non-consuming check used during policy evaluation.
+func (s *AlpacaTradingService) verifyResolverGrant(order *interfaces.Order) error {
 	if order == nil || order.ResolverGrant == nil {
-		return
+		return nil
 	}
 	s.resolverMu.Lock()
+	defer s.resolverMu.Unlock()
+	return s.checkResolverGrantLocked(order)
+}
+
+// claimResolverGrant verifies the grant again and spends it in ONE critical section, so two overlapping submissions can
+// never both pass: the first claim wins and every other attempt sees a spent grant. It is called immediately before the
+// submission marker, so a grant is spent only by an order that is about to cross the broker boundary.
+func (s *AlpacaTradingService) claimResolverGrant(order *interfaces.Order) error {
+	if order == nil || order.ResolverGrant == nil {
+		return nil
+	}
+	s.resolverMu.Lock()
+	defer s.resolverMu.Unlock()
+	if err := s.checkResolverGrantLocked(order); err != nil {
+		return err
+	}
 	delete(s.resolverGrants, order.ResolverGrant.Token)
-	s.resolverMu.Unlock()
+	return nil
 }
 
 // RegularSessionOpen reports whether the broker's regular session is open right now. An unreadable clock is an error,

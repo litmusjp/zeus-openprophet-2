@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/sirupsen/logrus"
@@ -34,7 +36,7 @@ func resolverOrderFor(grant *interfaces.AssignmentResolutionGrant, qty float64) 
 func TestGrantNeedsAVerifiedPaperIdentityAndValidArguments(t *testing.T) {
 	calls := 0
 	s := grantService(t, &calls)
-	if _, err := s.IssueAssignmentResolutionGrant("gx", "AAPL", "sell", 200); err != nil {
+	if _, err := s.IssueAssignmentResolutionGrant("gx", "resolver-gx-1", "AAPL", "sell", 200); err != nil {
 		t.Fatalf("a valid grant must be issued: %v", err)
 	}
 	for name, mutate := range map[string]func(s *AlpacaTradingService){
@@ -45,15 +47,18 @@ func TestGrantNeedsAVerifiedPaperIdentityAndValidArguments(t *testing.T) {
 	} {
 		other := grantService(t, &calls)
 		mutate(other)
-		if _, err := other.IssueAssignmentResolutionGrant("gx", "AAPL", "sell", 200); err == nil {
+		if _, err := other.IssueAssignmentResolutionGrant("gx", "resolver-gx-1", "AAPL", "sell", 200); err == nil {
 			t.Errorf("%s: a grant must not be issued", name)
 		}
+	}
+	if _, err := s.IssueAssignmentResolutionGrant("gx", "", "AAPL", "sell", 200); err == nil {
+		t.Error("a grant without a client order id must be refused")
 	}
 	for name, args := range map[string][4]any{
 		"no group": {"", "AAPL", "sell", 200.0}, "option symbol": {"gx", "AAPL261218C00200000", "sell", 200.0},
 		"bad side": {"gx", "AAPL", "short", 200.0}, "zero qty": {"gx", "AAPL", "sell", 0.0}, "negative qty": {"gx", "AAPL", "buy", -5.0},
 	} {
-		if _, err := s.IssueAssignmentResolutionGrant(args[0].(string), args[1].(string), args[2].(string), args[3].(float64)); err == nil {
+		if _, err := s.IssueAssignmentResolutionGrant(args[0].(string), "resolver-gx-1", args[1].(string), args[2].(string), args[3].(float64)); err == nil {
 			t.Errorf("%s must be refused", name)
 		}
 	}
@@ -62,7 +67,7 @@ func TestGrantNeedsAVerifiedPaperIdentityAndValidArguments(t *testing.T) {
 func TestGrantIsHonouredOnceAndOnlyForTheOrderItWasIssuedFor(t *testing.T) {
 	calls := 0
 	s := grantService(t, &calls)
-	grant, err := s.IssueAssignmentResolutionGrant("gx", "AAPL", "sell", 200)
+	grant, err := s.IssueAssignmentResolutionGrant("gx", "resolver-gx-1", "AAPL", "sell", 200)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,5 +164,91 @@ func TestGrantOrderRefusedWhenItsPolicyRefuses(t *testing.T) {
 		} else if tc.want != "entry, protection, or close" && !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error %q should mention %q", name, err, tc.want)
 		}
+	}
+}
+
+func TestMutatingTheReturnedGrantNeverChangesWhatTheServiceTrusts(t *testing.T) {
+	calls := 0
+	s := grantService(t, &calls)
+	grant, err := s.IssueAssignmentResolutionGrant("gx", "resolver-gx-1", "AAPL", "sell", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hermes C01: mutate the very object that was returned, then submit the larger matching order.
+	grant.Qty = 500
+	if _, err := s.PlaceOrder(context.Background(), resolverOrderFor(grant, 500)); err == nil || calls != 0 {
+		t.Fatalf("a grant altered after issue must authorise nothing: err=%v calls=%d", err, calls)
+	}
+	for name, mutate := range map[string]func(g *interfaces.AssignmentResolutionGrant){
+		"group":     func(g *interfaces.AssignmentResolutionGrant) { g.GroupID = "other" },
+		"symbol":    func(g *interfaces.AssignmentResolutionGrant) { g.Symbol = "MSFT" },
+		"side":      func(g *interfaces.AssignmentResolutionGrant) { g.Side = "buy" },
+		"client id": func(g *interfaces.AssignmentResolutionGrant) { g.ClientOrderID = "resolver-gx-2" },
+		"account":   func(g *interfaces.AssignmentResolutionGrant) { g.BrokerAccountID = "other-account" },
+	} {
+		fresh, _ := s.IssueAssignmentResolutionGrant("gx", "resolver-gx-1", "AAPL", "sell", 200)
+		mutate(fresh)
+		if _, err := s.PlaceOrder(context.Background(), resolverOrderFor(fresh, 200)); err == nil || calls != 0 {
+			t.Errorf("an altered %s must be refused with no broker call: err=%v calls=%d", name, err, calls)
+		}
+	}
+}
+
+func TestAGrantIsBoundToItsOneClientOrderID(t *testing.T) {
+	calls := 0
+	s := grantService(t, &calls)
+	grant, _ := s.IssueAssignmentResolutionGrant("gx", "resolver-gx-1", "AAPL", "sell", 200)
+	other := resolverOrderFor(grant, 200)
+	other.ClientOrderID = "resolver-gx-2" // an unrelated attempt must not borrow this authority
+	if _, err := s.PlaceOrder(context.Background(), other); err == nil || calls != 0 {
+		t.Fatalf("a different client order id must not use the grant: err=%v calls=%d", err, calls)
+	}
+	if _, err := s.PlaceOrder(context.Background(), resolverOrderFor(grant, 200)); err != nil || calls != 1 {
+		t.Fatalf("the bound order must still be honoured once: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestOverlappingSubmissionsOfOneGrantCrossTheBoundaryExactlyOnce(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	s := grantService(t, new(int))
+	release := make(chan struct{})
+	s.placeOrderFn = func(req alpaca.PlaceOrderRequest) (*alpaca.Order, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return &alpaca.Order{ID: "broker-1", ClientOrderID: req.ClientOrderID, Symbol: req.Symbol, Side: req.Side, Type: req.Type, TimeInForce: req.TimeInForce, Qty: req.Qty, LimitPrice: req.LimitPrice, Status: "accepted"}, nil
+	}
+	// Hold every goroutine at the submission marker (which runs after the early verification and before the claim has finished
+	// for the others) so that all of them have verified before any has crossed.
+	var arrived sync.WaitGroup
+	arrived.Add(8)
+	s.submissionMarker = func(string) error {
+		arrived.Done()
+		<-release
+		return nil
+	}
+	grant, _ := s.IssueAssignmentResolutionGrant("gx", "resolver-gx-1", "AAPL", "sell", 200)
+	var done sync.WaitGroup
+	errs := make([]error, 8)
+	for i := 0; i < 8; i++ {
+		done.Add(1)
+		go func(i int) {
+			defer done.Done()
+			_, errs[i] = s.PlaceOrder(context.Background(), resolverOrderFor(grant, 200))
+		}(i)
+	}
+	// Only the claim winner reaches the marker; the other seven are refused at the claim, so release after a short settle.
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	done.Wait()
+	succeeded := 0
+	for _, err := range errs {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || calls != 1 {
+		t.Fatalf("exactly one overlapping submission may cross the boundary: succeeded=%d calls=%d", succeeded, calls)
 	}
 }

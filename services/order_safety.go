@@ -395,7 +395,7 @@ func buildAlpacaOptionsOrderRequest(order *interfaces.OptionsOrder) (alpaca.Plac
 		req.PositionIntent = ""
 		// The internal price is always a positive magnitude. Only here is it signed: a credit exit is sent negative, a debit
 		// entry positive (Alpaca's documented mleg convention).
-		if order.LimitPrice != nil && order.PriceKind == "credit" {
+		if order.LimitPrice != nil && EffectivePriceKind(order) == PriceKindCredit {
 			signed := decimal.NewFromFloat(*order.LimitPrice).Neg()
 			req.LimitPrice = &signed
 		}

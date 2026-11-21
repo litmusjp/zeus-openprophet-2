@@ -179,3 +179,89 @@ func TestOptionsOrderResultIdentityForAMultiLegOrderAcceptsAnEmptyParent(t *test
 		t.Fatalf("the result limit must be the positive magnitude of the order limit, got %v", result.LimitPrice)
 	}
 }
+
+func providerMlegRead(limit string, avg string, filled int64, status string, open bool) *alpaca.Order {
+	ratio := decimal.NewFromInt(1)
+	qty := decimal.NewFromInt(2)
+	intentA, intentB := alpaca.SellToClose, alpaca.BuyToClose
+	if open {
+		intentA, intentB = alpaca.BuyToOpen, alpaca.SellToOpen
+	}
+	sideA, sideB := alpaca.Sell, alpaca.Buy
+	if open {
+		sideA, sideB = alpaca.Buy, alpaca.Sell
+	}
+	o := &alpaca.Order{ID: "b1", ClientOrderID: "c1", OrderClass: alpaca.MLeg, Qty: &qty, LimitPrice: dec(limit), Type: alpaca.Limit, TimeInForce: alpaca.Day, Status: status,
+		FilledQty: decimal.NewFromInt(filled),
+		Legs: []alpaca.Order{
+			{Symbol: callLow, Side: sideA, PositionIntent: intentA, RatioQty: &ratio},
+			{Symbol: callHigh, Side: sideB, PositionIntent: intentB, RatioQty: &ratio},
+		}}
+	if avg != "" {
+		o.FilledAvgPrice = dec(avg)
+	}
+	return o
+}
+
+func TestCreditCloseReadbackIsNormalisedLikeTheSubmissionResponse(t *testing.T) {
+	// Hermes C05: a provider-shaped filled credit close read back later (order reads, restart reconciliation).
+	full := convertAlpacaOrderStatic(providerMlegRead("-4", "-4", 2, "filled", false))
+	if full.Status != "filled" || full.LimitPrice == nil || *full.LimitPrice != 4 || full.FilledAvgPrice == nil || *full.FilledAvgPrice != 4 || full.FilledQty != 2 {
+		t.Fatalf("a signed credit close must read back as positive magnitudes: %+v limit=%v avg=%v", full, full.LimitPrice, full.FilledAvgPrice)
+	}
+	partial := convertAlpacaOrderStatic(providerMlegRead("-4", "-4.5", 1, "partially_filled", false))
+	if partial.Status != "partially_filled" || *partial.FilledAvgPrice != 4.5 || partial.FilledQty != 1 {
+		t.Fatalf("a signed partial credit fill must read back normalised: %+v", partial)
+	}
+	positiveFill := convertAlpacaOrderStatic(providerMlegRead("-4", "4", 2, "filled", false))
+	if positiveFill.Status != "filled" || *positiveFill.FilledAvgPrice != 4 {
+		t.Fatalf("an unsigned fill on a credit close is also accepted: %+v", positiveFill)
+	}
+	// Anything else negative is not converted and stays refused.
+	for name, o := range map[string]*alpaca.Order{
+		"debit entry with a negative fill":  providerMlegRead("3", "-3", 2, "filled", true),
+		"debit entry with a negative limit": providerMlegRead("-3", "3", 2, "filled", true),
+	} {
+		if got := convertAlpacaOrderStatic(o); got.Status != "submission_uncertain" {
+			t.Errorf("%s must stay uncertain, got %q", name, got.Status)
+		}
+	}
+	qty := decimal.NewFromInt(1)
+	single := &alpaca.Order{ID: "b2", ClientOrderID: "c2", Symbol: callLow, Side: alpaca.Sell, Qty: &qty, Type: alpaca.Limit, TimeInForce: alpaca.Day, Status: "filled", PositionIntent: alpaca.SellToClose,
+		LimitPrice: dec("-1"), FilledQty: qty, FilledAvgPrice: dec("-1")}
+	if got := convertAlpacaOrderStatic(single); got.Status != "submission_uncertain" {
+		t.Errorf("a negative single-leg order must stay uncertain, got %q", got.Status)
+	}
+}
+
+func TestAnOmittedPriceKindIsCanonicalisedNeverDispatchedAsTheWrongKind(t *testing.T) {
+	closing := bullCallClose()
+	closing.PriceKind = ""
+	if EffectivePriceKind(closing) != PriceKindCredit {
+		t.Fatalf("an omitted kind on a close must be a credit, got %q", EffectivePriceKind(closing))
+	}
+	req, err := buildAlpacaOptionsOrderRequest(closing)
+	if err != nil || req.LimitPrice == nil || !req.LimitPrice.Equal(decimal.NewFromInt(-4)) {
+		t.Fatalf("a close with the kind omitted must be sent as a credit (negative), got %v err=%v", req.LimitPrice, err)
+	}
+	opening := bullCallOpen()
+	opening.PriceKind = ""
+	if EffectivePriceKind(opening) != PriceKindDebit {
+		t.Fatalf("an omitted kind on an opening must be a debit, got %q", EffectivePriceKind(opening))
+	}
+	req, err = buildAlpacaOptionsOrderRequest(opening)
+	if err != nil || !req.LimitPrice.Equal(decimal.NewFromInt(3)) {
+		t.Fatalf("an opening with the kind omitted must be sent as a debit (positive), got %v err=%v", req.LimitPrice, err)
+	}
+	// Policy and adapter agree: the same canonical kind admits and dispatches the order.
+	group := OptionGroupRisk{ID: "g", LegSymbols: []string{callLow, callHigh}, OpenUnits: 2, MaxLoss: 600}
+	if _, err := spreadPolicy("").ValidateOptionsOrder(closing, spreadSnapshot(group)); err != nil {
+		t.Fatalf("a close with the kind omitted must be admitted as a credit: %v", err)
+	}
+	// A single-leg order has no kind at all.
+	price := 1.0
+	single := &interfaces.OptionsOrder{ClientOrderID: "s", Symbol: callLow, Underlying: "AAPL", Qty: 1, Side: "buy", PositionIntent: "buy_to_open", Type: "limit", TimeInForce: "day", LimitPrice: &price}
+	if EffectivePriceKind(single) != "" {
+		t.Fatalf("a single leg has no price kind")
+	}
+}

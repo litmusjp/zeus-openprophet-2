@@ -41,7 +41,7 @@ type resolverBroker interface {
 	GetPositions(ctx context.Context) ([]*interfaces.Position, error)
 	RegularSessionOpen(ctx context.Context) (bool, error)
 	LatestStockQuote(ctx context.Context, symbol string) (bid, ask float64, at time.Time, err error)
-	IssueAssignmentResolutionGrant(groupID, symbol, side string, qty float64) (*interfaces.AssignmentResolutionGrant, error)
+	IssueAssignmentResolutionGrant(groupID, clientOrderID, symbol, side string, qty float64) (*interfaces.AssignmentResolutionGrant, error)
 	PlaceOrder(ctx context.Context, order *interfaces.Order) (*interfaces.OrderResult, error)
 }
 
@@ -257,7 +257,7 @@ func (r *AssignmentResolver) resolveGroup(ctx context.Context, finding GroupFind
 		return action, fmt.Errorf("could not save the resolver operation of group %s: %w", group.GroupID, err)
 	}
 	action.ClientID = clientID
-	grant, err := r.Broker.IssueAssignmentResolutionGrant(group.GroupID, group.Underlying, side, qty)
+	grant, err := r.Broker.IssueAssignmentResolutionGrant(group.GroupID, clientID, group.Underlying, side, qty)
 	if err != nil {
 		action.Outcome, action.Detail = "refused", err.Error()
 		return action, nil

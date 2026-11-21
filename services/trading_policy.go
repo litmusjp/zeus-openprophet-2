@@ -554,14 +554,7 @@ func (p TradingPolicy) validateSpreadOptionsOrder(order *interfaces.OptionsOrder
 	if order.Type != "limit" {
 		return 0, fmt.Errorf("spread orders must be limit orders")
 	}
-	kind := strings.TrimSpace(order.PriceKind)
-	if kind == "" {
-		if opening {
-			kind = PriceKindDebit
-		} else {
-			kind = PriceKindCredit
-		}
-	}
+	kind := EffectivePriceKind(order)
 	if opening && kind != PriceKindDebit {
 		return 0, fmt.Errorf("a debit vertical opens for a net debit")
 	}

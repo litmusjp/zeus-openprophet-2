@@ -108,6 +108,7 @@ type AssignmentResolutionGrant struct {
 	TenantID        string
 	SandboxID       string
 	GroupID         string
+	ClientOrderID   string // the one durable resolver order this grant is bound to
 	Symbol          string
 	Side            string
 	Qty             float64

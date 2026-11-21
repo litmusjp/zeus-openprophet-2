@@ -54,7 +54,7 @@ type AlpacaTradingService struct {
 	optionsSnapshotBaseURL  string
 	optionsSnapshotHTTP     *http.Client
 	resolverMu              sync.Mutex
-	resolverGrants          map[string]*interfaces.AssignmentResolutionGrant
+	resolverGrants          map[string]interfaces.AssignmentResolutionGrant
 	stockQuoteProvider      func(context.Context, string) (bid, ask float64, at time.Time, err error) // test seam; nil uses the data client
 }
 
@@ -572,10 +572,14 @@ func (s *AlpacaTradingService) PlaceOrder(ctx context.Context, order *interfaces
 	if placeOrder == nil {
 		return nil, fmt.Errorf("broker order submission is unavailable")
 	}
+	// An assignment-resolution grant is claimed atomically (verified and spent in one step) before the order can cross the
+	// boundary: of two overlapping submissions only the first claim wins, and a spent grant authorises nothing.
+	if err := s.claimResolverGrant(order); err != nil {
+		return nil, &PreSubmissionRejectionError{Err: err}
+	}
 	if err := s.markSubmissionBoundary(order); err != nil {
 		return nil, err
 	}
-	s.consumeResolverGrant(order) // a grant authorises one submission: it is spent the moment the order crosses the boundary
 	alpacaOrder, err := placeOrder(req)
 	if err != nil {
 		// Startup reconciliation is handled by OrderController.ReconcileOpenOrders.
@@ -929,6 +933,21 @@ func convertAlpacaOrderStatic(ao *alpaca.Order) *interfaces.Order {
 		default:
 			order.Purpose = ""
 		}
+	}
+	if len(order.OptionLegs) > 0 && order.Purpose == "close" && ao.LimitPrice != nil && ao.LimitPrice.IsNegative() {
+		// A multi-leg credit close is sent with a negative net limit and may be read back signed. After the legs have shown
+		// that every leg closes, the signed limit and a signed average fill are stored as the positive magnitudes the rest
+		// of OP2 uses (the same narrow conversion as the immediate submission response). A negative value anywhere else is
+		// not converted and stays refused by the generic validator below.
+		limit := ao.LimitPrice.Neg().InexactFloat64()
+		order.LimitPrice = &limit
+		if ao.FilledAvgPrice != nil && ao.FilledAvgPrice.IsNegative() {
+			avg := ao.FilledAvgPrice.Neg().InexactFloat64()
+			order.FilledAvgPrice = &avg
+		}
+	} else if ao.LimitPrice != nil && ao.LimitPrice.IsNegative() {
+		// A negative limit is valid only for a multi-leg credit close (above); anywhere else it is not a state OP2 can trust.
+		order.Status = "submission_uncertain"
 	}
 	if err := ValidateBrokerOrderState(order, order.Qty); err != nil {
 		order.Status = "submission_uncertain"

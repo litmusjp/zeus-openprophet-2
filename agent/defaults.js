@@ -45,6 +45,9 @@ export function portForAgent(agentId, basePort = DEFAULT_TRADING_BOT_PORT) {
   return basePort + offset;
 }
 
+export const KNOWN_STRUCTURES = ['long_call', 'long_put', 'bull_call_debit', 'bear_put_debit'];
+export const DEFAULT_ALLOWED_STRUCTURES = ['long_call', 'long_put'];
+
 export function tradingPolicyEnvironment(permissions = {}) {
   permissions = permissions || {};
   const booleanValue = (key, fallback) => typeof permissions[key] === 'boolean' ? permissions[key] : fallback;
@@ -61,6 +64,11 @@ export function tradingPolicyEnvironment(permissions = {}) {
     OPENPROPHET_MAX_DEPLOYED_PCT: String(numberValue('maxDeployedPct', 0)),
     OPENPROPHET_MAX_OPEN_POSITIONS: String(numberValue('maxOpenPositions', 0)),
     OPENPROPHET_MAX_DAILY_LOSS: String(numberValue('maxDailyLoss', 0)),
+    // Structures allowed for NEW option exposure. Absent or invalid falls back to today's behaviour (single long legs only);
+    // the Go policy re-validates the value and fails closed on an unknown name.
+    OPENPROPHET_ALLOWED_STRUCTURES: Array.isArray(permissions.allowedStructures) && permissions.allowedStructures.length
+      ? permissions.allowedStructures.join(',')
+      : DEFAULT_ALLOWED_STRUCTURES.join(','),
   };
 }
 

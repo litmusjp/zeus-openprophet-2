@@ -85,6 +85,7 @@ const DEFAULT_PERMISSIONS = {
   allow0DTE: false,
   requireConfirmation: false,
   maxToolRoundsPerBeat: 25,
+  allowedStructures: ['long_call', 'long_put'],
 };
 
 const DEFAULT_PLUGINS = {
@@ -1393,6 +1394,14 @@ function validatePermissionsPatch(perms) {
   if (perms.maxToolRoundsPerBeat !== undefined && (!Number.isInteger(perms.maxToolRoundsPerBeat) || perms.maxToolRoundsPerBeat < 1)) throw new Error('maxToolRoundsPerBeat must be a positive integer');
   for (const key of ['allowedTools', 'blockedTools']) {
     if (perms[key] !== undefined && (!Array.isArray(perms[key]) || perms[key].some(value => typeof value !== 'string'))) throw new Error(`${key} must be an array of strings`);
+  }
+  if (perms.allowedStructures !== undefined) {
+    const known = ['long_call', 'long_put', 'bull_call_debit', 'bear_put_debit'];
+    if (!Array.isArray(perms.allowedStructures) || perms.allowedStructures.length === 0
+      || perms.allowedStructures.some(value => typeof value !== 'string' || !known.includes(value))
+      || new Set(perms.allowedStructures).size !== perms.allowedStructures.length) {
+      throw new Error(`allowedStructures must be a non-empty list of unique names from: ${known.join(', ')}`);
+    }
   }
   return perms;
 }

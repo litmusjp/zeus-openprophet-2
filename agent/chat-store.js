@@ -487,8 +487,23 @@ function adPreBrokerBlock(record) {
 // A label only: a 404 is never proof that anything closed, and any missing, partial, failed or ambiguous evidence leaves the
 // lookup an essential failure, so a management, authentication or transport failure is never hidden by it.
 const PRE_ENTRY_PROBE_WARNING = 'get_options_position not found for a contract not held';
+// Both channels of the lookup (error and result) are read together. A populated channel that carries a status other than 404, an
+// authentication or authorisation answer, or anything that is not itself a not-found answer makes the lookup an essential failure.
+function bothChannelsAreNotFound(record) {
+  const channels = [record.error, record.result]
+    .filter(value => value !== undefined && value !== null && !(typeof value === 'string' && !value.trim()))
+    .map(value => (typeof value === 'string' ? value : JSON.stringify(value)));
+  if (!channels.length) return false;
+  return channels.every(text => {
+    if (/\b(?:401|403|unauthori[sz]ed|forbidden|authentication)\b/i.test(text)) return false;
+    if (!/no open position found|options position not found/i.test(text)) return false;
+    const codes = [...text.matchAll(/\\?"(?:http_)?status\\?"\s*:\s*(\d+)/g)].map(match => Number(match[1]));
+    return codes.length > 0 && codes.every(code => code === 404);
+  });
+}
 function isPreEntryProbeNotFound(record, records) {
   if (!isStrictPositionNotFound(record)) return false;
+  if (!bothChannelsAreNotFound(record)) return false;
   const symbol = trimmedText(record.args?.symbol ?? record.input?.symbol);
   if (!symbol || records.indexOf(record) < 0) return false;
   if (activityAccountIds(records).size > 1) return false;

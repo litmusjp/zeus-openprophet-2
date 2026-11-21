@@ -80,6 +80,26 @@ test('B1: only an unambiguous 404 qualifies (authentication, server, transport a
   await expectOutcome('no symbol in the call', [...base, { ...lookup(), args: {} }], 'Failed', true);
 });
 
+test('B1: both result channels are validated together (a contradictory error or result in the other channel keeps the beat Failed)', async () => {
+  const base = [positions([heldRow()]), ordersRead([orderRow(HELD)])];
+  const notFoundBody = JSON.stringify({ error: `no open position found; options position not found: ${PROBED}`, diagnostics: diagnostics() });
+  const authBody = JSON.stringify({ error: 'authentication failed', diagnostics: diagnostics(401, { category: 'authentication' }) });
+  const withResult = result => [...base, { ...lookup(), result }];
+  // error channel is a clean 404; the result channel contradicts it
+  await expectOutcome('404 error + 401 result (string)', withResult(authBody), 'Failed', true);
+  await expectOutcome('404 error + 401 result (object)', withResult({ error: 'unauthorized', diagnostics: diagnostics(401) }), 'Failed', true);
+  await expectOutcome('404 error + 403 prose in the result', withResult('forbidden: the key cannot read this account'), 'Failed', true);
+  await expectOutcome('404 error + a normal position body in the result', withResult(JSON.stringify({ Symbol: PROBED, Qty: 2 })), 'Failed', true);
+  await expectOutcome('404 error + a 500 result', withResult(JSON.stringify({ error: 'options position not found', diagnostics: diagnostics(500) })), 'Failed', true);
+  // the reverse: the result channel is the 404 and the error channel contradicts it
+  const reversed = { kind: 'tool_call', tool: 'get_options_position', args: { symbol: PROBED }, status: 'error', error: authBody, result: notFoundBody };
+  await expectOutcome('401 error + 404 result', [...base, reversed], 'Failed', true);
+  // consistent channels (or an empty second channel) still qualify
+  await expectOutcome('404 error + empty result', withResult(''), WARNING, false);
+  await expectOutcome('404 error + the same 404 in the result', withResult(notFoundBody), WARNING, false);
+  await expectOutcome('404 only in the result channel', [...base, { kind: 'tool_call', tool: 'get_options_position', args: { symbol: PROBED }, status: 'error', result: notFoundBody }], WARNING, false);
+});
+
 test('B1: another essential failure in the same activity keeps the beat Failed', async () => {
   await expectOutcome('account read failed', [failedTool('get_account'), ...GOOD()], 'Failed', true);
   await expectOutcome('order placement failed with an unrelated error', [...GOOD(), { kind: 'tool_call', tool: 'place_options_order', args: { symbol: HELD }, status: 'error', error: JSON.stringify({ error: 'broker rejected: insufficient buying power' }) }], 'Failed', true);

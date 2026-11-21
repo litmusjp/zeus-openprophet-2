@@ -15,7 +15,8 @@ const NEW = {
   H1_reserved: 'a working or uncertain target order still reserves the allocation',
   H1_complete_once: 'you may complete only the unfilled, unreserved part, once',
   H1_new_position: 'A later new position in the same contract has its own allocation.',
-  H2_no_earlier_call: 'do not call it for an earlier session at all: reuse the recorded range, anchor and bars, and call it only to record a range that has not been recorded yet',
+  H2_no_earlier_call: 'do not call it for an earlier session at all: reuse the recorded range, anchor and bars.',
+  H2_current_session_allowed: 'Reading the current session again with the recorded anchor, for a confirmation, stop or re-entry check, is allowed and never re-records or changes the range; call it to record a range only when none has been recorded yet.',
   H2_missing_record: 'If a position you hold has no recorded range, say so in your decision; never estimate one or recompute it from a later session.',
   H2_once_per_event: 'Record RANGE_RECORDED once per event and cite it on later passes.',
   H3_every_exit: 'At each evaluation of a position you hold, list every exit that your Strategy Rules and the recorded plan define for it',
@@ -45,6 +46,13 @@ test('H1: the existing once-per-position allocation rules are all still present'
 test('H2: the earlier-session refusal sentence and the recorded-range reuse both remain', () => {
   assert.match(herald, /When it refuses a date it cannot cover \(an earlier session\), use the range already recorded for that event and do not recompute it\./);
   assert.equal(count(herald, 'RANGE_RECORDED'), 3, 'one record instruction, one reuse instruction, one once-per-event instruction');
+});
+
+test('H2: the prohibition covers earlier-session recomputation only; fresh current-session reads with the recorded anchor stay allowed', () => {
+  assert.match(herald, /do not call it for an earlier session at all/);
+  assert.match(herald, /Reading the current session again with the recorded anchor, for a confirmation, stop or re-entry check, is allowed and never re-records or changes the range/);
+  assert.doesNotMatch(herald, /do not call (?:it|prophet_get_range_confirmation) (?:again|at all)\b(?! for an earlier)/i, 'no blanket ban on the helper');
+  assert.match(herald, /returns the range and every completed bar after the window with its volume baseline and whether it confirms/);
 });
 
 test('H3: each exit keeps its own predicate (stop END after the fill, target touch, re-entry START, time exit)', () => {

@@ -26,9 +26,12 @@ function listOf(payload, key) {
 const num = value => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 
 /**
- * True only for a group that the ledger proves is flat history: status open, the entry fully filled (it cannot still be filling),
- * every filled unit closed, no open units and no working or uncertain close order. Any missing or non-numeric field means "not
- * flat": an unsettled entry, an uncertain close or a resolver can still matter.
+ * True only for a group whose ledger QUANTITIES are flat: status open, the entry quantity fully filled, every filled unit closed, no
+ * open units and no working or uncertain close order. Any missing or non-numeric field means "not flat". This is a quantity check, NOT
+ * a terminal-status receipt: the groups endpoint does not expose the entry order's status, so a filled quantity does not by itself
+ * prove the entry order is terminal. The switch stays safe because optionExposureReason first requires a complete order read and
+ * refuses any working option order BEFORE it looks at group rows. Do not reuse this predicate as stand-alone execution or rollback
+ * clearance.
  */
 export function isFlatTerminalGroup(group) {
   if (!group || pick(group, 'status') !== 'open') return false;
@@ -53,6 +56,7 @@ export function optionExposureReason({ positions, orders, ordersComplete, groups
   if (openOption.length) return `it has ${openOption.length} open option order${openOption.length === 1 ? '' : 's'}`;
   const groupList = listOf(groups, 'groups');
   if (groupList === null) return 'spread groups could not be read';
+  // Order matters: working option orders were already refused above, so a flat-looking row cannot hide a still-working entry order.
   const live = groupList.filter(group => group && LIVE_GROUP_STATUS.includes(pick(group, 'status')) && !isFlatTerminalGroup(group));
   if (live.length) return `it holds ${live.length} two-leg spread group${live.length === 1 ? '' : 's'}`;
   return null;

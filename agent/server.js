@@ -37,7 +37,7 @@ import {
   addAgent, updateAgent, removeAgent, setActiveAgent, getActiveAgent, getAgentById, getResolvedAgentForSandbox,
   addStrategy, updateStrategy, removeStrategy,
   setActiveModel, getStrategyById,
-  updateSandboxAgentOverrides, updateSandboxAgentSelection, updateSandboxStrategyRules, consumeAgentSwitch,
+  updateSandboxAgentOverrides, updateSandboxAgentSelection, updateSandboxStrategyRules, consumeAgentSwitch, previewSwitchPermissionPatch,
   updateHeartbeat, updateHeartbeatForSandbox, getHeartbeatForPhase,
   updatePermissions, updatePermissionsForSandbox, getPermissions, getPermissionsForSandbox,
   updatePlugin, updatePluginForSandbox, getPlugin, getPluginForSandbox,
@@ -51,7 +51,8 @@ import { createSlackDailyCollector, formatTradeSlackNotification, nextDailySumma
 import { createAuthMiddleware, createBasicAuthMiddleware, createBasicOperatorOnlyMiddleware, resolveApiAuthToken } from './auth.js';
 import { createManagedGateProxy, registerManagedGateProxy, createManagedQualityProxy, registerManagedQualityProxy } from './managed-gate-proxy.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
-import { hasStartListBlock, isOptionsAgent } from './agent-consistency.js';
+import { fitDriftWarning, hasStartListBlock, isOptionsAgent, strategyOptionFit } from './agent-consistency.js';
+import { SWITCH_REFUSAL_PREFIX, optionExposureReason } from './switch-guard.js';
 import { savePluginAndApplyRuntime } from './plugin-runtime-apply.js';
 import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
 import { affectedSandboxesForAgentModelChange, hasBusyAffectedSandbox, chatgptStatus, createChatGPTAuthFlow, createChatGPTModelCheck, disconnectChatGPT, nativeOpenCodeEnv, stripOperatorSecrets, isChatGPTModelVerified, recordChatGPTModelCheck, getVerifiedChatGPTModels } from './chatgpt-oauth.js';
@@ -1412,6 +1413,31 @@ app.post('/api/sandboxes/:id/activate', async (req, res) => {
 
 // An agent switch sets the slot's permissions from the new agent's strategy fit; like PUT /api/permissions, that restarts the
 // slot's trading backend so the new structure list is the one it enforces.
+// Refuses (before anything is saved) a switch that would turn options off while the slot still holds option exposure.
+async function assertSwitchKeepsOptionsManageable(sandboxId, activeAgentId, overrides) {
+  if (!sandboxId || !activeAgentId) return;
+  const patch = previewSwitchPermissionPatch(sandboxId, activeAgentId, overrides);
+  if (patch?.allowOptions !== false) return;
+  let reason;
+  try {
+    const client = getGoClientForSandbox(sandboxId);
+    if (!client) throw new Error('trading backend unavailable');
+    const [positions, orders, groups] = await Promise.all([
+      client.get('/api/v1/options/positions', { timeout: 8000 }),
+      client.get('/api/v1/orders?status=all', { timeout: 8000 }),
+      client.get('/api/v1/options/groups', { timeout: 4000 }),
+    ]);
+    reason = optionExposureReason({ positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true, groups: groups.data });
+  } catch {
+    reason = 'its option exposure could not be read';
+  }
+  if (reason) {
+    const error = new Error(`${SWITCH_REFUSAL_PREFIX}${reason}.`);
+    error.status = 409;
+    throw error;
+  }
+}
+
 async function restartBackendAfterAgentSwitch(sandboxId) {
   const change = consumeAgentSwitch(sandboxId);
   if (!change?.permissionPatch || !sandboxId) return;
@@ -1437,12 +1463,13 @@ app.put('/api/sandboxes/:id/agent', protectChatGPTModelChange, async (req, res) 
     if (activeAgentId !== undefined) updates.activeAgentId = activeAgentId;
     if (model !== undefined) updates.model = model;
     if (Object.keys(overrides).length) updates.overrides = overrides;
+    if (activeAgentId !== undefined) await assertSwitchKeepsOptionsManageable(req.params.id, activeAgentId, overrides);
     const sandbox = await updateSandboxAgentSelection(req.params.id, updates);
     await restartBackendAfterAgentSwitch(req.params.id);
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
     res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
 });
 
 app.put('/api/sandboxes/:id/agent/overrides', async (req, res) => {
@@ -1551,6 +1578,8 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
     const warnings = [];
     const optionsAgent = isOptionsAgent({ allowOptions: getPermissionsForSandbox(sandboxId)?.allowOptions, strategy: getStrategyById(agentConfig.strategyId), strategyId: agentConfig.strategyId });
     if (optionsAgent && !hasStartListBlock(prompt)) warnings.push(`${agentConfig.name || agentConfig.id} is an options agent without a start list (add a SCAN UNIVERSE or CATALYST UNIVERSE block to its definition)`);
+    const driftWarning = fitDriftWarning(strategyOptionFit(getStrategyById(agentConfig.strategyId), agentConfig.strategyId), getPermissionsForSandbox(sandboxId) || {}, agentConfig.name || agentConfig.id);
+    if (driftWarning) warnings.push(driftWarning);
     res.json({ prompt, agentId: agentConfig.id, agentName: agentConfig.name, sandboxId, warnings });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1755,12 +1784,13 @@ app.post('/api/agents/:id/activate', protectChatGPTModelChange, async (req, res)
       if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: agent.model, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
       if (harness._beating || harness._proc) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its assignment' });
     }
+    await assertSwitchKeepsOptionsManageable(getActiveSandbox()?.id, req.params.id, {});
     await setActiveAgent(req.params.id);
     await restartBackendAfterAgentSwitch(getActiveSandbox()?.id);
     await refreshHarnessConfigForSandbox(getActiveSandbox()?.id, { resetSession: true });
     broadcast('config', safeConfig());
     res.json({ ok: true });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
 });
 
 // Strategies

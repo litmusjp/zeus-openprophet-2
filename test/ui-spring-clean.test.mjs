@@ -136,7 +136,7 @@ test('Agent Builder permission save omits legacy live capability', async () => {
   for (const stored of [true, false]) assert.equal(({ allowLiveTrading: stored, ...body }).allowLiveTrading, stored);
 });
 
-test('Agent Builder rejection of permissions blocks activation and retry reuses the created agent', async () => {
+test('Agent Builder activates first, so the operator\'s own permissions are saved last; a rejection of either step keeps the created agent for the retry', async () => {
   const elements = new Map();
   const put = (id, value = '', checked = false) => elements.set(id, { value, checked, textContent: '', disabled: false, style: {} });
   for (const id of ['builder-next', 'f-ag-name', 'f-ag-desc', 'f-ag-strat', 'f-ag-model', 'f-ag-ptype', 'f-ag-prompt', 'b-perm-blocked']) put(id, id === 'f-ag-name' ? 'Agent' : '');
@@ -165,19 +165,21 @@ test('Agent Builder rejection of permissions blocks activation and retry reuses 
   vm.createContext(ctx);
   vm.runInContext('function v(id) { const e=document.getElementById(id); return e ? (e.type===\'checkbox\'?e.checked:e.value) : \'\'; }' + sourceBetween('async function _builderSubmit()', 'function editStrategy('), ctx);
   await ctx._builderSubmit();
-  assert.equal(calls.some(call => call.url.includes('/agent') && call.url !== '/api/agents'), false);
+  // Run 1: the activation is rejected; the permissions (saved after it) are not sent.
+  assert.equal(calls.some(call => call.url === '/api/permissions'), false);
   assert.equal(ctx._builder.agentId, 'created-agent');
-  assert.match(errors.at(-1), /permission/i);
+  assert.match(errors.at(-1), /activation rejected/i);
   assert.equal(closes, 0);
   assert.equal(refreshes, 0);
 
+  // Run 2: activation succeeds, then the permission save is rejected.
   ctx.fetch = async (url, options = {}) => {
     calls.push({ url, options });
-    if (url.endsWith('/agent')) return { ok: false, json: async () => ({ error: 'Activation rejected' }) };
+    if (url === '/api/permissions') return { ok: false, json: async () => ({ error: 'Permissions rejected' }) };
     return { ok: true, json: async () => ({}) };
   };
   await ctx._builderSubmit();
-  assert.match(errors.at(-1), /activation rejected/i);
+  assert.match(errors.at(-1), /permission/i);
   assert.equal(closes, 0);
   assert.equal(refreshes, 0);
 
@@ -186,7 +188,9 @@ test('Agent Builder rejection of permissions blocks activation and retry reuses 
   assert.equal(closes, 1);
   assert.equal(calls.filter(call => call.url === '/api/agents' && call.options.method === 'POST').length, 1);
   assert.ok(calls.some(call => call.url === '/api/agents/created-agent' && call.options.method === 'PUT'));
-  assert.equal(calls.filter(call => call.url.endsWith('/agent')).length, 2);
+  assert.equal(calls.filter(call => call.url.endsWith('/agent')).length, 3);
+  const order = calls.slice(-5).map(call => call.url);
+  assert.ok(order.findIndex(url => url.endsWith('/agent')) < order.lastIndexOf('/api/permissions'), 'the activation precedes the permission save in the final run');
 });
 
 test('portfolio refresh writes the selected account values and positions into its own sidebar fields', async () => {

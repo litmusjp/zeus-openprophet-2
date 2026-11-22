@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
 import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
 import { actorOf } from './history-attribution.js';
-import { applyDebitVerticalText, debitVerticalsAllowed, openGroupCloseReminder, openGroupReadFailedReminder } from './spread-guidance.js';
+import { applyCloseOnlyText, applyDebitVerticalText, debitVerticalsAllowed, openGroupCloseReminder, openGroupReadFailedReminder } from './spread-guidance.js';
 import { ALPHADESK_WORKFLOW_BLOCK, placeWorkflow, stripSavedWorkflow } from './alphadesk-workflow.js';
 import { hasStartListBlock, isOptionsAgent } from './agent-consistency.js';
 import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, renderAlphaDeskPolicyFacts, getTradingGuidanceForSandbox, strategyFamilyOf, openingGateMinutesFor } from './trading-guidance.js';
@@ -536,7 +536,11 @@ ${isCatalystStrategy ? CATALYST_OPERATING_RULE : usesIntradayRule ? INTRADAY_OPE
 - Re-establish live state (positions, orders, prices, quotes) from tools every beat. Prior-session context and your WATCHLIST records are for continuity only; verify them against live data before acting.
 - Report what you did (or deliberately didn't) and why, concisely. When you are flat, nothing is pending and nothing has changed since your last beat, keep the report to a few lines.`;
 
-  return applyDebitVerticalText(`${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId, hasStartList: startListPresent })}\n\n${systemInstructions}`, optionsAgent ? options.allowedStructures : []);
+  const assembledPrompt = `${identity}\n\n${strategyRulesBlock}\n\n${renderTradingGuidance(guidance, { strategyId: agentConfig.strategyId, hasStartList: startListPresent })}\n\n${systemInstructions}`;
+  const slotStructures = optionsAgent ? options.allowedStructures : [];
+  // A slot that lists a debit vertical gets the full recipe; an options slot without one is told it may only CLOSE a held group.
+  if (debitVerticalsAllowed(slotStructures).length) return applyDebitVerticalText(assembledPrompt, slotStructures);
+  return optionsAgent ? applyCloseOnlyText(assembledPrompt) : assembledPrompt;
 }
 
 // ── Check CLI auth ─────────────────────────────────────────────────
@@ -773,7 +777,7 @@ export class AgentHarness {
     if (debitVerticalsAllowed(perms?.allowedStructures).length > 0) return '';
     try {
       const response = await this.getOptionGroups(this.sandboxId);
-      const open = (Array.isArray(response?.groups) ? response.groups : []).filter(group => group && group.status !== 'closed');
+      const open = (Array.isArray(response?.groups) ? response.groups : []).filter(group => group && ['pending_entry', 'open', 'broken'].includes(group.status));
       return open.length ? openGroupCloseReminder(open) : '';
     } catch {
       return openGroupReadFailedReminder();

@@ -3926,6 +3926,22 @@ async function _builderSubmit() {
     const savedId = updatingAgent ? _builder.agentId : d.agent?.id;
     if (savedId) _builder.agentId = savedId;
 
+    // Activate first: a switch sets the slot permission from the strategy's option fit, so the operator's own step-3 choices are saved after it and keep the last word.
+    const activateEl = document.getElementById('review-activate');
+    let activated = false;
+    if (_builder.sandboxId && savedId && activateEl && activateEl.checked) {
+      const activationResponse = await fetch('/api/sandboxes/' + encodeURIComponent(_builder.sandboxId) + '/agent', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeAgentId: savedId }),
+      });
+      let activationResult = {};
+      try { activationResult = await activationResponse.json(); } catch { /* some successful write routes have no JSON body */ }
+      if (!activationResponse.ok || activationResult.error || activationResult.ok === false) {
+        throw new Error(String(activationResult.error || 'Failed to activate agent').slice(0, 180));
+      }
+      activated = true;
+    }
+
     if (_builder.sandboxId && _builder.permsDirty) {
       const blocked = (document.getElementById('b-perm-blocked')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
       const permBody = {
@@ -3949,21 +3965,6 @@ async function _builderSubmit() {
       if (!permissionResponse.ok || permissionResult.error || permissionResult.ok === false) {
         throw new Error(String(permissionResult.error || 'Failed to save permissions').slice(0, 180));
       }
-    }
-
-    const activateEl = document.getElementById('review-activate');
-    let activated = false;
-    if (_builder.sandboxId && savedId && activateEl && activateEl.checked) {
-      const activationResponse = await fetch('/api/sandboxes/' + encodeURIComponent(_builder.sandboxId) + '/agent', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeAgentId: savedId }),
-      });
-      let activationResult = {};
-      try { activationResult = await activationResponse.json(); } catch { /* some successful write routes have no JSON body */ }
-      if (!activationResponse.ok || activationResult.error || activationResult.ok === false) {
-        throw new Error(String(activationResult.error || 'Failed to activate agent').slice(0, 180));
-      }
-      activated = true;
     }
 
     closeModal();

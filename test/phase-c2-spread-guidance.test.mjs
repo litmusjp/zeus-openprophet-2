@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildSystemPrompt } from '../agent/harness.js';
-import { applyDebitVerticalText, debitVerticalsAllowed, SPREAD_TEXT_REPLACEMENTS } from '../agent/spread-guidance.js';
+import fs from 'node:fs';
+import { applyDebitVerticalText, debitVerticalsAllowed, CLOSE_ONLY_REPLACEMENTS, SPREAD_TEXT_REPLACEMENTS } from '../agent/spread-guidance.js';
 import { spreadLegsRequest } from '../spread-legs.js';
 import { renderAlphaDeskPolicyFacts } from '../agent/trading-guidance.js';
 
@@ -35,14 +36,20 @@ const CONTRADICTIONS = [
   /eligible unchanged single-leg proposal/,
 ];
 
-test('without a debit-vertical permission every prompt is byte-identical to before', async () => {
+test('without a debit-vertical permission an options prompt gets the close-only text, and an options-off prompt is unchanged', async () => {
   for (const make of Object.values(agents)) {
     const base = await build(make(), undefined);
     assert.equal(await build(make(), ['long_call', 'long_put']), base);
     assert.equal(await build(make(), []), base);
     assert.equal(applyDebitVerticalText(base, ['long_call', 'long_put']), base);
-    assert.match(base, /Agent execution is single-leg only/);
+    // Opening a spread is not permitted, but the prompt no longer says atomic execution does not exist: a held group stays closable.
+    assert.doesNotMatch(base, /Agent execution is single-leg only/);
+    assert.doesNotMatch(base, /backend atomic multi-leg support is not exposed by this tool/);
+    assert.match(base, /You open single-leg orders only and may not open a spread/);
+    assert.match(base, /Its `legs` field exists only to close an existing two-leg group as one order/);
     assert.doesNotMatch(base, /Debit vertical mechanics/);
+    const optionsOff = await buildSystemPrompt(make(), { getStrategyById, allowedStructures: ['long_call'], allowOptions: false });
+    assert.match(optionsOff, /Agent execution is single-leg only/, 'options off keeps the original single-leg text');
   }
 });
 
@@ -92,9 +99,18 @@ test('both debit structures are named only when both are allowed', async () => {
 
 test('every replacement matches the live wording of at least one running agent prompt (no silent drift)', async () => {
   const prompts = await Promise.all(Object.values(agents).map(make => build(make(), undefined)));
+  const harnessSource = fs.readFileSync(new URL('../agent/harness.js', import.meta.url), 'utf8');
+  const closeOnlyFroms = CLOSE_ONLY_REPLACEMENTS.map(([from]) => from);
   for (const [from] of SPREAD_TEXT_REPLACEMENTS) {
+    if (closeOnlyFroms.includes(from)) {
+      // The two sentences the close-only text replaces are no longer in an options prompt; they must still be in the harness source.
+      assert.ok(harnessSource.includes(from.replaceAll('`', '\\`')), `the harness text no longer contains: ${from.slice(0, 80)}`);
+      continue;
+    }
     assert.ok(prompts.some(prompt => prompt.includes(from)), `the prompt text no longer contains: ${from.slice(0, 80)}`);
   }
+  assert.equal(closeOnlyFroms.length, 2);
+  for (const from of closeOnlyFroms) assert.ok(SPREAD_TEXT_REPLACEMENTS.some(([f]) => f === from), 'close-only and vertical text replace the same two sentences');
 });
 
 test('the spread text is inserted once, right after the order-tool line', async () => {

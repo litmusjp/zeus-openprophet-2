@@ -9,7 +9,7 @@ import { DEFAULT_AGENT_MODEL, alpacaTradingUrl, resolveAgentModel } from './defa
 import { nativeOpenCodeEnv, stripOperatorSecrets } from './chatgpt-oauth.js';
 import * as secrets from './secrets-store.js';
 import * as configSecrets from './config-secrets.js';
-import { permissionPatchForFit, strategyOptionFit } from './agent-consistency.js';
+import { permissionPatchForFit, strategyOptionFit, validateOptionFitInput } from './agent-consistency.js';
 
 // The last agent switch per sandbox, read once by the route that triggered it (to restart the slot's backend when the
 // switch changed permissions). In memory only.
@@ -18,6 +18,20 @@ export function consumeAgentSwitch(sandboxId) {
   const entry = lastAgentSwitch.get(sandboxId) || null;
   lastAgentSwitch.delete(sandboxId);
   return entry;
+}
+
+/**
+ * One validated reading of a strategy choice passed to a switch or an override write. undefined = leave as is; null or blank =
+ * clear it (the agent's own strategy applies); a non-empty id must name a saved strategy, else this throws before anything is
+ * saved. Never returns "null strategy": a missing strategy is not something a slot can run.
+ */
+function normalizeStrategySelection(value) {
+  if (value === undefined) return { action: 'keep' };
+  if (value === null || (typeof value === 'string' && !value.trim())) return { action: 'clear' };
+  if (typeof value !== 'string') throw new Error('strategyId must be a strategy id, or null to use the agent\'s own strategy');
+  const id = value.trim();
+  if (!getStrategyById(id)) throw new Error(`Unknown strategy: ${id}`);
+  return { action: 'set', id };
 }
 
 function configuredDefaultModel() {
@@ -1094,6 +1108,13 @@ export async function ensureBrokerAccountBinding(accountId) {
 }
 
 
+// An agent definition's strategy: blank means none (as before); a non-empty id must name a saved strategy.
+function validAgentStrategyId(value) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) return null;
+  if (typeof value !== 'string' || !getStrategyById(value.trim())) throw new Error(`Unknown strategy: ${value}`);
+  return value.trim();
+}
+
 export async function addAgent(agent) {
   const id = crypto.randomUUID().slice(0, 8);
   const newAgent = {
@@ -1102,7 +1123,7 @@ export async function addAgent(agent) {
     description: agent.description || '',
     systemPromptTemplate: agent.systemPromptTemplate || 'custom',
     customSystemPrompt: agent.customSystemPrompt || '',
-    strategyId: agent.strategyId || null,
+    strategyId: validAgentStrategyId(agent.strategyId),
     model: agent.model || _config.activeModel,
     heartbeatOverrides: agent.heartbeatOverrides || {},
     createdAt: new Date().toISOString(),
@@ -1116,6 +1137,7 @@ export async function updateAgent(id, updates) {
   const idx = _config.agents.findIndex(a => a.id === id);
   if (idx === -1) throw new Error('Agent not found');
   const oldAgent = _config.agents[idx];
+  if (updates.strategyId !== undefined) updates = { ...updates, strategyId: validAgentStrategyId(updates.strategyId) };
   _config.agents[idx] = { ...oldAgent, ...updates, updatedAt: new Date().toISOString() };
 
   // Propagate model/strategy changes to all sandboxes using this agent
@@ -1131,6 +1153,8 @@ export async function updateAgent(id, updates) {
       if (strategyChanged) {
         if (_config.sandboxes[sandbox.id].agent.overrides) {
           _config.sandboxes[sandbox.id].agent.overrides.customStrategyRules = null;
+          // A slot copy of the old strategy id would otherwise keep winning over the agent's new strategy.
+          delete _config.sandboxes[sandbox.id].agent.overrides.strategyId;
         }
       }
     }
@@ -1198,8 +1222,8 @@ export function getResolvedAgentForSandbox(sandboxId) {
   if (overridesBelongToSelectedAgent && overrides.description !== null) resolved.description = overrides.description;
   if (overridesBelongToSelectedAgent && overrides.systemPromptTemplate !== null) resolved.systemPromptTemplate = overrides.systemPromptTemplate;
   if (overridesBelongToSelectedAgent && overrides.customSystemPrompt !== null) resolved.customSystemPrompt = overrides.customSystemPrompt;
-  if (overridesBelongToSelectedAgent && Object.prototype.hasOwnProperty.call(overrides, 'strategyId') && overrides.strategyId !== undefined) {
-    resolved.strategyId = overrides.strategyId;
+  if (overridesBelongToSelectedAgent && typeof overrides.strategyId === 'string' && overrides.strategyId.trim() && getStrategyById(overrides.strategyId.trim())) {
+    resolved.strategyId = overrides.strategyId.trim();
   }
 
   if (!overridesBelongToSelectedAgent) {
@@ -1217,27 +1241,45 @@ export async function updateSandboxAgentOverrides(sandboxId, overrides) {
   const scopesAgentOverride = overrideKeys.some(key => Object.prototype.hasOwnProperty.call(overrides, key));
   const scopedOverrides = scopesAgentOverride
     ? { ...overrides, agentId: sandbox.agent.activeAgentId }
-    : overrides;
+    : { ...overrides };
+  // The strategy choice is validated before anything is saved; null/blank removes the slot copy (the agent's own applies).
+  const selection = normalizeStrategySelection(overrides.strategyId);
+  delete scopedOverrides.strategyId;
+  const nextOverrides = {
+    ...(sandbox.agent?.overrides || {}),
+    ...scopedOverrides,
+    heartbeatOverrides: overrides.heartbeatOverrides === null ? {} : {
+      ...(sandbox.agent?.overrides?.heartbeatOverrides || {}),
+      ...(overrides.heartbeatOverrides || {}),
+    },
+  };
+  if (selection.action === 'set') nextOverrides.strategyId = selection.id;
+  else if (selection.action === 'clear') delete nextOverrides.strategyId;
 
   _config.sandboxes[sandboxId] = mergeSandbox({
     ...sandbox,
-    agent: {
-      ...sandbox.agent,
-      overrides: {
-        ...(sandbox.agent?.overrides || {}),
-        ...scopedOverrides,
-        heartbeatOverrides: {
-          ...(sandbox.agent?.overrides?.heartbeatOverrides || {}),
-          ...(overrides.heartbeatOverrides || {}),
-        },
-      },
-    },
+    agent: { ...sandbox.agent, overrides: nextOverrides },
     updatedAt: new Date().toISOString(),
   }, _config);
 
   if (_config.activeSandboxId === sandboxId) syncLegacyAliases(_config);
   await saveConfig();
   return _config.sandboxes[sandboxId];
+}
+
+/**
+ * The slot-permission patch a switch to `activeAgentId` would apply (null when none). Read-only: the routes use it to refuse a switch
+ * that would turn options off while the slot still holds option exposure, before anything is saved.
+ */
+export function previewSwitchPermissionPatch(sandboxId, activeAgentId, overrides = {}) {
+  const sandbox = getSandbox(sandboxId);
+  if (!sandbox) throw new Error('Sandbox not found');
+  const newAgent = _config.agents.find(a => a.id === activeAgentId);
+  if (!newAgent) throw new Error('Agent not found');
+  if (activeAgentId === sandbox.agent.activeAgentId) return null;
+  const selection = normalizeStrategySelection(overrides?.strategyId);
+  const effectiveStrategyId = selection.action === 'set' ? selection.id : newAgent.strategyId;
+  return permissionPatchForFit(strategyOptionFit(getStrategyById(effectiveStrategyId), effectiveStrategyId), sandbox.permissions || {});
 }
 
 export async function updateSandboxAgentSelection(sandboxId, updates) {
@@ -1248,14 +1290,19 @@ export async function updateSandboxAgentSelection(sandboxId, updates) {
   if (!newAgent) throw new Error('Agent not found');
 
   const agentChanged = nextActiveAgentId !== sandbox.agent.activeAgentId;
+  // Everything that can be refused is checked here, before any state changes: the strategy choice, then (below) the permission patch.
+  const selection = normalizeStrategySelection(updates.overrides?.strategyId);
+  const { strategyId: _ignoredStrategyId, ...overrideRest } = updates.overrides || {};
   let mergedOverrides = {
     ...(sandbox.agent?.overrides || {}),
-    ...(updates.overrides || {}),
+    ...overrideRest,
     heartbeatOverrides: {
       ...(sandbox.agent?.overrides?.heartbeatOverrides || {}),
       ...(updates.overrides?.heartbeatOverrides || {}),
     },
   };
+  if (selection.action === 'set') mergedOverrides.strategyId = selection.id;
+  else if (selection.action === 'clear') delete mergedOverrides.strategyId;
   let permissionPatch = null;
   if (agentChanged) {
     // The new agent runs its OWN identity, strategy, rules and cadence: nothing of the previous agent carries over. Anything the
@@ -1269,12 +1316,17 @@ export async function updateSandboxAgentSelection(sandboxId, updates) {
       customStrategyRules: explicit.customStrategyRules ?? null,
       customSystemPrompt: explicit.customSystemPrompt ?? null,
       systemPromptTemplate: explicit.systemPromptTemplate ?? null,
-      strategyId: explicit.strategyId, // undefined = fall back to the new agent's own strategy (never null: null would mean "no strategy")
       heartbeatOverrides: { ...(explicit.heartbeatOverrides || {}) },
     };
-    // The slot permission follows the new agent's strategy fit (see agent-consistency.js); unknown fit leaves it unchanged.
-    const strategy = getStrategyById(explicit.strategyId || newAgent.strategyId);
-    permissionPatch = permissionPatchForFit(strategyOptionFit(strategy, explicit.strategyId || newAgent.strategyId), sandbox.permissions || {});
+    // Only a validated explicit strategy is kept; otherwise the key is removed and the new agent's own strategy applies.
+    if (selection.action === 'set') mergedOverrides.strategyId = selection.id;
+    else delete mergedOverrides.strategyId;
+    // The slot permission follows the SAME strategy the prompt will use (see agent-consistency.js); unknown fit leaves it unchanged.
+    const effectiveStrategyId = selection.action === 'set' ? selection.id : newAgent.strategyId;
+    const strategy = getStrategyById(effectiveStrategyId);
+    permissionPatch = permissionPatchForFit(strategyOptionFit(strategy, effectiveStrategyId), sandbox.permissions || {});
+    // The ordinary permission validator has the last word: an invalid patch refuses the whole switch.
+    if (permissionPatch) validatePermissionsPatch(permissionPatch);
   }
 
   _config.sandboxes[sandboxId] = mergeSandbox({
@@ -1306,6 +1358,7 @@ export async function updateSandboxStrategyRules(sandboxId, rules) {
 // ── Strategies ─────────────────────────────────────────────────────
 
 export async function addStrategy(strategy) {
+  const optionStructures = validateOptionFitInput(strategy.optionStructures);
   const id = crypto.randomUUID().slice(0, 8);
   const newStrategy = {
     id,
@@ -1313,6 +1366,7 @@ export async function addStrategy(strategy) {
     description: strategy.description || '',
     rulesFile: null,
     customRules: strategy.customRules || '',
+    ...(optionStructures === undefined ? {} : { optionStructures }),
     createdAt: new Date().toISOString(),
   };
   _config.strategies.push(newStrategy);
@@ -1323,6 +1377,7 @@ export async function addStrategy(strategy) {
 export async function updateStrategy(id, updates) {
   const idx = _config.strategies.findIndex(s => s.id === id);
   if (idx === -1) throw new Error('Strategy not found');
+  if (updates && updates.optionStructures !== undefined) updates = { ...updates, optionStructures: validateOptionFitInput(updates.optionStructures) };
   _config.strategies[idx] = { ..._config.strategies[idx], ...updates, updatedAt: new Date().toISOString() };
   await saveConfig();
   return _config.strategies[idx];

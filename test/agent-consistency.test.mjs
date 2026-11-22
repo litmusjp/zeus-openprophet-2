@@ -312,7 +312,7 @@ test('an open group gets the closing recipe when the slot does not list a vertic
   };
   const noVertical = { allowOptions: true, allowedStructures: ['long_call', 'long_put'] };
   const reminder = await make(noVertical, async () => ({ groups: [group, { ...group, group_id: 'g2', status: 'closed' }] }));
-  assert.match(reminder, /OPEN SPREAD GROUP: this sandbox holds 1 open two-leg group \(AAPL bull_call_debit\)/);
+  assert.match(reminder, /OPEN SPREAD GROUP: this sandbox holds 1 open two-leg group \(AAPL bull_call_debit, 2 open units\)/);
   assert.match(reminder, /CLOSING \(only\): reverse both legs/);
   assert.match(reminder, /you may not open another spread/);
   assert.match(reminder, /prophet_get_option_groups/);

@@ -30,7 +30,7 @@ const store = await import('../agent/config-store.js?c3-hardening');
 const { buildSystemPrompt, AgentHarness } = await import('../agent/harness.js');
 const { openGroupCloseReminder } = await import('../agent/spread-guidance.js');
 const { permissionPatchForFit, strategyOptionFit, fitDriftWarning, validateOptionFitInput } = await import('../agent/agent-consistency.js');
-const { optionExposureReason } = await import('../agent/switch-guard.js');
+const { optionExposureReason, isFlatTerminalGroup } = await import('../agent/switch-guard.js');
 
 async function reset(mutate = () => {}) {
   const state = clone(after);
@@ -191,7 +191,7 @@ test('a slot without a vertical: the system prompt allows closing a held group, 
   assert.doesNotMatch(prompt, /Its agent schema is single-leg only/);
   assert.doesNotMatch(prompt, /not exposed by this tool/);
   assert.match(prompt, /You open single-leg orders only and may not open a spread/);
-  assert.match(prompt, /close an existing two-leg group as one order, when a heartbeat note tells you one is open/);
+  assert.match(prompt, /close an existing two-leg group as one order, when a heartbeat note tells you an intact one is open/);
   assert.doesNotMatch(prompt, /Debit vertical mechanics/);
   const off = await buildSystemPrompt(agentConfig, { getStrategyById, allowedStructures: ['long_call'], allowOptions: false });
   assert.match(off, /Agent execution is single-leg only/);
@@ -210,7 +210,9 @@ test('the heartbeat close note plus the system prompt give one usable close-only
 
 test('only settled exposure gets the close text; pending, zero-unit, closed and void records do not', async () => {
   const mk = overrides => ({ group_id: 'g', underlying: 'MSFT', structure: 'bull_call_debit', status: 'open', open_units: 1, ...overrides });
-  assert.match(openGroupCloseReminder([mk({ status: 'broken' })]), /OPEN SPREAD GROUP/);
+  const brokenText = openGroupCloseReminder([mk({ status: 'broken' })]);
+  assert.match(brokenText, /BROKEN SPREAD GROUP/);
+  assert.doesNotMatch(brokenText, /CLOSING \(only\)|Close order shape/, 'a broken group is never told to close atomically');
   for (const group of [mk({ status: 'pending_entry', open_units: 0 }), mk({ open_units: 0 }), mk({ status: 'closed' }), mk({ status: 'void' }), mk({ open_units: undefined })]) {
     const text = openGroupCloseReminder([group]);
     assert.match(text, /TWO-LEG GROUP NOT SETTLED/);
@@ -256,16 +258,117 @@ test('previewSwitchPermissionPatch is read-only and says when a switch would tur
   assert.deepEqual(snapshot(L1), before);
 });
 
-test('both agent-switch routes refuse an options-off switch while option exposure is held, before anything is saved (409)', async () => {
+// ── Round 2 (Hermes FQ-01..04) ───────────────────────────────────────────────────────────────────────────────────────
+const goOrder = (overrides = {}) => ({ ID: 'o1', ClientOrderID: 'c1', Symbol: 'AAPL261218C00200000', Qty: 1, Side: 'buy', Type: 'limit', Status: 'accepted', AssetClass: 'us_option', PositionIntent: 'buy_to_open', ...overrides });
+const flatSlot = { positions: [], orders: [], ordersComplete: true, groups: { groups: [] } };
+
+test('the guard reads the order fields exactly as Go serialises them (Symbol / AssetClass / Status, no JSON tags)', async () => {
+  const goSource = await fs.readFile(new URL('../interfaces/trading.go', import.meta.url), 'utf8');
+  const start = goSource.indexOf('type Order struct');
+  const orderStruct = goSource.slice(start, goSource.indexOf('\n}', start));
+  for (const field of ['Symbol', 'AssetClass', 'Status']) {
+    const line = orderStruct.split(/\r?\n/).find(text => new RegExp(`^\\s+${field}\\s+string`).test(text));
+    assert.ok(line, `Go Order still has ${field}`);
+    assert.doesNotMatch(line, /`json:/, `Go Order.${field} has no JSON tag, so it is serialised as ${field}`);
+  }
+  assert.match(optionExposureReason({ ...flatSlot, orders: [goOrder()] }), /1 open option order/);
+  assert.match(optionExposureReason({ ...flatSlot, orders: [goOrder({ Status: 'partially_filled' })] }), /open option order/);
+  assert.match(optionExposureReason({ ...flatSlot, orders: [goOrder({ AssetClass: '', Symbol: 'AAPL261218C00200000' })] }), /open option order/, 'the OCC symbol alone is enough');
+  assert.equal(optionExposureReason({ ...flatSlot, orders: [goOrder({ Status: 'filled' }), goOrder({ Status: 'canceled' }), goOrder({ Status: 'expired' }), goOrder({ Status: 'rejected' })] }), null);
+  assert.equal(optionExposureReason({ ...flatSlot, orders: [goOrder({ Symbol: 'SPY', AssetClass: 'us_equity', Status: 'new' })] }), null, 'a working stock order is not option exposure');
+  assert.match(optionExposureReason({ ...flatSlot, orders: [{ symbol: 'AAPL261218C00200000', asset_class: 'us_option', status: 'accepted' }] }), /open option order/, 'the lowercase shape still works');
+});
+
+test('runGuardedSwitch: a Go-shaped working option order refuses with 409 and nothing is saved; a flat slot saves once', async () => {
+  const { runGuardedSwitch } = await import('../agent/switch-guard.js');
+  const off = () => ({ allowOptions: false });
+  const run = (extra, save) => runGuardedSwitch({ sandboxId: L1, activeAgentId: 'macro-rotation', overrides: {}, previewPatch: off, save, ...extra });
+  let saved = 0;
+  const save = async () => { saved++; return 'saved'; };
+  await assert.rejects(run({ readExposure: async () => ({ ...flatSlot, orders: [goOrder()] }) }, save), error => error.status === 409 && /Switch refused/.test(error.message) && /open option order/.test(error.message));
+  await assert.rejects(run({ readExposure: async () => ({ ...flatSlot, positions: [{ Symbol: 'AAPL261218C00200000', Qty: 1 }] }) }, save), error => error.status === 409);
+  await assert.rejects(run({ readExposure: async () => ({ ...flatSlot, ordersComplete: false }) }, save), error => error.status === 409);
+  await assert.rejects(run({ readExposure: async () => { throw new Error('backend down'); } }, save), error => error.status === 409 && /could not be read/.test(error.message));
+  assert.equal(saved, 0, 'no refusal reached save');
+  assert.equal(await run({ readExposure: async () => flatSlot }, save), 'saved');
+  assert.equal(saved, 1);
+  let reads = 0;
+  assert.equal(await runGuardedSwitch({ sandboxId: L1, activeAgentId: 'mean-reversion', overrides: {}, previewPatch: () => ({ allowOptions: true, allowedStructures: ['long_call'] }), readExposure: async () => { reads++; return {}; }, save }), 'saved');
+  assert.equal(reads, 0, 'a switch that keeps options on never reads the slot');
+});
+
+test('with the real store: a switch to Compass is refused (409, nothing saved) while a Go-shaped working option order exists', async () => {
+  await reset();
+  const { runGuardedSwitch } = await import('../agent/switch-guard.js');
+  const before = snapshot(L1);
+  const guarded = readExposure => runGuardedSwitch({ sandboxId: L1, activeAgentId: 'macro-rotation', overrides: {}, previewPatch: store.previewSwitchPermissionPatch, readExposure, save: () => store.updateSandboxAgentSelection(L1, { activeAgentId: 'macro-rotation' }) });
+  await assert.rejects(guarded(async () => ({ ...flatSlot, orders: [goOrder()] })), error => error.status === 409);
+  assert.deepEqual(snapshot(L1), before);
+  await guarded(async () => flatSlot);
+  assert.equal(store.getSandbox(L1).agent.activeAgentId, 'macro-rotation');
+  assert.equal(store.getPermissionsForSandbox(L1).allowOptions, false);
+});
+
+test('both agent-switch routes go through runGuardedSwitch (the guard is the only way to save a switch)', async () => {
   const source = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
   const sandboxRoute = source.slice(source.indexOf("app.put('/api/sandboxes/:id/agent',"), source.indexOf("app.put('/api/sandboxes/:id/agent/overrides'"));
-  assert.ok(sandboxRoute.indexOf('assertSwitchKeepsOptionsManageable(') > 0);
-  assert.ok(sandboxRoute.indexOf('assertSwitchKeepsOptionsManageable(') < sandboxRoute.indexOf('updateSandboxAgentSelection('), 'the guard runs before the switch is saved');
-  assert.match(sandboxRoute, /res\.status\(err\.status \|\| 400\)/);
   const activateRoute = source.slice(source.indexOf("app.post('/api/agents/:id/activate'"), source.indexOf('// Strategies'));
-  assert.ok(activateRoute.indexOf('assertSwitchKeepsOptionsManageable(') < activateRoute.indexOf('await setActiveAgent('));
-  assert.match(activateRoute, /res\.status\(err\.status \|\| 400\)/);
-  assert.match(source, /error\.status = 409/);
-  assert.match(source, /optionExposureReason\(\{ positions: positions\.data/);
-  assert.match(source, /reason = 'its option exposure could not be read'/, 'an unreadable slot refuses rather than guesses');
+  for (const route of [sandboxRoute, activateRoute]) {
+    assert.match(route, /runGuardedSwitch\(/);
+    assert.match(route, /res\.status\(err\.status \|\| 400\)/);
+  }
+  assert.match(sandboxRoute, /save: \(\) => updateSandboxAgentSelection\(/);
+  assert.match(activateRoute, /save: \(\) => setActiveAgent\(/);
+  assert.equal(sandboxRoute.split('updateSandboxAgentSelection(').length - 1, 1, 'no unguarded save in the sandbox route');
+  assert.equal(activateRoute.split('setActiveAgent(').length - 1, 1, 'no unguarded save in the activate route');
+  assert.doesNotMatch(source, /assertSwitchKeepsOptionsManageable/);
+});
+
+test('FQ-02: a definition change clears only a slot copy of the OLD strategy; an intentional different slot strategy stays', async () => {
+  await reset(state => {
+    state.slots[L1].agent.activeAgentId = 'mean-reversion';
+    state.slots[L1].agent.overrides = { ...state.slots[L1].agent.overrides, agentId: 'mean-reversion', strategyId: 'etf-mean-reversion', heartbeatOverrides: {} };
+    state.slots[L2].agent.overrides = { ...state.slots[L2].agent.overrides, agentId: 'mean-reversion', strategyId: 'capital-preservation' };
+  });
+  assert.equal(store.getResolvedAgentForSandbox(L1).strategyId, 'etf-mean-reversion');
+  assert.equal(store.getResolvedAgentForSandbox(L2).strategyId, 'capital-preservation');
+  await store.updateAgent('mean-reversion', { strategyId: 'default' });
+  assert.equal(store.getResolvedAgentForSandbox(L1).strategyId, 'default', 'the copy of the old definition strategy is dropped, the new definition applies');
+  assert.equal(store.getResolvedAgentForSandbox(L2).strategyId, 'capital-preservation', 'the intentional override survives');
+  await store.loadConfig();
+  assert.equal(store.getResolvedAgentForSandbox(L1).strategyId, 'default');
+  assert.equal(store.getResolvedAgentForSandbox(L2).strategyId, 'capital-preservation');
+});
+
+test('FQ-03: a broken group gets single-leg survivor guidance and never the atomic close envelope; intact and mixed lists are told apart', () => {
+  const mk = overrides => ({ group_id: 'g', underlying: 'MSFT', structure: 'bull_call_debit', status: 'open', open_units: 2, entry_units: 2, entry_filled_units: 2, closed_units: 0, close_order_pending: false, ...overrides });
+  const broken = openGroupCloseReminder([mk({ status: 'broken' })]);
+  assert.match(broken, /BROKEN SPREAD GROUP \(MSFT bull_call_debit, 2 open units\)/);
+  assert.match(broken, /the backend refuses a two-leg close of it/);
+  assert.match(broken, /single legs under your own Strategy Rules/);
+  assert.match(broken, /single-leg order and the matching close intent/);
+  assert.match(broken, /never trade assigned stock yourself/);
+  assert.match(broken, /No new spread is opened while a group is broken/);
+  assert.doesNotMatch(broken, /CLOSING \(only\)|Close order shape|net credit per unit|OPEN SPREAD GROUP/);
+  const intact = openGroupCloseReminder([mk()]);
+  assert.match(intact, /OPEN SPREAD GROUP: this sandbox holds 1 open two-leg group \(MSFT bull_call_debit, 2 open units\)/);
+  assert.match(intact, /Close order shape/);
+  assert.doesNotMatch(intact, /BROKEN SPREAD GROUP/);
+  const mixed = openGroupCloseReminder([mk(), mk({ group_id: 'b', underlying: 'AAPL', status: 'broken' }), mk({ group_id: 'p', status: 'pending_entry', open_units: 0, entry_filled_units: 0 })]);
+  assert.equal(mixed.split('OPEN SPREAD GROUP: this sandbox holds 1 open two-leg group').length - 1, 1);
+  assert.equal(mixed.split('BROKEN SPREAD GROUP (AAPL bull_call_debit').length - 1, 1);
+  assert.match(mixed, /not yet settled/);
+  assert.ok(mixed.indexOf('OPEN SPREAD GROUP') < mixed.indexOf('BROKEN SPREAD GROUP'), 'intact first');
+});
+
+test('FQ-04: a proven flat history row is not exposure (guard, note); pending, partial, unknown and broken rows still are', () => {
+  const row = overrides => ({ group_id: 'g', status: 'open', entry_units: 2, entry_filled_units: 2, closed_units: 2, open_units: 0, close_order_pending: false, ...overrides });
+  assert.equal(isFlatTerminalGroup(row()), true);
+  assert.equal(optionExposureReason({ ...flatSlot, groups: { groups: [row()] } }), null);
+  assert.equal(openGroupCloseReminder([row()]), '', 'a flat row produces no note at all');
+  for (const bad of [{ close_order_pending: true }, { entry_filled_units: 1, closed_units: 1 }, { entry_filled_units: 0, closed_units: 0 }, { open_units: 1, closed_units: 1 }, { status: 'pending_entry' }, { status: 'broken' }, { entry_units: undefined }, { closed_units: undefined }, { close_order_pending: undefined }, { open_units: 'x' }]) {
+    assert.equal(isFlatTerminalGroup(row(bad)), false, JSON.stringify(bad));
+    assert.match(optionExposureReason({ ...flatSlot, groups: { groups: [row(bad)] } }), /spread group/, JSON.stringify(bad));
+  }
+  assert.match(optionExposureReason({ ...flatSlot, groups: { groups: [row(), row({ group_id: 'h', close_order_pending: true })] } }), /1 two-leg spread group/);
 });

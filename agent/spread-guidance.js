@@ -4,6 +4,7 @@
 // shared HOW and removes the sentences that would otherwise tell the agent spreads are impossible or price a spread like one leg.
 
 import { WORKFLOW_SPREAD_PAIRS } from './alphadesk-workflow.js';
+import { isFlatTerminalGroup, pick } from './switch-guard.js';
 
 export const DEBIT_VERTICAL_STRUCTURES = ['bull_call_debit', 'bear_put_debit'];
 
@@ -63,9 +64,19 @@ const NET_QUOTES_CLOSE = ' Net quotes, from each leg\'s timestamped bid and ask 
 const CLOSE_ENVELOPE = ' Close order shape: one `prophet_place_options_order` call with `legs` (exactly two; each has symbol, side, position_intent and the positive quote price you used, from that leg\'s own bid and ask read in the same beat), order_type limit, and one client_order_id; a retry keeps the identical legs, quantity and limit.';
 const UNSETTLED_GROUP_NOTE = ' A two-leg group that is not yet settled (its entry is still pending, or it shows no open units) is not yet a position you can close: open nothing new, close no leg on its own, and read `prophet_get_option_groups` again next beat.';
 
-// A group is closable exposure only when the ledger shows open units on an open or broken group.
-function closableGroup(group) {
-  return group && (group.status === 'open' || group.status === 'broken') && Number(group.open_units) > 0;
+// An intact group is closable as one two-leg order only when the ledger shows open units on a group that is still open.
+function intactGroup(group) {
+  return group && pick(group, 'status') === 'open' && Number(pick(group, 'open_units')) > 0;
+}
+
+function groupLabel(group) {
+  const units = Number(pick(group, 'open_units'));
+  return `${pick(group, 'underlying') || 'underlying'} ${pick(group, 'structure') || 'spread'}${units > 0 ? `, ${units} open unit${units === 1 ? '' : 's'}` : ''}`;
+}
+
+// A broken group is NOT closed as a group (the backend refuses it): its surviving legs are ordinary single-leg positions.
+function brokenGroupNote(groups) {
+  return `\n\nBROKEN SPREAD GROUP (${groups.map(groupLabel).join('; ')}): this group is no longer closed as a group; the backend refuses a two-leg close of it, and its remaining legs are managed as single legs under your own Strategy Rules. Call \`prophet_get_option_groups\` (broken_reason, legs) and read your option positions, act only on a leg you confirm is still held, with a single-leg order and the matching close intent, and never trade assigned stock yourself: the backend resolves linked stock. No new spread is opened while a group is broken.`;
 }
 
 /**
@@ -76,11 +87,11 @@ function closableGroup(group) {
 export const CLOSE_ONLY_REPLACEMENTS = [
   [
     'Assessment currently supports long calls, long puts, and same-expiry 1:1 directional debit verticals. Agent execution is single-leg only; never claim an unsupported spread was executed.',
-    'Assessment supports long calls, long puts, and same-expiry 1:1 directional debit verticals. You open single-leg orders only and may not open a spread. If a heartbeat note tells you an existing two-leg group is open, you may close it as one order as that note describes. Never claim a spread was executed unless the tool returns it filled.',
+    'Assessment supports long calls, long puts, and same-expiry 1:1 directional debit verticals. You open single-leg orders only and may not open a spread. If a heartbeat note tells you an existing intact two-leg group is open, you may close it as one order as that note describes; a broken group is handled as that note says. Never claim a spread was executed unless the tool returns it filled.',
   ],
   [
     'Use `prophet_place_options_order` for a single OCC option symbol. Its agent schema is single-leg only. Do not construct a spread through sequential single-leg orders; backend atomic multi-leg support is not exposed by this tool.',
-    'Use `prophet_place_options_order` for a single OCC option symbol to open a position. Its `legs` field exists only to close an existing two-leg group as one order, when a heartbeat note tells you one is open. You never open a spread, and never construct or close one through separate single-leg orders.',
+    'Use `prophet_place_options_order` for a single OCC option symbol to open a position. Its `legs` field exists only to close an existing two-leg group as one order, when a heartbeat note tells you an intact one is open. You never open a spread, and never construct or close one through separate single-leg orders.',
   ],
 ];
 
@@ -94,24 +105,32 @@ export function applyCloseOnlyText(prompt) {
 /**
  * Shown in the heartbeat input when the sandbox holds a two-leg group but the slot's permission does not list a debit vertical
  * (for example after an agent switch): the agent may still have to manage and close it, so it gets the complete closing recipe.
- * It never allows opening another spread. Groups without open units get only a short "not settled" note.
+ * It never allows opening another spread. An intact group gets the close recipe, a BROKEN group gets single-leg survivor guidance (the
+ * backend refuses a two-leg close of it), and an unsettled or flat group gets a short note or nothing.
  */
 export function openGroupCloseReminder(openGroups = []) {
-  const groups = Array.isArray(openGroups) ? openGroups : [];
-  const closable = groups.filter(closableGroup);
+  // Flat history rows (everything filled and closed, nothing working) hold no exposure and are never mentioned.
+  const groups = (Array.isArray(openGroups) ? openGroups : []).filter(group => group && !isFlatTerminalGroup(group));
   if (!groups.length) return '';
-  if (!closable.length) return `\n\nTWO-LEG GROUP NOT SETTLED:${UNSETTLED_GROUP_NOTE}`;
-  const named = ` (${closable.map(g => `${g.underlying || 'underlying'} ${g.structure || 'spread'}, ${Number(g.open_units)} open unit${Number(g.open_units) === 1 ? '' : 's'}`).join('; ')})`;
-  return [
-    `\n\nOPEN SPREAD GROUP: this sandbox holds ${closable.length} open two-leg group${closable.length === 1 ? '' : 's'}${named}, although your permissions do not list opening a vertical. This note governs how you close it; you may manage and close it under your own Strategy Rules, and you may not open another spread.`,
-    CLOSE_ENVELOPE,
-    CLOSING_RECIPE,
-    ' quantity is the group\'s open units minus units already in a pending close order.',
-    NET_QUOTES_CLOSE,
-    NEVER_LEG_OUT,
-    ' Call `prophet_get_option_groups` to read each group\'s open units and status before you act. A group marked broken: the remaining leg is managed under your own rules, and you never trade assigned stock yourself.',
-    closable.length < groups.length ? UNSETTLED_GROUP_NOTE : '',
-  ].join('');
+  const intact = groups.filter(intactGroup);
+  const broken = groups.filter(group => pick(group, 'status') === 'broken');
+  const unsettled = groups.filter(group => !intactGroup(group) && pick(group, 'status') !== 'broken');
+  const parts = [];
+  if (intact.length) {
+    const named = ` (${intact.map(groupLabel).join('; ')})`;
+    parts.push([
+      `\n\nOPEN SPREAD GROUP: this sandbox holds ${intact.length} open two-leg group${intact.length === 1 ? '' : 's'}${named}, although your permissions do not list opening a vertical. This note governs how you close it; you may manage and close it under your own Strategy Rules, and you may not open another spread.`,
+      CLOSE_ENVELOPE,
+      CLOSING_RECIPE,
+      " quantity is the group's open units minus units already in a pending close order.",
+      NET_QUOTES_CLOSE,
+      NEVER_LEG_OUT,
+      " Call `prophet_get_option_groups` to read each group's open units and status before you act.",
+    ].join(''));
+  }
+  if (broken.length) parts.push(brokenGroupNote(broken));
+  if (unsettled.length) parts.push(intact.length || broken.length ? UNSETTLED_GROUP_NOTE : `\n\nTWO-LEG GROUP NOT SETTLED:${UNSETTLED_GROUP_NOTE}`);
+  return parts.join('');
 }
 
 /** Same heartbeat when the group list could not be read: never guess, read it first. */

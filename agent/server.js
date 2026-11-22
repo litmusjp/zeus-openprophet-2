@@ -52,7 +52,7 @@ import { createAuthMiddleware, createBasicAuthMiddleware, createBasicOperatorOnl
 import { createManagedGateProxy, registerManagedGateProxy, createManagedQualityProxy, registerManagedQualityProxy } from './managed-gate-proxy.js';
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
 import { fitDriftWarning, hasStartListBlock, isOptionsAgent, strategyOptionFit } from './agent-consistency.js';
-import { SWITCH_REFUSAL_PREFIX, optionExposureReason } from './switch-guard.js';
+import { runGuardedSwitch } from './switch-guard.js';
 import { savePluginAndApplyRuntime } from './plugin-runtime-apply.js';
 import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
 import { affectedSandboxesForAgentModelChange, hasBusyAffectedSandbox, chatgptStatus, createChatGPTAuthFlow, createChatGPTModelCheck, disconnectChatGPT, nativeOpenCodeEnv, stripOperatorSecrets, isChatGPTModelVerified, recordChatGPTModelCheck, getVerifiedChatGPTModels } from './chatgpt-oauth.js';
@@ -1413,29 +1413,16 @@ app.post('/api/sandboxes/:id/activate', async (req, res) => {
 
 // An agent switch sets the slot's permissions from the new agent's strategy fit; like PUT /api/permissions, that restarts the
 // slot's trading backend so the new structure list is the one it enforces.
-// Refuses (before anything is saved) a switch that would turn options off while the slot still holds option exposure.
-async function assertSwitchKeepsOptionsManageable(sandboxId, activeAgentId, overrides) {
-  if (!sandboxId || !activeAgentId) return;
-  const patch = previewSwitchPermissionPatch(sandboxId, activeAgentId, overrides);
-  if (patch?.allowOptions !== false) return;
-  let reason;
-  try {
-    const client = getGoClientForSandbox(sandboxId);
-    if (!client) throw new Error('trading backend unavailable');
-    const [positions, orders, groups] = await Promise.all([
-      client.get('/api/v1/options/positions', { timeout: 8000 }),
-      client.get('/api/v1/orders?status=all', { timeout: 8000 }),
-      client.get('/api/v1/options/groups', { timeout: 4000 }),
-    ]);
-    reason = optionExposureReason({ positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true, groups: groups.data });
-  } catch {
-    reason = 'its option exposure could not be read';
-  }
-  if (reason) {
-    const error = new Error(`${SWITCH_REFUSAL_PREFIX}${reason}.`);
-    error.status = 409;
-    throw error;
-  }
+// What a switch needs read from the slot before it may turn options off (see switch-guard.js runGuardedSwitch).
+async function readSlotOptionExposure(sandboxId) {
+  const client = getGoClientForSandbox(sandboxId);
+  if (!client) throw new Error('trading backend unavailable');
+  const [positions, orders, groups] = await Promise.all([
+    client.get('/api/v1/options/positions', { timeout: 8000 }),
+    client.get('/api/v1/orders?status=all', { timeout: 8000 }),
+    client.get('/api/v1/options/groups', { timeout: 4000 }),
+  ]);
+  return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true, groups: groups.data };
 }
 
 async function restartBackendAfterAgentSwitch(sandboxId) {
@@ -1463,8 +1450,8 @@ app.put('/api/sandboxes/:id/agent', protectChatGPTModelChange, async (req, res) 
     if (activeAgentId !== undefined) updates.activeAgentId = activeAgentId;
     if (model !== undefined) updates.model = model;
     if (Object.keys(overrides).length) updates.overrides = overrides;
-    if (activeAgentId !== undefined) await assertSwitchKeepsOptionsManageable(req.params.id, activeAgentId, overrides);
-    const sandbox = await updateSandboxAgentSelection(req.params.id, updates);
+    // The guard refuses (409, nothing saved) a switch that would turn options off while the slot still holds option exposure.
+    const sandbox = await runGuardedSwitch({ sandboxId: req.params.id, activeAgentId, overrides, previewPatch: previewSwitchPermissionPatch, readExposure: () => readSlotOptionExposure(req.params.id), save: () => updateSandboxAgentSelection(req.params.id, updates) });
     await restartBackendAfterAgentSwitch(req.params.id);
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
@@ -1784,8 +1771,8 @@ app.post('/api/agents/:id/activate', protectChatGPTModelChange, async (req, res)
       if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: agent.model, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
       if (harness._beating || harness._proc) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its assignment' });
     }
-    await assertSwitchKeepsOptionsManageable(getActiveSandbox()?.id, req.params.id, {});
-    await setActiveAgent(req.params.id);
+    const activeSandboxId = getActiveSandbox()?.id;
+    await runGuardedSwitch({ sandboxId: activeSandboxId, activeAgentId: req.params.id, overrides: {}, previewPatch: previewSwitchPermissionPatch, readExposure: () => readSlotOptionExposure(activeSandboxId), save: () => setActiveAgent(req.params.id) });
     await restartBackendAfterAgentSwitch(getActiveSandbox()?.id);
     await refreshHarnessConfigForSandbox(getActiveSandbox()?.id, { resetSession: true });
     broadcast('config', safeConfig());

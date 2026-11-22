@@ -1153,8 +1153,9 @@ export async function updateAgent(id, updates) {
       if (strategyChanged) {
         if (_config.sandboxes[sandbox.id].agent.overrides) {
           _config.sandboxes[sandbox.id].agent.overrides.customStrategyRules = null;
-          // A slot copy of the old strategy id would otherwise keep winning over the agent's new strategy.
-          delete _config.sandboxes[sandbox.id].agent.overrides.strategyId;
+          // A slot COPY of the old definition strategy would otherwise keep winning over the agent's new strategy. A different
+          // explicit slot strategy is the operator's own choice and stays (the prompt-preview drift warning still reports it).
+          if (_config.sandboxes[sandbox.id].agent.overrides.strategyId === oldAgent.strategyId) delete _config.sandboxes[sandbox.id].agent.overrides.strategyId;
         }
       }
     }

@@ -110,9 +110,17 @@ test('the plan: what changes and what does not', () => {
   assert.deepEqual(second.permissions, {});
 });
 
+// Nov 24: B1 (all agents) and B2 (catalyst family only) are the only intended changes against the Nov 22 live previews.
+const B1_ADDED = " For entry screening, a strategy condition evaluated on usable data that fails is NO_SETUP; skipped, unfinished or unverified research remains INCOMPLETE_RESEARCH under your existing rules. Use DATA_BLOCK when unavailable required usable data prevents an otherwise required action; in particular, a due exit with no fresh exact-contract quote remains DATA_BLOCK under the exit rule, and is still due.";
+const B2_ADDED = " Direction budget (new openings only, never a reason to sell): before any new opening, price the direction you would add. Bullish means a long call or bull-call debit; bearish means a long put or bear-put debit; never net the two directions. Add (a) held cost: remaining quantity x the broker average entry premium x 100 for each single option, an intact vertical counted once as remaining spread units x its recorded filled net debit x 100, inherited lots included; (b) reserved cost: the unfilled opening quantity of every working, planned or submission-uncertain opening order x its limit x 100 (net debit for a vertical), each order counted once and released only after its terminal cancel or withdrawal is reconciled; (c) the candidate: its unfilled opening quantity x its bounded positive limit x 100 (net debit for a vertical); a partly filled candidate has its filled units in (a) and only the unfilled part here, and the whole candidate is never added twice. If (a)+(b)+(c) in that direction exceeds 15% of current account equity, skip the entry and record REJECT with the single number that failed. Use fresh equity, positions, spread groups and orders from this beat; if any exposure or price bound cannot be read or reconciled, skip the entry instead of assuming zero. In the entry decision log equity, direction, held cost, reserved cost, candidate cost and the resulting percent. Existing sizing, max-position limits and every exit are unchanged.";
+const DECISIVE = 'a scan that skipped candidates is INCOMPLETE_RESEARCH, not NO_SETUP.';
+const CATALYST_END = '(for example the gap percent, the range break or the volume versus the range baseline) in the decision log.';
+const withB1 = text => { assert.equal(text.split(DECISIVE).length - 1, 1); return text.replace(DECISIVE, DECISIVE + B1_ADDED); };
+const stripB1 = text => { assert.equal(text.split(B1_ADDED).length - 1, 1); return text.replace(B1_ADDED, ''); };
+const withB2 = text => { assert.equal(text.split(CATALYST_END).length - 1, 1); return text.replace(CATALYST_END, CATALYST_END + B2_ADDED); };
 // ── Herald and Pendulum keep today's prompts byte for byte (attribution for Monday's first spreads) ───────────────
 test('Herald on L1 renders byte-identical to the live preview, apart from the new option-groups menu entry', async () => {
-  const expected = goldenL1.replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups');
+  const expected = withB2(withB1(goldenL1.replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups')));
   assert.notEqual(expected, goldenL1);
   const actual = await promptFor('sbx_723be98b');
   assert.equal(actual, expected);
@@ -124,7 +132,7 @@ test('Pendulum on L2 renders byte-identical to the live preview, apart from the 
   assert.ok(l1Paragraph.length > 400 && goldenL2.includes(old));
   // The third allowed difference: the corrupted dash in the ETF rules is fixed (config edit C6).
   const expected = goldenL2.replace(old, l1Paragraph).replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups').split('â€“').join('-');
-  const actual = await promptFor('sbx_956ff9e4');
+  const actual = stripB1(await promptFor('sbx_956ff9e4'));
   assert.equal(actual, expected);
 });
 

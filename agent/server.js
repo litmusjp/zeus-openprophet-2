@@ -25,6 +25,7 @@ import { createLoginVerifier } from './dashboard-login.js';
 import { registerSecretsRoutes } from './secrets-routes.js';
 import { loadOrderActorMap, resolveOrderActorWithJournal } from './history-attribution.js';
 import { OrderAttributionJournal } from './order-attribution-journal.js';
+import { IvHistoryCollector, IvHistoryStore, IV_CAPTURE, createIvHistoryHandler, parseStartList, underlyingOf } from './iv-history.js';
 import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
@@ -2289,6 +2290,44 @@ const collectSlackDailySummary = createSlackDailyCollector({
   reconcile: reconcileSandboxOrders, buildLedger: buildTradeLedger,
 });
 
+// IV history (Nov 24, Q1): research data only. One scheduler owner; the collector reads market data through the trading backend and
+// appends rows to data/iv-history/. It never touches a heartbeat, an order or a permission. Reads of /api/iv-history only read stored rows.
+const ivStore = new IvHistoryStore(path.join(PROJECT_ROOT, 'data', 'iv-history'));
+function ivDataClient() {
+  for (const sandbox of getSandboxes()) {
+    const client = getExistingGoClientForSandbox(sandbox.id);
+    if (client) return client;
+  }
+  return goAxios;
+}
+const ivCollector = new IvHistoryCollector({
+  store: ivStore,
+  now: () => Date.now(),
+  sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+  log: message => console.log('  ' + message),
+  get: async requestPath => (await ivDataClient().get(requestPath, { timeout: IV_CAPTURE.symbolTimeoutMs })).data,
+  attempts: async () => {
+    const value = (await ivDataClient().get('/api/v1/diagnostics/provider-attempts', { timeout: 5000 })).data?.provider_attempts;
+    if (!Number.isFinite(value)) throw new Error('provider attempt counter unreadable');
+    return value;
+  },
+  universe: async () => {
+    const held = [];
+    for (const sandbox of getSandboxes()) {
+      const client = getExistingGoClientForSandbox(sandbox.id);
+      if (!client) continue;
+      try {
+        const response = await client.get('/api/v1/options/positions', { timeout: 5000 });
+        const rows = Array.isArray(response.data) ? response.data : (response.data?.positions || []);
+        for (const row of rows) { const underlying = underlyingOf(row?.Symbol || row?.symbol); if (underlying) held.push(underlying); }
+      } catch { /* a slot whose backend cannot be read simply adds no held names */ }
+    }
+    const lists = ['catalyst', 'default', 'mean-reversion'].flatMap(id => parseStartList(getAgentById(id)?.customSystemPrompt));
+    return ['SPY', 'QQQ', 'IWM', ...held, ...lists];
+  },
+});
+app.get('/api/iv-history', createIvHistoryHandler(ivStore));
+
 app.get('/api/trades', async (req, res) => {
   try {
     const config = getConfig();
@@ -2569,6 +2608,7 @@ if (EXECUTION_START_ENABLED) {
     console.log(`\n  Prophet Agent Dashboard: http://localhost:${PORT}`);
     console.log(`  Network:                http://0.0.0.0:${PORT}`);
     console.log(`  Trading Bot Backend:    ${TRADING_BOT_URL}`);
+    if (process.env.IV_HISTORY_ENABLED !== '0') setInterval(() => { ivCollector.tick().catch(() => {}); }, IV_CAPTURE.tickMs).unref();
     console.log(`  Active Account:         ${activeAccount?.name || 'none'}\n`);
   });
 } else {

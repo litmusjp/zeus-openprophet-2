@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,13 @@ type ProviderRetryPolicy struct {
 }
 
 var defaultProviderRetryPolicy = ProviderRetryPolicy{MaxAttempts: 3, InitialWait: 100 * time.Millisecond, MaxWait: 750 * time.Millisecond, Total: 3 * time.Second}
+
+// providerAttempts counts every HTTP attempt made through DoProviderRequest since the process started, retries included. It is
+// read-only diagnostics used to budget research reads; it never gates, delays or changes a request.
+var providerAttempts atomic.Int64
+
+// ProviderAttemptCount returns the cumulative number of provider HTTP attempts made through DoProviderRequest.
+func ProviderAttemptCount() int64 { return providerAttempts.Load() }
 
 // ProviderError is a sanitized upstream failure. It intentionally excludes
 // provider response bodies, which may contain credentials or account data.
@@ -79,6 +87,7 @@ func DoProviderRequest(ctx context.Context, client *http.Client, endpoint string
 		if err != nil {
 			return nil, 0, &ProviderError{Endpoint: providerEndpoint(endpoint), Category: "request_build", Attempts: attempt, Err: err}
 		}
+		providerAttempts.Add(1)
 		resp, doErr := noRedirectClient.Do(req)
 		if doErr != nil {
 			if safe && attempt < policy.MaxAttempts && callCtx.Err() == nil {

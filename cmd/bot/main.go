@@ -488,6 +488,7 @@ func setupRouter(orderController *controllers.OrderController, tradingReady bool
 		api.GET("/orders", orderController.HandleGetOrders)
 		api.GET("/clock", orderController.HandleGetMarketClock)
 		api.GET("/calendar", orderController.HandleGetMarketCalendar)
+		api.GET("/diagnostics/provider-attempts", controllers.HandleGetProviderAttempts)
 		api.POST("/risk/daily-loss/evaluate", orderController.HandleEvaluateDailyLossLock)
 		api.GET("/risk/session-lock", orderController.HandleGetSessionLock)
 		api.GET("/risk/option-spread-cap", orderController.HandleGetOptionSpreadCap)

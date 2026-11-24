@@ -192,7 +192,7 @@ export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now
     return {
       status: 'session_not_covered', reason: 'date_outside_calendar_coverage', requested_date: requestedDate,
       coverage_start: coverageStart, coverage_end: coverageEnd,
-      message: `the requested date ${requestedDate} is outside the broker calendar's coverage (${coverageStart} to ${coverageEnd}), so this tool cannot read that session; use the range recorded for the event`,
+      message: `the requested date ${requestedDate} is outside the broker calendar's coverage (${coverageStart} to ${coverageEnd}), so this tool cannot read that session; use the range, anchor and plan recorded for the event; do not request an older anchor again and do not rebuild a missing range`,
     };
   }
   const row = rows.find(s => s.date === requestedDate);

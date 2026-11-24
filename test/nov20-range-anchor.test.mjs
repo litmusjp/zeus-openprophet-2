@@ -201,3 +201,11 @@ test('B02 (+): readable forward coverage still gives the genuine unsupported-dat
   assert.equal(holiday.result.status, 'invalid_input');
   assert.match(holiday.result.error, /no regular session on 2026-11-18/);
 });
+
+// Nov 24 (Q2b): the refusal message is clarified; the structured status, reason and coverage fields are asserted unchanged above.
+test("Q2b: a prior-date refusal tells the agent to reuse the recorded range, anchor and plan, never to re-request or rebuild", async () => {
+  const { result } = await run({ window_start: "2026-11-17T14:30:00Z" });
+  assert.equal(result.status, "session_not_covered");
+  assert.equal(result.reason, "date_outside_calendar_coverage");
+  assert.match(result.message, /use the range, anchor and plan recorded for the event; do not request an older anchor again and do not rebuild a missing range/);
+});

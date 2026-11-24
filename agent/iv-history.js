@@ -10,17 +10,32 @@ import { nyDateOf, sessionFields } from '../session-clock.js';
 
 export const IV_CAPTURE = Object.freeze({
   leadMinutes: 15,       // capture starts this long before the regular close
-  windowMinutes: 5,      // and may run for this long (a hard time cap)
+  windowMinutes: 5,      // and may run for this long: the hard end of every read the collector starts
   minDte: 25,            // nearest confirmed expiry at least this many calendar days out
   maxDte: 37,            // expiry search window (the expirations read probes one provider call per weekday in it)
   universeCap: 30,
-  attemptBudget: 500,    // provider attempts per day (Go provider attempts seen through the counter route, plus one per app-level quote/bars read)
-  paceMs: 1500,          // pause between symbols
-  symbolTimeoutMs: 15000,
+  // Provider-attempt budget per session day. Backend attempts through the shared call point are read from the backend counter (exact for
+  // the collector, over-counted when agents share that backend, which is the safe direction). Before EVERY read the collector reserves that
+  // read's worst case, so the day's total cannot exceed the cap through the shared call point: expirations = one probe per weekday in the
+  // window x 3 attempts, chain = up to 20 pages x 3 attempts (the backend's own ceilings). Reads that do not go through the shared call
+  // point (the Alpaca SDK quote and bars routes) are charged at a fixed documented weight each (a quote route reads the latest quote, the
+  // latest trade and daily bars).
+  attemptBudget: 500,
+  attemptsPerCall: 3,    // DoProviderRequest's MaxAttempts
+  chainPageCeiling: 20,  // GetOptionsChain's page loop bound
+  quoteWeight: 3,
+  barsWeight: 3,
+  paceMs: 1000,          // pause between symbols
+  symbolTimeoutMs: 25000, // whole-symbol deadline (never longer than the window)
   tickMs: 30000,
   freshMs: 2 * 60 * 1000, // the existing execution freshness rule; the collector only reads it, never widens it
   closesNeeded: 21,      // 21 completed daily closes = 20 log returns
 });
+
+/** Worst-case provider attempts of one expirations read (one probe per weekday in the window) and of one chain read. */
+export const expirationsReserve = (cfg = IV_CAPTURE) => (Math.ceil((cfg.maxDte - cfg.minDte + 1) * 5 / 7) + 1) * cfg.attemptsPerCall;
+export const chainReserve = (cfg = IV_CAPTURE) => cfg.chainPageCeiling * cfg.attemptsPerCall;
+export const symbolReserve = (cfg = IV_CAPTURE) => cfg.quoteWeight + cfg.barsWeight + expirationsReserve(cfg) + chainReserve(cfg);
 
 const finite = v => typeof v === 'number' && Number.isFinite(v);
 const norm = k => String(k).toLowerCase().replace(/_/g, '');
@@ -49,12 +64,25 @@ export function pickExpiry(result, minDte = IV_CAPTURE.minDte) {
   return { expiry: chosen.date, dte: chosen.dte, basis: 'nearest_confirmed', earlierUnchecked };
 }
 
-/** Same strike and expiry for both legs: the strike nearest the underlying price (lower strike on a tie) that lists BOTH a call and a put. */
-export function pickAtm(contracts, spot) {
+/** Calendar date (YYYY-MM-DD) of a contract: its ExpirationDate field, else the date inside its OCC symbol. */
+export function contractExpiry(c) {
+  const field = pick(c, 'expirationdate');
+  if (typeof field === 'string' && /^\d{4}-\d{2}-\d{2}/.test(field)) return field.slice(0, 10);
+  const m = /^[A-Z]{1,6}(\d{2})(\d{2})(\d{2})[CP]\d{8}$/.exec(String(pick(c, 'symbol') || ''));
+  return m ? `20${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+/**
+ * Same strike and expiry for both legs: the strike nearest the underlying price (lower strike on a tie) that lists BOTH a call and a put.
+ * When `expiry` is given, only contracts of exactly that expiry are considered (the chain route is trusted for nothing here).
+ */
+export function pickAtm(contracts, spot, expiry) {
   if (!Array.isArray(contracts) || !contracts.length) return { reason: 'chain_empty' };
   if (!finite(spot) || spot <= 0) return { reason: 'no_underlying_price' };
+  const scoped = expiry ? contracts.filter(c => contractExpiry(c) === expiry) : contracts;
+  if (!scoped.length) return { reason: 'expiry_mismatch' };
   const byStrike = new Map();
-  for (const c of contracts) {
+  for (const c of scoped) {
     const strike = pick(c, 'strikeprice');
     const type = String(pick(c, 'contracttype') || '').toLowerCase();
     if (!finite(strike) || (type !== 'call' && type !== 'put')) continue;
@@ -69,7 +97,10 @@ export function pickAtm(contracts, spot) {
   return { strike, call: legs.call, put: legs.put };
 }
 
-/** A leg's IV counts only when it is a finite, positive decimal (a value above 10 is a percent, not a decimal: refused, never rescaled). */
+/**
+ * A leg's IV counts only when it is a finite, positive decimal (a value above 10 is a percent, not a decimal: refused, never rescaled) and
+ * its quote is fresh by the same rule the backend uses for execution: not older than two minutes and not in the future.
+ */
 export function legIv(contract, nowMs, freshMs = IV_CAPTURE.freshMs) {
   const iv = pick(contract, 'impliedvolatility');
   if (iv === undefined || iv === null) return { reason: 'iv_missing' };
@@ -77,7 +108,8 @@ export function legIv(contract, nowMs, freshMs = IV_CAPTURE.freshMs) {
   if (iv > 10) return { reason: 'iv_units' };
   const ts = Date.parse(pick(contract, 'quotetimestamp') || '');
   if (!Number.isFinite(ts)) return { reason: 'quote_timestamp_missing' };
-  if (nowMs - ts > freshMs || ts - nowMs > 5000) return { reason: 'quote_stale' };
+  if (ts > nowMs) return { reason: 'quote_future' };
+  if (nowMs - ts > freshMs) return { reason: 'quote_stale' };
   return { iv };
 }
 
@@ -100,13 +132,13 @@ export function realisedVol(closes) {
   return { value: Math.sqrt(variance) * Math.sqrt(252), window: r.length };
 }
 
-/** Underlying price from the last trade or a sane quote, both of which must be fresh by the existing two-minute rule. */
+/** Underlying price from the last trade or a sane quote, both of which must be fresh and not in the future (the backend's own rule). */
 export function underlyingPrice(quote, nowMs, freshMs = IV_CAPTURE.freshMs) {
   const trade = pick(quote, 'last_trade');
   const tp = pick(trade, 'price'), tt = Date.parse(pick(trade, 'timestamp') || '');
-  if (finite(tp) && tp > 0 && Number.isFinite(tt) && nowMs - tt <= freshMs) return { price: tp, at: new Date(tt).toISOString(), source: 'last_trade' };
+  if (finite(tp) && tp > 0 && Number.isFinite(tt) && tt <= nowMs && nowMs - tt <= freshMs) return { price: tp, at: new Date(tt).toISOString(), source: 'last_trade' };
   const bid = pick(quote, 'bidprice'), ask = pick(quote, 'askprice'), qt = Date.parse(pick(quote, 'timestamp') || '');
-  if (finite(bid) && finite(ask) && bid > 0 && ask >= bid && Number.isFinite(qt) && nowMs - qt <= freshMs && String(pick(quote, 'quote_flag') || 'ok') === 'ok') {
+  if (finite(bid) && finite(ask) && bid > 0 && ask >= bid && Number.isFinite(qt) && qt <= nowMs && nowMs - qt <= freshMs && String(pick(quote, 'quote_flag') || 'ok') === 'ok') {
     return { price: (bid + ask) / 2, at: new Date(qt).toISOString(), source: 'quote_mid' };
   }
   return { reason: 'no_fresh_underlying_price' };
@@ -140,17 +172,47 @@ export function underlyingOf(occ) {
   return m ? m[1] : null;
 }
 
-/** Append-only JSONL, one file per month. Reads never trigger collection. */
+/** Months (YYYY-MM) from the month of `sinceDate` through the month of `untilDate`, inclusive, so a long range never skips a middle month. */
+export function monthsBetween(sinceDate, untilDate) {
+  let [y, m] = String(sinceDate).slice(0, 7).split('-').map(Number);
+  const [ey, em] = String(untilDate).slice(0, 7).split('-').map(Number);
+  const out = [];
+  while (y < ey || (y === ey && m <= em)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m += 1;
+    if (m > 12) { m = 1; y += 1; }
+  }
+  return out;
+}
+
+/** Append-only JSONL, one file per month, one writer. Reads never trigger collection; an unreadable file is an error, never "empty history". */
 export class IvHistoryStore {
   constructor(dir) { this.dir = dir; }
   fileFor(sessionDate) { return path.join(this.dir, `${String(sessionDate).slice(0, 7)}.jsonl`); }
   async append(row) {
     await fs.mkdir(this.dir, { recursive: true });
-    await fs.appendFile(this.fileFor(row.sessionDate), JSON.stringify(row) + '\n', 'utf8');
+    const file = this.fileFor(row.sessionDate);
+    // A torn tail (a final line without its newline) is kept as it is; the next record starts on a fresh line so it cannot be swallowed.
+    let prefix = '';
+    try {
+      const handle = await fs.open(file, 'r');
+      try {
+        const { size } = await handle.stat();
+        if (size > 0) {
+          const last = Buffer.alloc(1);
+          await handle.read(last, 0, 1, size - 1);
+          if (last[0] !== 0x0a) prefix = '\n';
+        }
+      } finally { await handle.close(); }
+    } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+    await fs.appendFile(file, prefix + JSON.stringify(row) + '\n', 'utf8');
   }
   async readMonth(month) {
     let text;
-    try { text = await fs.readFile(path.join(this.dir, `${month}.jsonl`), 'utf8'); } catch { return []; }
+    try { text = await fs.readFile(path.join(this.dir, `${month}.jsonl`), 'utf8'); } catch (e) {
+      if (e?.code === 'ENOENT') return [];
+      throw Object.assign(new Error('iv history storage unreadable'), { code: 'storage_unreadable', cause: e });
+    }
     const rows = [];
     for (const line of text.split('\n')) { if (!line.trim()) continue; try { rows.push(JSON.parse(line)); } catch { /* a torn line is skipped, never repaired */ } }
     return rows;
@@ -158,15 +220,30 @@ export class IvHistoryStore {
   async symbolsDone(sessionDate) {
     return new Set((await this.readMonth(String(sessionDate).slice(0, 7))).filter(r => r.sessionDate === sessionDate).map(r => r.symbol));
   }
-  /** Stored rows for a symbol over the last `days` calendar days (bounded), newest last. */
+  /** Stored rows for a symbol over the last `days` calendar days (bounded), newest last, across EVERY month in the range. */
   async read({ symbol, days = 30, nowMs = Date.now() }) {
     const sym = String(symbol || '').toUpperCase();
     const span = Math.min(Math.max(Number(days) || 30, 1), 120);
     const since = nyDateOf(nowMs - span * 86400000);
-    const months = new Set([nyDateOf(nowMs).slice(0, 7), since.slice(0, 7)]);
     const out = [];
-    for (const month of [...months].sort()) for (const r of await this.readMonth(month)) if (r.symbol === sym && r.sessionDate >= since) out.push(r);
+    for (const month of monthsBetween(since, nyDateOf(nowMs))) for (const r of await this.readMonth(month)) if (r.symbol === sym && r.sessionDate >= since) out.push(r);
     return out.sort((a, b) => (a.sessionDate < b.sessionDate ? -1 : a.sessionDate > b.sessionDate ? 1 : 0));
+  }
+  /** The day's persisted provider-attempt expenditure, so an interrupted capture resumed inside its window cannot reset its allowance. */
+  budgetFile(sessionDate) { return path.join(this.dir, `budget-${sessionDate}.json`); }
+  async readBudget(sessionDate) {
+    let text;
+    try { text = await fs.readFile(this.budgetFile(sessionDate), 'utf8'); } catch (e) {
+      if (e?.code === 'ENOENT') return 0;
+      throw Object.assign(new Error('iv history storage unreadable'), { code: 'storage_unreadable', cause: e });
+    }
+    try { const used = JSON.parse(text)?.used; return finite(used) && used >= 0 ? used : (() => { throw new Error('bad'); })(); } catch { throw Object.assign(new Error('iv history budget unreadable'), { code: 'storage_unreadable' }); }
+  }
+  async writeBudget(sessionDate, used) {
+    await fs.mkdir(this.dir, { recursive: true });
+    const tmp = this.budgetFile(sessionDate) + '.tmp';
+    await fs.writeFile(tmp, JSON.stringify({ sessionDate, used, updatedAt: new Date().toISOString() }), 'utf8');
+    await fs.rename(tmp, this.budgetFile(sessionDate));
   }
   /** Distinct session dates with a non-null mean IV, PER SYMBOL (never pooled). */
   static usableSessions(rows) {
@@ -176,12 +253,15 @@ export class IvHistoryStore {
   }
 }
 
+class Stop extends Error { constructor(reason) { super(reason); this.reason = reason; } }
+
 /**
  * One scheduler owner. `deps`:
- *   get(path)        -> response data from the trading backend (one HTTP attempt), throws on error
- *   attempts()       -> cumulative provider attempts counted by the backend's shared provider call point (null if unreadable)
- *   universe()       -> ordered list of symbols (the collector caps it)
+ *   open()      -> { id, get(path, { signal, timeout }), attempts() } bound to ONE backend for the whole capture (never re-selected mid-run);
+ *                  attempts() is the backend's cumulative provider-attempt counter and may throw
+ *   universe()  -> ordered list of symbols (the collector caps it)
  *   store, now(), sleep(ms), log(msg)
+ * The calendar is read through open().get as well. Reads only; no order, permission or heartbeat path is ever used.
  */
 export class IvHistoryCollector {
   constructor(deps, cfg = IV_CAPTURE) {
@@ -192,11 +272,11 @@ export class IvHistoryCollector {
   }
 
   async tick() {
-    const { now, get, log } = this.deps;
+    const { now, log } = this.deps;
     if (this.running) return { status: 'busy' };
     let fields;
     try {
-      const calendar = await get('/api/v1/calendar');
+      const calendar = await this.deps.open().get('/api/v1/calendar', { timeout: 8000 });
       fields = sessionFields(calendar?.clock, calendar?.sessions);
     } catch (e) { return { status: 'calendar_unreadable' }; }
     const closeMs = Date.parse(fields.session_close_utc || '');
@@ -208,98 +288,129 @@ export class IvHistoryCollector {
     this.running = true;
     try {
       const result = await this.captureSession({ sessionDate, window });
-      if (result.attempted > 0 || result.finished) this.completedDay = sessionDate;
+      if (result.finished) this.completedDay = sessionDate;
       return result;
     } catch (e) {
       log?.(`iv-history: capture stopped (${e.message})`);
-      return { status: 'error', error: e.message };
+      return { status: e?.code === 'storage_unreadable' ? 'storage_unreadable' : 'error', error: e.message };
     } finally { this.running = false; }
   }
 
   async captureSession({ sessionDate, window }) {
     const { store, now, sleep, log, universe } = this.deps;
     const cfg = this.cfg;
-    const list = [...new Set((await universe()).map(s => String(s).toUpperCase()))].slice(0, cfg.universeCap);
+    const backend = this.deps.open();            // one backend identity for the whole capture
+    const budget = { spent: 0, appWeight: 0, base: 0, last: null, start: null };
+    // Storage first: an unreadable store must not be mistaken for an empty one (dedupe and the persisted allowance depend on it).
     const done = await store.symbolsDone(sessionDate);
-    this.window = window;
-    const budget = { start: await this.safeAttempts(), appCalls: 0 };
+    budget.base = await store.readBudget(sessionDate);   // expenditure already persisted for this session day (interrupted capture)
+    budget.start = await this.counter(backend);
     // If the provider-attempt counter cannot be read the day cannot be bounded: collect nothing rather than assume zero.
     if (budget.start === null) return { status: 'attempts_unreadable', attempted: 0, finished: false };
-    let attempted = 0, skipped = 0, stored = 0;
+    budget.last = budget.start;
+    const list = [...new Set((await universe()).map(s => String(s).toUpperCase()))].slice(0, cfg.universeCap);
+    let attempted = 0, skipped = 0, stored = 0, stopReason = null;
     for (const symbol of list) {
       if (done.has(symbol)) continue;
-      let skipReason = null;
-      if (now() >= window.endMs) skipReason = 'time_cap';
-      else if (this.used(budget) >= cfg.attemptBudget) skipReason = 'budget_exhausted';
+      let skipReason = stopReason;
+      if (!skipReason && now() >= window.endMs) skipReason = 'time_cap';
+      if (!skipReason && this.used(budget) + symbolReserve(cfg) > cfg.attemptBudget) skipReason = 'budget_exhausted';
       if (skipReason) {
         await store.append({ sessionDate, symbol, capturedAt: new Date(now()).toISOString(), meanIv: null, reason: skipReason, skipped: true });
         skipped += 1; stored += 1; continue;
       }
       attempted += 1;
-      const row = await this.captureSymbol({ sessionDate, symbol, budget });
+      const { row, stop } = await this.captureSymbol({ sessionDate, symbol, budget, backend, window });
       await store.append(row);
       stored += 1;
-      await sleep(cfg.paceMs);
+      await store.writeBudget(sessionDate, this.used(budget));
+      if (stop) stopReason = stop;
+      else await sleep(cfg.paceMs);
     }
-    log?.(`iv-history: ${sessionDate} attempted ${attempted}, skipped ${skipped}, provider attempts ${this.used(budget)}`);
+    await store.writeBudget(sessionDate, this.used(budget));
+    log?.(`iv-history: ${sessionDate} attempted ${attempted}, skipped ${skipped}, provider attempts accounted ${this.used(budget)}`);
     return { status: 'captured', sessionDate, attempted, skipped, stored, providerAttempts: this.used(budget), finished: true };
   }
 
-  used(budget) { return Math.max(0, (budget.last ?? budget.start) - budget.start) + budget.appCalls; }
-  async safeAttempts() { try { return await this.deps.attempts(); } catch { return null; } }
-  async refresh(budget) { const v = await this.safeAttempts(); if (v !== null) budget.last = v; }
+  /** Expenditure of the day: persisted base + backend counter delta + fixed weights for reads outside the shared call point. */
+  used(budget) { return budget.base + Math.max(0, budget.last - budget.start) + budget.appWeight; }
+  async counter(backend) { try { const v = await backend.attempts(); return Number.isFinite(v) ? v : null; } catch { return null; } }
+  /** Refresh the counter. A lost or RESET counter means the accounting is unknown, so collection stops. */
+  async refresh(budget, backend) {
+    const v = await this.counter(backend);
+    if (v === null || v < budget.last) throw new Stop('accounting_unknown');
+    budget.last = v;
+  }
 
-  async captureSymbol({ sessionDate, symbol, budget }) {
-    const { get, now } = this.deps;
+  async captureSymbol({ sessionDate, symbol, budget, backend, window }) {
+    const { now } = this.deps;
     const cfg = this.cfg;
     const row = { sessionDate, symbol, capturedAt: new Date(now()).toISOString(), meanIv: null, callIv: null, putIv: null, reason: null };
-    const timeUp = () => now() >= this.window.endMs;
-    const withTimeout = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('symbol_timeout')), cfg.symbolTimeoutMs))]);
+    const deadline = Math.min(window.endMs, now() + cfg.symbolTimeoutMs);
+    // Every read gets the REMAINING time of min(whole-symbol deadline, window end) as its timeout and an abort signal.
+    const read = async requestPath => {
+      const remaining = deadline - now();
+      if (remaining <= 0) throw new Stop(now() >= window.endMs ? 'time_cap' : 'symbol_timeout');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), remaining);
+      try { return await backend.get(requestPath, { signal: controller.signal, timeout: remaining }); }
+      catch (e) { if (controller.signal.aborted) throw new Stop(now() >= window.endMs ? 'time_cap' : 'symbol_timeout'); throw e; }
+      finally { clearTimeout(timer); }
+    };
+    const need = reserve => { if (this.used(budget) + reserve > cfg.attemptBudget) throw new Stop('budget_exhausted'); };
     try {
-      // 1. underlying price (app-level read, counted as one attempt)
-      if (timeUp()) return { ...row, reason: 'time_cap', skipped: true };
-      budget.appCalls += 1;
-      const quote = await withTimeout(get(`/api/v1/market/quote/${symbol}`));
+      // 1. underlying price (SDK route outside the shared call point: fixed weight)
+      need(symbolReserve(cfg));
+      budget.appWeight += cfg.quoteWeight;
+      const quote = await read(`/api/v1/market/quote/${symbol}`);
       const px = underlyingPrice(quote, now(), cfg.freshMs);
-      if (px.reason) return { ...row, reason: px.reason };
+      if (px.reason) return { row: { ...row, reason: px.reason } };
       row.underlyingPrice = px.price; row.underlyingAt = px.at; row.underlyingSource = px.source;
-      // 2. realised volatility from completed daily bars (one app-level read)
-      budget.appCalls += 1;
+      // 2. realised volatility from completed daily bars (SDK route: fixed weight)
+      budget.appWeight += cfg.barsWeight;
       const end = new Date(now()).toISOString().slice(0, 10), start = new Date(now() - 60 * 86400000).toISOString().slice(0, 10);
       try {
-        const bars = await withTimeout(get(`/api/v1/market/bars/${symbol}?start=${start}&end=${end}&timeframe=1D`));
+        const bars = await read(`/api/v1/market/bars/${symbol}?start=${start}&end=${end}&timeframe=1D`);
         const { closes, lastCloseDate } = completedCloses(bars);
         const rv = realisedVol(closes);
         row.realisedVol20 = rv.value; row.realisedVolReason = rv.reason || null; row.lastCloseDate = lastCloseDate;
-      } catch (e) { row.realisedVol20 = null; row.realisedVolReason = 'bars_unreadable'; row.lastCloseDate = null; }
-      // 3. expiry (the read probes one provider call per weekday in the window; the backend counter sees them)
-      await this.refresh(budget);
-      if (this.used(budget) >= cfg.attemptBudget) return { ...row, reason: 'budget_exhausted', skipped: true };
-      if (timeUp()) return { ...row, reason: 'time_cap', skipped: true };
-      const expiries = await withTimeout(get(`/api/v1/options/expirations/${symbol}?min_dte=${cfg.minDte}&max_dte=${cfg.maxDte}`));
+      } catch (e) {
+        if (e instanceof Stop) throw e;
+        row.realisedVol20 = null; row.realisedVolReason = 'bars_unreadable'; row.lastCloseDate = null;
+      }
+      // 3. expiry: one provider probe per weekday in the window on the shared call point; reserve the worst case, then read the counter
+      await this.refresh(budget, backend);
+      need(expirationsReserve(cfg) + chainReserve(cfg));
+      const expiries = await read(`/api/v1/options/expirations/${symbol}?min_dte=${cfg.minDte}&max_dte=${cfg.maxDte}`);
+      await this.refresh(budget, backend);
       const pe = pickExpiry({ expirations: expiries?.expirations, unchecked: expiries?.unchecked }, cfg.minDte);
-      if (pe.reason) return { ...row, reason: pe.reason };
+      if (pe.reason) return { row: { ...row, reason: pe.reason } };
       row.expiry = pe.expiry; row.dte = pe.dte; row.expiryBasis = pe.basis; row.earlierUnchecked = pe.earlierUnchecked;
-      // 4. chain for that exact expiry
-      await this.refresh(budget);
-      if (this.used(budget) >= cfg.attemptBudget) return { ...row, reason: 'budget_exhausted', skipped: true };
-      if (timeUp()) return { ...row, reason: 'time_cap', skipped: true };
-      const chain = await withTimeout(get(`/api/v1/options/chain/${symbol}?expiration=${pe.expiry}`));
-      await this.refresh(budget);
-      const atm = pickAtm(Array.isArray(chain) ? chain : pick(chain, 'contracts'), px.price);
-      if (atm.reason) return { ...row, reason: atm.reason };
+      // 4. chain for that exact expiry (page loop and retries counted by the backend counter; worst case reserved above)
+      need(chainReserve(cfg));
+      const chain = await read(`/api/v1/options/chain/${symbol}?expiration=${pe.expiry}`);
+      await this.refresh(budget, backend);
+      // A capture that finishes after the window is refused, never stored as usable IV.
+      if (now() >= window.endMs) return { row: { ...row, reason: 'late_capture' }, stop: 'time_cap' };
+      const atm = pickAtm(Array.isArray(chain) ? chain : pick(chain, 'contracts'), px.price, pe.expiry);
+      if (atm.reason) return { row: { ...row, reason: atm.reason } };
       const m = meanIv(atm.call, atm.put, now());
       row.strike = atm.strike; row.callSymbol = pick(atm.call, 'symbol'); row.putSymbol = pick(atm.put, 'symbol');
       row.callIv = m.callIv; row.putIv = m.putIv;
       row.feed = pick(atm.call, 'market_data_feed') || null; row.quality = pick(atm.call, 'market_data_quality') || null;
       row.quoteAt = pick(atm.call, 'quotetimestamp') || null;
-      if (m.reason) return { ...row, reason: m.reason };
-      return { ...row, meanIv: m.meanIv, reason: null };
+      if (m.reason) return { row: { ...row, reason: m.reason } };
+      return { row: { ...row, meanIv: m.meanIv, reason: null } };
     } catch (e) {
+      if (e instanceof Stop) {
+        const bounded = e.reason === 'budget_exhausted' || e.reason === 'time_cap' || e.reason === 'symbol_timeout';
+        try { await this.refresh(budget, backend); } catch { /* accounting already unknown */ }
+        return { row: { ...row, reason: e.reason, skipped: bounded }, stop: e.reason === 'symbol_timeout' ? null : e.reason };
+      }
       const status = e?.response?.status;
       const category = e?.response?.data?.category;
-      await this.refresh(budget);
-      return { ...row, reason: category === 'market_closed' ? 'market_closed' : status ? `http_${status}` : (e.message === 'symbol_timeout' ? 'symbol_timeout' : 'read_failed') };
+      try { await this.refresh(budget, backend); } catch (s) { return { row: { ...row, reason: s.reason || 'accounting_unknown' }, stop: 'accounting_unknown' }; }
+      return { row: { ...row, reason: category === 'market_closed' ? 'market_closed' : status ? `http_${status}` : 'read_failed' } };
     }
   }
 }
@@ -310,7 +421,11 @@ export function createIvHistoryHandler(store, now = () => Date.now()) {
     const symbol = String(req.query?.symbol || '').toUpperCase();
     if (!/^[A-Z]{1,6}$/.test(symbol)) return res.status(400).json({ error: 'symbol is required (1-6 letters)' });
     const days = Math.min(Math.max(Number(req.query?.days) || 30, 1), 120);
-    const rows = await store.read({ symbol, days, nowMs: now() });
-    return res.json({ symbol, days, rows, usableSessions: IvHistoryStore.usableSessions(rows) });
+    try {
+      const rows = await store.read({ symbol, days, nowMs: now() });
+      return res.json({ symbol, days, rows, usableSessions: IvHistoryStore.usableSessions(rows) });
+    } catch (e) {
+      return res.status(500).json({ error: e?.code === 'storage_unreadable' ? 'iv history storage unreadable' : 'iv history read failed' });
+    }
   };
 }

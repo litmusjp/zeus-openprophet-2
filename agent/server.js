@@ -2305,11 +2305,18 @@ const ivCollector = new IvHistoryCollector({
   now: () => Date.now(),
   sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
   log: message => console.log('  ' + message),
-  get: async requestPath => (await ivDataClient().get(requestPath, { timeout: IV_CAPTURE.symbolTimeoutMs })).data,
-  attempts: async () => {
-    const value = (await ivDataClient().get('/api/v1/diagnostics/provider-attempts', { timeout: 5000 })).data?.provider_attempts;
-    if (!Number.isFinite(value)) throw new Error('provider attempt counter unreadable');
-    return value;
+  // One backend identity per capture: open() selects the client once and every read and every counter read of that capture uses it.
+  open: () => {
+    const client = ivDataClient();
+    return {
+      id: 'iv-backend',
+      get: async (requestPath, options = {}) => (await client.get(requestPath, { timeout: options.timeout ?? IV_CAPTURE.symbolTimeoutMs, signal: options.signal })).data,
+      attempts: async () => {
+        const value = (await client.get('/api/v1/diagnostics/provider-attempts', { timeout: 5000 })).data?.provider_attempts;
+        if (!Number.isFinite(value)) throw new Error('provider attempt counter unreadable');
+        return value;
+      },
+    };
   },
   universe: async () => {
     const held = [];

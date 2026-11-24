@@ -302,11 +302,11 @@ export class IvHistoryCollector {
     const { store, now, sleep, log, universe } = this.deps;
     const cfg = this.cfg;
     const backend = this.deps.open();            // one backend identity for the whole capture
-    const budget = { spent: 0, appWeight: 0, base: 0, last: null, start: null };
+    const budget = { spent: 0, appWeight: 0, base: 0, retained: 0, last: null, start: null };
     // Storage first: an unreadable store must not be mistaken for an empty one (dedupe and the persisted allowance depend on it).
     const done = await store.symbolsDone(sessionDate);
     budget.base = await store.readBudget(sessionDate);   // expenditure already persisted for this session day (interrupted capture)
-    budget.start = await this.counter(backend);
+    budget.start = await this.counter(backend, window.endMs);   // the baseline is clamped to the window like every other counter read
     // If the provider-attempt counter cannot be read the day cannot be bounded: collect nothing rather than assume zero.
     if (budget.start === null) return { status: 'attempts_unreadable', attempted: 0, finished: false };
     budget.last = budget.start;
@@ -339,7 +339,7 @@ export class IvHistoryCollector {
   }
 
   /** Expenditure of the day: persisted base + backend counter delta + fixed weights for reads outside the shared call point. */
-  used(budget) { return budget.base + Math.max(0, budget.last - budget.start) + budget.appWeight; }
+  used(budget) { return budget.base + Math.max(0, budget.last - budget.start) + budget.appWeight + (budget.retained || 0); }
   /** One counter read, bounded by a timeout and an abort signal (never the unbounded default). Null when unreadable. */
   async counter(backend, windowEndMs) {
     const cfg = this.cfg;
@@ -356,7 +356,26 @@ export class IvHistoryCollector {
     budget.last = v;
   }
 
-  async captureSymbol({ sessionDate, symbol, budget, backend, window }) {
+  /**
+   * One symbol. Work that may STILL be running in the backend (a read the collector aborted, or a transport failure with no response at
+   * all) is uncertain: a readable counter does not prove that work is finished. Its allowance is retained: the symbol is charged its
+   * full worst case, and that amount counts toward every later admission and, through the persisted budget, every restart, instead of
+   * being settled down to the reading taken when the collector stopped waiting.
+   */
+  async captureSymbol(args) {
+    const { budget } = args;
+    const symbolStart = this.used(budget);
+    const state = { uncertain: false };
+    const result = await this.runSymbol({ ...args, state });
+    if (state.uncertain) {
+      const target = symbolStart + symbolReserve(this.cfg);
+      const current = this.used(budget);
+      if (target > current) budget.retained += target - current;
+    }
+    return result;
+  }
+
+  async runSymbol({ sessionDate, symbol, budget, backend, window, state }) {
     const { now } = this.deps;
     const cfg = this.cfg;
     const row = { sessionDate, symbol, capturedAt: new Date(now()).toISOString(), meanIv: null, callIv: null, putIv: null, reason: null };
@@ -368,7 +387,11 @@ export class IvHistoryCollector {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), remaining);
       try { return await backend.get(requestPath, { signal: controller.signal, timeout: remaining }); }
-      catch (e) { if (controller.signal.aborted) throw new Stop(now() >= window.endMs ? 'time_cap' : 'symbol_timeout'); throw e; }
+      catch (e) {
+        if (controller.signal.aborted) { state.uncertain = true; throw new Stop(now() >= window.endMs ? 'time_cap' : 'symbol_timeout'); }
+        if (!e?.response) state.uncertain = true;   // no response at all: the backend may still be working on it
+        throw e;
+      }
       finally { clearTimeout(timer); }
     };
     const need = reserve => { if (this.used(budget) + reserve > cfg.attemptBudget) throw new Stop('budget_exhausted'); };

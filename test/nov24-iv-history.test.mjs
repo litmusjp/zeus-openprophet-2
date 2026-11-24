@@ -469,3 +469,53 @@ test('R2 QW-04: a capture that completes (accounting included) after the whole-s
   assert.equal(row.reason, 'symbol_timeout');
   assert.equal(row.meanIv, null);
 });
+
+// ---- Hermes final QA (R3): uncertain in-flight work keeps its allowance; the baseline counter read is window-clamped ----
+test('R3 QW-01: an ABORTED read with a readable counter keeps the symbol\'s full worst case, and the next admission, a restart and the persisted file all include it', async t => {
+  const store = await tmpStore(t);
+  const h = harness({ universe: ['AAA', 'BBB'], hang: { AAA: true } });
+  const cap = symbolReserve() + 50;   // room for exactly one symbol's worst case plus a little
+  const cfg = { ...IV_CAPTURE, attemptBudget: cap, symbolTimeoutMs: 40 };
+  await collectorWith(store, h, cfg).tick();
+  const aaa = await rowOf(store, h, 'AAA');
+  assert.equal(aaa.reason, 'symbol_timeout');
+  assert.equal(h.calls.some(c => c.path.includes('/BBB')), false, 'the next symbol was NOT admitted: the aborted work is still allowance-covered');
+  assert.equal((await rowOf(store, h, 'BBB')).reason, 'budget_exhausted');
+  assert.equal(await store.readBudget('2026-11-23'), symbolReserve(), 'the persisted file keeps the whole reservation (it was not settled down to the measured 3)');
+  // a restarted instance counts the retained allowance as well
+  const again = harness({ universe: ['CCC'] });
+  await collectorWith(store, again, cfg, async () => ['CCC']).tick();
+  assert.equal((await rowOf(store, again, 'CCC')).reason, 'budget_exhausted');
+  assert.equal(again.dataCalls().length, 0);
+});
+
+test('R3 QW-01: a transport failure with NO response is uncertain and retained; an HTTP error WITH a response is known and settles', async t => {
+  const cap = symbolReserve() + 50;
+  const cfg = { ...IV_CAPTURE, attemptBudget: cap };
+  // no response at all (connection reset): the backend may still be working
+  const storeA = await tmpStore(t);
+  const a = harness({ universe: ['AAA', 'BBB'] });
+  const baseA = a.open;
+  a.open = () => { const b = baseA(); return { ...b, get: async (p, o) => { if (p.includes('/AAA') && p.includes('/market/quote/')) throw new Error('ECONNRESET'); return b.get(p, o); } }; };
+  await collectorWith(storeA, a, cfg).tick();
+  assert.equal((await rowOf(storeA, a, 'AAA')).reason, 'read_failed');
+  assert.equal((await rowOf(storeA, a, 'BBB')).reason, 'budget_exhausted', 'uncertain work keeps its allowance');
+  // a response (503) means the backend finished: settled, the next symbol is admitted
+  const storeB = await tmpStore(t);
+  const b = harness({ universe: ['AAA', 'BBB'], failOn: { AAA: 503 } });
+  await collectorWith(storeB, b, cfg).tick();
+  assert.equal((await rowOf(storeB, b, 'AAA')).reason, 'http_503');
+  assert.ok(Number.isFinite((await rowOf(storeB, b, 'BBB')).meanIv), 'a known failure does not retain the allowance');
+});
+
+test('R3 QW-04: the baseline counter read is clamped to the window like every other counter read', async t => {
+  const store = await tmpStore(t);
+  const h = harness({ universe: ['AAA'], now: WINDOW_END - 500 });   // 0.5 s left in the capture window
+  const seen = [];
+  const base = h.open;
+  h.open = () => { const b = base(); return { ...b, attempts: async o => { seen.push(o); return b.attempts(o); } }; };
+  await collectorWith(store, h).tick();
+  assert.ok(seen.length >= 1);
+  assert.equal(seen[0].timeout, IV_CAPTURE.accountingFloorMs, 'the baseline got the one-second floor, not the full three seconds');
+  assert.ok(seen.every(o => o.timeout <= IV_CAPTURE.accountingTimeoutMs && o.signal instanceof AbortSignal));
+});

@@ -2311,8 +2311,8 @@ const ivCollector = new IvHistoryCollector({
     return {
       id: 'iv-backend',
       get: async (requestPath, options = {}) => (await client.get(requestPath, { timeout: options.timeout ?? IV_CAPTURE.symbolTimeoutMs, signal: options.signal })).data,
-      attempts: async () => {
-        const value = (await client.get('/api/v1/diagnostics/provider-attempts', { timeout: 5000 })).data?.provider_attempts;
+      attempts: async (options = {}) => {
+        const value = (await client.get('/api/v1/diagnostics/provider-attempts', { timeout: options.timeout ?? 5000, signal: options.signal })).data?.provider_attempts;
         if (!Number.isFinite(value)) throw new Error('provider attempt counter unreadable');
         return value;
       },

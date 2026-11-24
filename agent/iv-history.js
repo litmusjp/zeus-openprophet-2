@@ -30,6 +30,8 @@ export const IV_CAPTURE = Object.freeze({
   tickMs: 30000,
   freshMs: 2 * 60 * 1000, // the existing execution freshness rule; the collector only reads it, never widens it
   closesNeeded: 21,      // 21 completed daily closes = 20 log returns
+  accountingTimeoutMs: 3000, // each counter read: at most this long, never beyond the window end (floor below), always with an abort signal
+  accountingFloorMs: 1000,
 });
 
 /** Worst-case provider attempts of one expirations read (one probe per weekday in the window) and of one chain read. */
@@ -309,7 +311,7 @@ export class IvHistoryCollector {
     if (budget.start === null) return { status: 'attempts_unreadable', attempted: 0, finished: false };
     budget.last = budget.start;
     const list = [...new Set((await universe()).map(s => String(s).toUpperCase()))].slice(0, cfg.universeCap);
-    let attempted = 0, skipped = 0, stored = 0, stopReason = null;
+    let attempted = 0, skipped = 0, stored = 0, stopReason = null, unsettled = false;
     for (const symbol of list) {
       if (done.has(symbol)) continue;
       let skipReason = stopReason;
@@ -320,24 +322,36 @@ export class IvHistoryCollector {
         skipped += 1; stored += 1; continue;
       }
       attempted += 1;
-      const { row, stop } = await this.captureSymbol({ sessionDate, symbol, budget, backend, window });
+      // The symbol's worst case is persisted BEFORE any provider work and stays persisted until the symbol is settled with known accounting;
+      // an interruption, a failed append or lost accounting therefore keeps the outstanding reservation instead of rebaselining it away.
+      await store.writeBudget(sessionDate, this.used(budget) + symbolReserve(cfg));
+      const { row, stop, settle } = await this.captureSymbol({ sessionDate, symbol, budget, backend, window });
       await store.append(row);
       stored += 1;
-      await store.writeBudget(sessionDate, this.used(budget));
+      if (settle !== false) await store.writeBudget(sessionDate, this.used(budget));
+      else unsettled = true;
       if (stop) stopReason = stop;
       else await sleep(cfg.paceMs);
     }
-    await store.writeBudget(sessionDate, this.used(budget));
+    if (!unsettled) await store.writeBudget(sessionDate, this.used(budget));
     log?.(`iv-history: ${sessionDate} attempted ${attempted}, skipped ${skipped}, provider attempts accounted ${this.used(budget)}`);
     return { status: 'captured', sessionDate, attempted, skipped, stored, providerAttempts: this.used(budget), finished: true };
   }
 
   /** Expenditure of the day: persisted base + backend counter delta + fixed weights for reads outside the shared call point. */
   used(budget) { return budget.base + Math.max(0, budget.last - budget.start) + budget.appWeight; }
-  async counter(backend) { try { const v = await backend.attempts(); return Number.isFinite(v) ? v : null; } catch { return null; } }
+  /** One counter read, bounded by a timeout and an abort signal (never the unbounded default). Null when unreadable. */
+  async counter(backend, windowEndMs) {
+    const cfg = this.cfg;
+    const left = Number.isFinite(windowEndMs) ? windowEndMs - this.deps.now() : cfg.accountingTimeoutMs;
+    const timeout = Math.max(cfg.accountingFloorMs, Math.min(cfg.accountingTimeoutMs, left));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try { const v = await backend.attempts({ signal: controller.signal, timeout }); return Number.isFinite(v) ? v : null; } catch { return null; } finally { clearTimeout(timer); }
+  }
   /** Refresh the counter. A lost or RESET counter means the accounting is unknown, so collection stops. */
-  async refresh(budget, backend) {
-    const v = await this.counter(backend);
+  async refresh(budget, backend, window) {
+    const v = await this.counter(backend, window?.endMs);
     if (v === null || v < budget.last) throw new Stop('accounting_unknown');
     budget.last = v;
   }
@@ -379,19 +393,21 @@ export class IvHistoryCollector {
         row.realisedVol20 = null; row.realisedVolReason = 'bars_unreadable'; row.lastCloseDate = null;
       }
       // 3. expiry: one provider probe per weekday in the window on the shared call point; reserve the worst case, then read the counter
-      await this.refresh(budget, backend);
+      await this.refresh(budget, backend, window);
       need(expirationsReserve(cfg) + chainReserve(cfg));
       const expiries = await read(`/api/v1/options/expirations/${symbol}?min_dte=${cfg.minDte}&max_dte=${cfg.maxDte}`);
-      await this.refresh(budget, backend);
+      await this.refresh(budget, backend, window);
       const pe = pickExpiry({ expirations: expiries?.expirations, unchecked: expiries?.unchecked }, cfg.minDte);
       if (pe.reason) return { row: { ...row, reason: pe.reason } };
       row.expiry = pe.expiry; row.dte = pe.dte; row.expiryBasis = pe.basis; row.earlierUnchecked = pe.earlierUnchecked;
       // 4. chain for that exact expiry (page loop and retries counted by the backend counter; worst case reserved above)
       need(chainReserve(cfg));
       const chain = await read(`/api/v1/options/chain/${symbol}?expiration=${pe.expiry}`);
-      await this.refresh(budget, backend);
+      await this.refresh(budget, backend, window);
       // A capture that finishes after the window is refused, never stored as usable IV.
+      // A capture that finishes (accounting read included) after the whole-symbol deadline or the window is refused, never stored as usable IV.
       if (now() >= window.endMs) return { row: { ...row, reason: 'late_capture' }, stop: 'time_cap' };
+      if (now() >= deadline) return { row: { ...row, reason: 'symbol_timeout' } };
       const atm = pickAtm(Array.isArray(chain) ? chain : pick(chain, 'contracts'), px.price, pe.expiry);
       if (atm.reason) return { row: { ...row, reason: atm.reason } };
       const m = meanIv(atm.call, atm.put, now());
@@ -404,12 +420,14 @@ export class IvHistoryCollector {
     } catch (e) {
       if (e instanceof Stop) {
         const bounded = e.reason === 'budget_exhausted' || e.reason === 'time_cap' || e.reason === 'symbol_timeout';
-        try { await this.refresh(budget, backend); } catch { /* accounting already unknown */ }
+        let known = e.reason !== 'accounting_unknown';
+        if (known) { try { await this.refresh(budget, backend, window); } catch { known = false; } }
+        if (!known) return { row: { ...row, reason: 'accounting_unknown', detail: e.reason, skipped: false }, stop: 'accounting_unknown', settle: false };
         return { row: { ...row, reason: e.reason, skipped: bounded }, stop: e.reason === 'symbol_timeout' ? null : e.reason };
       }
       const status = e?.response?.status;
       const category = e?.response?.data?.category;
-      try { await this.refresh(budget, backend); } catch (s) { return { row: { ...row, reason: s.reason || 'accounting_unknown' }, stop: 'accounting_unknown' }; }
+      try { await this.refresh(budget, backend, window); } catch (s) { return { row: { ...row, reason: s.reason || 'accounting_unknown' }, stop: 'accounting_unknown', settle: false }; }
       return { row: { ...row, reason: category === 'market_closed' ? 'market_closed' : status ? `http_${status}` : 'read_failed' } };
     }
   }

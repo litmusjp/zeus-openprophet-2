@@ -389,3 +389,83 @@ test('collector: a chain of the wrong expiry or with stale or future quotes is a
   assert.equal((await rowOf(s.store, stale, 'AAA')).reason, 'call_quote_stale');
   assert.equal(IV_CAPTURE.freshMs, 2 * 60 * 1000);
 });
+
+// ---- Hermes final recheck (R2): durable reservation before provider work, accounting loss in the timeout handler, bounded counter reads ----
+const tmpStore = async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'op2-ivf-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  return new IvHistoryStore(dir);
+};
+const collectorWith = (store, h, cfg, universe = h.universe) => new IvHistoryCollector({ store, now: () => h.clock.t, sleep: async () => {}, log: () => {}, open: h.open, universe }, cfg);
+
+test('R2 QW-01: the symbol reservation is persisted BEFORE provider work; an interruption before append keeps it and a restart cannot spend it again', async t => {
+  const real = await tmpStore(t);
+  const h = harness({ universe: ['AAA'], attemptsStart: 0 });
+  let failAppend = true;
+  const store = Object.assign(Object.create(real), { append: async row => { if (failAppend) throw new Error('disk gone'); return real.append(row); } });
+  const cap = symbolReserve(); // exactly one symbol's worst case
+  const cfg = { ...IV_CAPTURE, attemptBudget: cap };
+  const first = await collectorWith(store, h, cfg).tick();
+  assert.equal(first.status, 'error', 'the interrupted capture surfaces as an error');
+  assert.equal(await real.readBudget('2026-11-23'), cap, 'the reservation stayed persisted (not settled, not rebaselined away)');
+  const readsAfterFirst = h.dataCalls().length;
+  failAppend = false;
+  const second = await collectorWith(store, h, cfg).tick();   // a fresh instance: no memory of the interrupted symbol
+  assert.equal(second.status, 'captured');
+  assert.equal((await rowOf(real, h, 'AAA')).reason, 'budget_exhausted');
+  assert.equal(h.dataCalls().length, readsAfterFirst, 'the restart read no further market data');
+  assert.ok(h.modeled() <= cap, 'the modeled shared-call-point attempts stay within the cap across both instances');
+});
+
+test('R2 QW-01: if the reservation cannot be persisted, no provider work starts for that symbol', async t => {
+  const real = await tmpStore(t);
+  const h = harness({ universe: ['AAA'] });
+  const store = Object.assign(Object.create(real), { writeBudget: async () => { throw new Error('cannot persist'); } });
+  const r = await collectorWith(store, h).tick();
+  assert.equal(r.status, 'error');
+  assert.equal(h.dataCalls().length, 0);
+});
+
+test('R2 QW-01: lost accounting inside the timeout handler stops collection too, and the reservation stays outstanding', async t => {
+  const store = await tmpStore(t);
+  const h = harness({ universe: ['AAA', 'BBB'], hang: { AAA: true }, loseCounterAfter: 1 }); // baseline read ok, the refresh after AAA's timeout fails
+  await collectorWith(store, h, { ...IV_CAPTURE, symbolTimeoutMs: 40, accountingTimeoutMs: 50, accountingFloorMs: 10 }).tick();
+  assert.equal((await rowOf(store, h, 'AAA')).reason, 'accounting_unknown');
+  assert.equal((await rowOf(store, h, 'AAA')).detail, 'symbol_timeout');
+  assert.equal((await rowOf(store, h, 'BBB')).reason, 'accounting_unknown');
+  assert.equal(h.calls.some(c => c.path.includes('/BBB')), false, 'no read started for the next symbol');
+  assert.equal(await store.readBudget('2026-11-23'), symbolReserve(), 'the unsettled reservation is retained');
+});
+
+test('R2 QW-04: every counter read is bounded by a timeout and an abort signal, and a counter that never answers means accounting unknown', async t => {
+  const store = await tmpStore(t);
+  const h = harness({ universe: ['AAA', 'BBB'] });
+  const seen = [];
+  let reads = 0;
+  const base = h.open;
+  h.open = () => {
+    const b = base();
+    return { ...b, attempts: async options => {
+      seen.push(options);
+      reads += 1;
+      if (reads === 1) return b.attempts(options);   // the baseline answers
+      return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));   // later reads never answer
+    } };
+  };
+  const cfg = { ...IV_CAPTURE, accountingTimeoutMs: 30, accountingFloorMs: 10 };
+  await collectorWith(store, h, cfg).tick();
+  assert.ok(seen.length >= 2);
+  assert.ok(seen.every(o => o.signal instanceof AbortSignal && o.timeout >= 10 && o.timeout <= cfg.accountingTimeoutMs), JSON.stringify(seen.map(o => o.timeout)));
+  assert.equal((await rowOf(store, h, 'AAA')).reason, 'accounting_unknown');
+  assert.equal((await rowOf(store, h, 'AAA')).meanIv, null);
+  assert.equal((await rowOf(store, h, 'BBB')).reason, 'accounting_unknown');
+});
+
+test('R2 QW-04: a capture that completes (accounting included) after the whole-symbol deadline is refused, not stored as usable IV', async t => {
+  const store = await tmpStore(t);
+  const h = harness({ universe: ['AAA'], lateChainBy: 5000 }); // the chain returns 5 s later, inside the window but past a 1 s symbol deadline
+  await collectorWith(store, h, { ...IV_CAPTURE, symbolTimeoutMs: 1000 }).tick();
+  const row = await rowOf(store, h, 'AAA');
+  assert.equal(row.reason, 'symbol_timeout');
+  assert.equal(row.meanIv, null);
+});

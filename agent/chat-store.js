@@ -45,6 +45,8 @@ const OPTIONAL_RESEARCH_TOOLS = new Set([
   'get_alpaca_news', 'get_news', 'get_news_by_topic', 'search_news', 'get_market_news', 'get_cleaned_news',
   'get_quick_market_intelligence', 'aggregate_and_summarize_news', 'list_news_summaries', 'get_news_summary',
   'get_marketwatch_topstories', 'get_marketwatch_realtime', 'get_marketwatch_bulletins',
+  // Nov 24: the yfinance market-snapshot reader (not the exact broker quote or order path). Its outage is a visible warning; it can never satisfy a required strategy-data predicate.
+  'get_market_snapshot',
 ]);
 function optionalResearchToolName(record) {
   if (!record || (record.kind !== 'tool_call' && record.eventType !== 'tool_call')) return null;

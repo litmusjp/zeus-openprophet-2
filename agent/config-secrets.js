@@ -185,6 +185,31 @@ export function syncFromConfig(config) {
   return changed;
 }
 
+/**
+ * PURE variant of referenceStatus for a COPIED pair: the parsed config and the parsed private store are passed in, nothing global is read or changed
+ * (no bookkeeping, no environment, no live key state). `store` null means the private store is unavailable. Used to validate a backup copy.
+ */
+export function referenceStatusAgainst(raw, store) {
+  const accounts = Array.isArray(raw?.accounts) ? raw.accounts : [];
+  const slots = [];
+  const global = raw?.plugins?.alphadesk;
+  if (global && typeof global === 'object') slots.push(['alphadesk:global', global]);
+  for (const [id, sandbox] of Object.entries(raw?.sandboxes || {})) { const slot = sandbox?.plugins?.alphadesk; if (slot && typeof slot === 'object') slots.push(['alphadesk:' + id, slot]); }
+  let markers = 0;
+  for (const account of accounts) if (account && account.secretRef) markers += 1;
+  for (const [, slot] of slots) if (slot && slot.apiKeyRef) markers += 1;
+  if (!markers) return { ok: true, markers: 0, missing: 0 };
+  if (!store || typeof store !== 'object') return { ok: false, reason: 'private_store_unavailable', markers, missing: markers };
+  let missing = 0;
+  for (const account of accounts) {
+    if (!account || !account.secretRef) continue;
+    const keys = store.accounts?.[account.id];
+    if (!(keys && hasValue(keys.publicKey) && hasValue(keys.secretKey))) missing += 1;
+  }
+  for (const [scope, slot] of slots) if (slot && slot.apiKeyRef && !hasValue(store.alphadesk?.[scope])) missing += 1;
+  return missing ? { ok: false, reason: 'keys_missing', markers, missing } : { ok: true, markers, missing: 0 };
+}
+
 /** The copy of the config that is written to disk: each key replaced, in place, by a marker. */
 export function toDiskConfig(config) {
   const clone = JSON.parse(JSON.stringify(config));

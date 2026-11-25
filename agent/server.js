@@ -2334,7 +2334,12 @@ app.get('/api/iv-history', createIvHistoryHandler(ivStore));
 // Bounded, cached, read-only size totals of the data folder (no names, no contents, no deletion). Behind the same outer and inner auth as every /api route.
 const dataUsage = createDataUsage({ root: path.join(PROJECT_ROOT, 'data') });
 // Daily in-volume backup of the settings and the trade record (order-to-agent journal, chat and activity records with the AlphaDesk results, decision logs, trade database, IV history).
-const dailyBackup = createDailyBackup({ root: path.join(PROJECT_ROOT, 'data'), log: message => console.log('  ' + message) });
+const dailyBackup = createDailyBackup({
+  root: path.join(PROJECT_ROOT, 'data'),
+  // the settings are backed up from their OWNERS' actual paths (a custom location is read, never replaced by a decoy default)
+  settings: { configPath: process.env.OPENPROPHET_CONFIG_PATH || path.join(PROJECT_ROOT, 'data', 'agent-config.json'), secretsPath: secretsStore.secretsPath(), guidancePath: path.join(process.env.OPENPROPHET_DATA_DIR || path.join(PROJECT_ROOT, 'data'), 'trading-guidance.json') },
+  log: message => console.log('  ' + message),
+});
 app.get('/api/backup-status', (req, res) => res.json(backupStatusPayload(dailyBackup, process.env.DAILY_BACKUP_ENABLED !== '0')));
 app.get('/api/data-usage', async (req, res) => {
   try { res.json(await dataUsage.get()); } catch { res.json({ status: 'unavailable', scannedAt: null, stale: false, partial: false, buckets: null }); }

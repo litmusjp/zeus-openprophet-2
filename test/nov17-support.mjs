@@ -39,7 +39,7 @@ export async function startFakeBackend(routes) {
 }
 
 // Runs one tools/call against the real MCP server and returns { text, isError }.
-export async function callMcpTool(backendUrl, name, args) {
+export async function callMcpTool(backendUrl, name, args, options = {}) {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'op2-nov17-mcp-'));
   const child = spawn(process.execPath, [MCP_FILE], {
     cwd,
@@ -74,6 +74,7 @@ export async function callMcpTool(backendUrl, name, args) {
   const closed = once(child, 'close');
   child.kill();
   await closed;
+  if (options.beforeCleanup) await options.beforeCleanup(cwd);
   await fs.rm(cwd, { recursive: true, force: true });
   if (!reply) throw new Error(`no reply to ${name} within 25 s`);
   if (reply.error) throw new Error(`MCP error: ${JSON.stringify(reply.error)}`);

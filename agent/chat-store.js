@@ -7,6 +7,7 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'url';
 import { isSubmittingOrderToolCall } from './history-attribution.js';
 import { parseStrictUtc } from '../range-confirmation.js';
+import { sanitizeCarry } from '../carry-forward.js';
 import { isRealIsoDay, nyDateOf } from '../session-clock.js';
 import { classifyReadError, safeCode, publishAtomic, preserveEvidence } from './durable-file.js';
 
@@ -930,6 +931,86 @@ export class ChatStore {
       } catch { /* the cache is an optimisation only */ }
     }
     return result;
+  }
+
+  _carryEvidenceCacheFile(accountId) {
+    return path.join(this._chatDir(accountId), 'carry-evidence-cache.json');
+  }
+
+  // Nov 26 W3: completed, successful log_decision records that carry a structured note. Scope is the account's own chat directory; the actor and the
+  // time come from the record's trusted metadata (actorSnapshot, record timestamp), never from the note; every note is re-validated here.
+  async _scanSessionCarryEvidence(accountId, sessionId) {
+    const input = fsSync.createReadStream(this._sessionFile(accountId, sessionId), { encoding: 'utf8' });
+    const lines = readline.createInterface({ input, crlfDelay: Infinity });
+    const items = [];
+    try {
+      for await (const line of lines) {
+        if (!line || !line.includes('"carry"')) continue;
+        try {
+          const row = JSON.parse(line);
+          if (!isToolCallRecord(row) || toolNameOf(row) !== 'log_decision') continue;
+          if (row.status && !['completed', 'success'].includes(String(row.status).toLowerCase())) continue;
+          if (hasStructuredFailure(row)) continue;
+          const carry = sanitizeCarry(row.args?.carry);
+          if (!carry || !Number.isFinite(Date.parse(row.timestamp))) continue;
+          items.push({ timestamp: row.timestamp, actorId: row.actorSnapshot?.agentId || null, actorName: row.actorSnapshot?.agentName || '', carry });
+        } catch { /* ignore malformed or truncated JSONL records */ }
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+    return items;
+  }
+
+  /**
+   * Structured carry notes of the last `sinceDays` days for ONE account, oldest first. A session file counts when it was touched inside the window
+   * (a long-running older session with new records still counts) and each note is bounded by its own record time. The per-file cache is keyed by
+   * size and modification time, so any append invalidates it; it is advisory only and never crosses accounts (it lives in the account's directory).
+   */
+  async listSessionCarryEvidence(accountId, { sinceDays = 30, nowMs = Date.now() } = {}) {
+    const cutoff = nowMs - sinceDays * 86400000;
+    let names = [];
+    try { names = await fs.readdir(this._chatDir(accountId)); } catch { return []; }
+    let cache = { sessions: {} };
+    try {
+      const parsed = JSON.parse(await fs.readFile(this._carryEvidenceCacheFile(accountId), 'utf8'));
+      if (parsed && typeof parsed.sessions === 'object' && parsed.sessions) cache = parsed;
+    } catch { /* no cache yet */ }
+    const metaById = new Map();
+    try { for (const session of await this.listSessions(accountId, Number.MAX_SAFE_INTEGER)) metaById.set(session.id, session.metadata || {}); } catch { /* the index is optional here */ }
+    const next = {};
+    const result = [];
+    let changed = false;
+    for (const name of names) {
+      const match = /^session-(.+)\.jsonl$/.exec(name);
+      if (!match) continue;
+      let stat;
+      try { stat = await fs.stat(path.join(this._chatDir(accountId), name)); } catch { continue; }
+      if (stat.mtimeMs < cutoff) continue;
+      const signature = `${stat.size}:${Math.round(stat.mtimeMs)}`;
+      let entry = cache.sessions[match[1]];
+      if (!entry || entry.signature !== signature || !Array.isArray(entry.items)) {
+        entry = { signature, items: await this._scanSessionCarryEvidence(accountId, match[1]) };
+        changed = true;
+      }
+      next[match[1]] = entry;
+      const fallback = metaById.get(match[1])?.agentId || null;
+      for (const item of entry.items) {
+        if (Date.parse(item.timestamp) >= cutoff) result.push({ ...item, actorId: item.actorId || fallback });
+      }
+    }
+    if (changed || Object.keys(cache.sessions).length !== Object.keys(next).length) {
+      try {
+        await this._ensureDirs(accountId);
+        const target = this._carryEvidenceCacheFile(accountId);
+        await fs.writeFile(`${target}.tmp`, JSON.stringify({ sessions: next }));
+        await fs.rename(`${target}.tmp`, target);
+      } catch { /* the cache is an optimisation only */ }
+    }
+    return result.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
   }
 
   async listOrderActorEvidence(accountId, { sessionLimit = 100, recordLimit = Infinity } = {}) {

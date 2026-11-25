@@ -18,6 +18,7 @@ import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
 import { futureHistoricalBarsError } from './historical-bars-time.js';
 import { getRangeConfirmation } from './range-confirmation.js';
 import { withExitAudit } from './exit-audit.js';
+import { sanitizeCarry } from './carry-forward.js';
 import { getEarningsDates } from './earnings-batching.js';
 import { normalizeOptionLimitPrice } from './option-price.js';
 import { spreadLegsRequest } from './spread-legs.js';
@@ -296,7 +297,9 @@ function orderResponse(data, args) {
   if (typeof args.thesis !== 'string' || !args.thesis.trim()) {
     text += '\n\n⚠ No `thesis` provided — this trade was NOT captured to your trade-memory. Pass a `thesis` next time so find_similar_setups can recall it.';
   }
-  return { content: [{ type: 'text', text }] };
+  const response = { content: [{ type: 'text', text }] };
+  // Nov 26 W1: only a call that carries exit_evidence reaches the (synchronous, best-effort) exit audit; every other call returns exactly as before.
+  return args.exit_evidence !== undefined ? withExitAudit(response, args, writeExitAuditRecord(args)) : response;
 }
 
 // Create MCP server
@@ -956,6 +959,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             market_data: {
               type: 'object',
               description: 'Relevant market data that influenced the decision',
+            },
+            carry: {
+              type: 'object',
+              description: 'Optional structured note that is carried into your next heartbeats (your own note, not market data). kind "candidate": symbol, direction (call or put), status (pending, rejected, accepted, dropped), event_id, data_as_of (the completed daily bar date, YYYY-MM-DD), gate (daily_trend, range, confirmation, earnings, quote, other), failed (up to 4 name:number pairs), next (range, confirmation, quote, entry). kind "range": symbol, event_id, anchor_used (UTC), range_high, range_low, event_published_at, entry_order_id for a held lot, refused_anchors (dates the range tool refused). kind "target_allocation": symbol (the option), entry_order_id, order_id, filled_qty, original_qty, status (submitted, partial, filled, cancelled). Invalid notes are ignored; the decision is still logged.',
             },
           },
           required: ['action', 'reasoning'],
@@ -2271,6 +2278,7 @@ ${allNews.map((article, i) =>
           symbol: args.symbol || null,
           reasoning: args.reasoning,
           market_data: args.market_data || {},
+          ...(args.carry !== undefined && sanitizeCarry(args.carry) && { carry: sanitizeCarry(args.carry) }),
         };
 
         await fs.writeFile(filepath, JSON.stringify(decision, null, 2));
@@ -2346,7 +2354,7 @@ ${allNews.map((article, i) =>
         }
         const data = await callTradingBot('/options/order', 'POST', requestData);
         if (isOpeningIntent(args.position_intent)) void autoStoreSetup({ ...args, ...data }, args.side || 'buy');
-        return withExitAudit(orderResponse(data, args), args, writeExitAuditRecord(args));
+        return orderResponse(data, args);
       }
 
       case 'withdraw_planned_intent': {

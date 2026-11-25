@@ -1,6 +1,7 @@
 // Prophet Agent Harness - Autonomous trading agent with phased heartbeat
 // Uses claude CLI subprocess for auth (OAuth/API key handled by CLI)
 import { attributionFromToolEvent } from './order-attribution-journal.js';
+import { buildCarryForwardBlock } from '../carry-forward.js';
 import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
@@ -825,7 +826,33 @@ export class AgentHarness {
   // Plan context plus the daily-loss lock line. The lock itself is enforced by the Go order policy; this only tells the agent.
   async _heldPositionPlanContext(accountId = this.state.activeAccountId) {
     const plans = await this._heldPositionPlanContextCore(accountId);
-    return plans + await this._sessionLockContext();
+    return plans + await this._sessionCarryContext(accountId) + await this._sessionLockContext();
+  }
+
+  // Nov 26 W3: the bounded SESSION CARRY-FORWARD block (the agent's own structured notes, see carry-forward.js). Empty when there are none, so a beat
+  // without notes is identical to before. Any failure, and any account, sandbox or agent change during the awaited read, yields no block.
+  async _sessionCarryContext(accountId = this.state.activeAccountId) {
+    try {
+      if (!accountId || !this.sandboxId || !this.chatStore || typeof this.chatStore.listSessionCarryEvidence !== 'function') return '';
+      const sessionEpoch = this._sessionEpoch;
+      const sandboxId = this.sandboxId;
+      const agentId = this.state.activeAgentId;
+      if (!agentId) return '';
+      const nowMs = Date.now();
+      // bounded: a slow or stuck history read must never hold up the heartbeat
+      let timer;
+      const items = await Promise.race([
+        this.chatStore.listSessionCarryEvidence(accountId, { nowMs }),
+        new Promise(resolve => { timer = setTimeout(() => resolve(null), 5000); timer.unref?.(); }),
+      ]).finally(() => clearTimeout(timer));
+      if (sessionEpoch !== this._sessionEpoch || accountId !== this.state.activeAccountId
+        || sandboxId !== this.sandboxId || sandboxId !== this.state.activeSandboxId || agentId !== this.state.activeAgentId) return '';
+      if (!Array.isArray(items) || !items.length) return '';
+      const context = this.state.positionPlanContext;
+      const matched = context?.status === 'matched' && context.accountId === accountId && context.sandboxId === sandboxId ? context.matches || [] : [];
+      const heldLots = matched.map(plan => ({ symbol: plan.symbol, entryOrderId: plan.entryBrokerId || null }));
+      return buildCarryForwardBlock({ items, nowMs, currentAgentId: agentId, heldLots });
+    } catch { return ''; }
   }
 
   async _sessionLockContext() {

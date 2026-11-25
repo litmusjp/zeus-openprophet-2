@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as secrets from './secrets-store.js';
+import { safeCode } from './durable-file.js';
 
 let active = false;               // true once keys are written as markers
 const unresolved = new Set();     // markers whose key could not be found; kept as markers so they are never lost
@@ -38,6 +39,28 @@ export function forEachAlphaDeskSlot(config, fn) {
 }
 
 export function emptyPlan() { return { plaintext: [] }; }
+
+/**
+ * Candidate-local check of the key references a RAW config holds (a marker means "the key lives in the private store"). Pure: it never
+ * changes the bookkeeping, the private store or the candidate. Legacy plaintext keys carry their own values and need no store.
+ * { ok, reason: 'private_store_unavailable' | 'keys_missing', markers, missing }
+ */
+export function referenceStatus(raw) {
+  const accounts = Array.isArray(raw?.accounts) ? raw.accounts : [];
+  let markers = 0;
+  for (const account of accounts) if (account && account.secretRef) markers += 1;
+  forEachAlphaDeskSlot(raw || {}, (scope, slot) => { if (slot && slot.apiKeyRef) markers += 1; });
+  if (!markers) return { ok: true, markers: 0, missing: 0 };
+  if (!secrets.isSplitEnabled() || secrets.isCorrupt()) return { ok: false, reason: 'private_store_unavailable', markers, missing: markers };
+  let missing = 0;
+  for (const account of accounts) {
+    if (!account || !account.secretRef) continue;
+    const keys = secrets.getAccountKeys(account.id);
+    if (!(keys && hasValue(keys.publicKey) && hasValue(keys.secretKey))) missing += 1;
+  }
+  forEachAlphaDeskSlot(raw || {}, (scope, slot) => { if (slot && slot.apiKeyRef && !hasValue(secrets.getAlphaDeskKey(scope))) missing += 1; });
+  return missing ? { ok: false, reason: 'keys_missing', markers, missing } : { ok: true, markers, missing: 0 };
+}
 
 /**
  * Works on the parsed config file before it is normalised: remembers the plaintext keys that still need
@@ -83,8 +106,9 @@ function backupConfigFile(configPath, accountIds) {
   if (!fs.existsSync(configPath)) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const backup = path.join(path.dirname(configPath), 'agent-config.pre-secrets-' + stamp + '.json');
-  fs.copyFileSync(configPath, backup);
-  try { fs.chmodSync(backup, 0o600); } catch { /* not supported on this filesystem */ }
+  const bytes = fs.readFileSync(configPath);
+  const fd = fs.openSync(backup, 'wx', 0o600);              // exclusive and restrictive from the first open (never copy-then-chmod)
+  try { fs.writeSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   const copy = JSON.parse(fs.readFileSync(backup, 'utf8'));
   const ids = (copy.accounts || []).map(a => a.id).sort().join(',');
   if (ids !== [...accountIds].sort().join(',')) throw new Error('backup_mismatch');
@@ -100,6 +124,10 @@ export function adopt(plan, { configPath, accountIds = [] } = {}) {
   if (secrets.isCorrupt()) { note('store_unreadable_old_layout_kept'); return { active: false, migrated: 0, error: 'store_unreadable' }; }
   if (!plan.plaintext.length) { active = true; return { active: true, migrated: 0 }; }
   let backup = null;
+  // What the private store held before this migration, so a failure restores it instead of deleting it.
+  const previous = plan.plaintext.map(item => item.kind === 'account'
+    ? { item, old: (() => { const k = secrets.getAccountKeys(item.id); return k ? { ...k } : null; })() }
+    : { item, old: secrets.getAlphaDeskKey(item.scope) || '' });
   try {
     backup = backupConfigFile(configPath, accountIds);
     for (const item of plan.plaintext) {
@@ -116,14 +144,15 @@ export function adopt(plan, { configPath, accountIds = [] } = {}) {
       } else if (secrets.digestOf(fresh.alphadesk?.[item.scope]) !== secrets.digestOf(item.apiKey)) throw new Error('verify_alphadesk');
     }
   } catch (error) {
-    note('migration_failed_old_layout_kept:' + (error.message || 'unknown').slice(0, 40));
+    note('migration_failed_old_layout_kept:' + safeCode(error, 'migration'));
     try {
-      for (const item of plan.plaintext) {
-        if (item.kind === 'account') secrets.deleteAccountKeys(item.id); else secrets.setAlphaDeskKey(item.scope, '');
+      for (const { item, old } of previous) {
+        if (item.kind === 'account') { if (old) secrets.setAccountKeys(item.id, old); else secrets.deleteAccountKeys(item.id); }
+        else secrets.setAlphaDeskKey(item.scope, old);
       }
       secrets.saveSecrets();
-    } catch { /* leave the extra entries; they are unused while markers are not written */ }
-    return { active: false, migrated: 0, error: error.message };
+    } catch { /* leave the entries as they are; they are unused while markers are not written */ }
+    return { active: false, migrated: 0, error: safeCode(error, 'migration') };
   }
   active = true;
   return { active: true, migrated: plan.plaintext.length, backup: backup ? path.basename(backup) : null };

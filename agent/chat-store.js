@@ -592,6 +592,17 @@ function recordedToolStatus(record) {
   return accepted.has(direct) ? direct : null;
 }
 
+/** The session index could not be read or recovered. The JSONL message files are untouched; `appended` says whether the message itself was already stored. */
+export class HistoryIndexUnavailableError extends Error {
+  constructor(reason = 'unavailable', { appended = false } = {}) {
+    super('history_index_unavailable:' + reason);
+    this.code = 'HISTORY_INDEX_UNAVAILABLE';
+    this.reason = reason;
+    this.appended = appended;
+  }
+}
+export const isHistoryIndexUnavailable = error => error?.code === 'HISTORY_INDEX_UNAVAILABLE';
+
 export class ChatStore {
   constructor(dataDir = DATA_DIR) {
     this.dataDir = dataDir;
@@ -635,39 +646,36 @@ export class ChatStore {
 
   async _loadSessionIndex(accountId) {
     const file = this._sessionIndexFile(accountId);
+    const usable = value => !!value && typeof value === 'object' && Array.isArray(value.sessions);
+    const readBackup = async () => {
+      try { const value = JSON.parse(await fs.readFile(file + '.bak', 'utf-8')); return usable(value) ? { status: 'ok', index: value } : { status: 'bad' }; }
+      catch (error) { return { status: classifyReadError(error) === 'absent' ? 'absent' : 'bad' }; }
+    };
     let raw;
     try {
       raw = await fs.readFile(file, 'utf-8');
     } catch (error) {
-      if (classifyReadError(error) === 'absent') return { sessions: [] };     // a first index
-      return this._unavailableIndex(safeCode(error));                         // unreadable is not empty
+      if (classifyReadError(error) !== 'absent') throw new HistoryIndexUnavailableError(safeCode(error));   // unreadable is not empty
+      const backup = await readBackup();                                                                   // a missing index is a first index only when no backup exists either
+      if (backup.status === 'ok') return backup.index;
+      if (backup.status === 'absent') return { sessions: [] };
+      throw new HistoryIndexUnavailableError('backup_unusable');
     }
     try {
       const index = JSON.parse(raw);
-      if (index && typeof index === 'object' && Array.isArray(index.sessions)) return index;
+      if (usable(index)) return index;
     } catch { /* corrupt: recover below */ }
-    await preserveEvidence(file);
-    try {
-      const backup = JSON.parse(await fs.readFile(file + '.bak', 'utf-8'));
-      if (backup && typeof backup === 'object' && Array.isArray(backup.sessions)) return backup;
-    } catch { /* no usable backup */ }
-    return this._unavailableIndex('corrupt');
-  }
-
-  // An index that could not be read is reported as unavailable and is never replaced by an empty one: the original file and the
-  // session JSONL files stay as they are (the flag is not enumerable, so callers that only read the sessions see an empty list).
-  _unavailableIndex(code) {
-    console.error('[chat-store] session_index_unavailable:' + code);
-    const index = { sessions: [] };
-    Object.defineProperty(index, 'unavailable', { value: true, enumerable: false });
-    return index;
+    const backup = await readBackup();
+    if (backup.status !== 'ok') throw new HistoryIndexUnavailableError('corrupt');
+    if (!(await preserveEvidence(file))) throw new HistoryIndexUnavailableError('evidence_not_preserved');   // the exact bytes are kept before the next save replaces them
+    return backup.index;
   }
 
   async _saveSessionIndex(accountId, index) {
     await this._ensureDirs(accountId);
-    if (index?.unavailable) return;
     const validIndex = bytes => { try { const value = JSON.parse(bytes.toString('utf8')); return !!value && typeof value === 'object' && Array.isArray(value.sessions); } catch { return false; } };
-    await publishAtomic(this._sessionIndexFile(accountId), JSON.stringify(index, null, 2), { backup: true, validateExisting: validIndex });
+    const result = await publishAtomic(this._sessionIndexFile(accountId), JSON.stringify(index, null, 2), { backup: true, validateExisting: validIndex });
+    if (result.backup === 'failed') console.error('[chat-store] index_backup_not_written');   // degraded recovery is visible, not silent
   }
 
   // ── Public API ───────────────────────────────────────────────────
@@ -732,7 +740,8 @@ export class ChatStore {
       await fs.appendFile(filePath, JSON.stringify(entry) + '\n');
 
       // Update session index message count
-      const index = await this._loadSessionIndex(accountId);
+      let index;
+      try { index = await this._loadSessionIndex(accountId); } catch (error) { if (isHistoryIndexUnavailable(error)) error.appended = true; throw error; }
       const session = index.sessions.find(s => s.id === sessionId);
       if (session) {
         session.messageCount = (session.messageCount || 0) + 1;
@@ -741,7 +750,7 @@ export class ChatStore {
         if (message.content) {
           session.lastMessage = message.content.substring(0, 120);
         }
-        await this._saveSessionIndex(accountId, index);
+        try { await this._saveSessionIndex(accountId, index); } catch (error) { if (isHistoryIndexUnavailable(error)) error.appended = true; throw error; }
       }
     });
   }
@@ -986,7 +995,8 @@ export class ChatStore {
   /** Return a compact context window for a restarted agent or manager. */
   async getRecentContext(accountId, opts = {}) {
     const { sessionLimit = 5, messagesPerSession = 8, charLimit = 12000 } = opts;
-    const sessions = await this.listSessions(accountId, sessionLimit);
+    let sessions;
+    try { sessions = await this.listSessions(accountId, sessionLimit); } catch (error) { if (!isHistoryIndexUnavailable(error)) throw error; console.error('[chat-store] context_skipped:' + error.reason); return []; }
     const context = [];
     let chars = 0;
     for (const session of sessions) {

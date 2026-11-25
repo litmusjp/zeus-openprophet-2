@@ -788,7 +788,17 @@ export class AgentHarness {
     }
   }
 
-  async _persistSession(sessionId, metadata = {}, accountId = this.state.activeAccountId, actorSnapshot = null) {
+  // History is best-effort for the trading loop: an unavailable session index (typed error, JSONL files untouched) is logged and never fails a beat.
+  // The message itself is already appended by the store before such an error is raised, so nothing is retried into a duplicate.
+  async _persistSession(...args) {
+    try { return await this._persistSessionUnguarded(...args); } catch (error) { if (error?.code !== 'HISTORY_INDEX_UNAVAILABLE') throw error; console.error('[history] index_unavailable:session:' + error.reason); }
+  }
+
+  async _persistMessages(...args) {
+    try { return await this._persistMessagesUnguarded(...args); } catch (error) { if (error?.code !== 'HISTORY_INDEX_UNAVAILABLE') throw error; console.error('[history] index_unavailable:messages:' + error.reason); }
+  }
+
+  async _persistSessionUnguarded(sessionId, metadata = {}, accountId = this.state.activeAccountId, actorSnapshot = null) {
     if (!this.chatStore || !sessionId || !accountId) return;
     const sandbox = this._resolveSandbox();
     const account = this._resolveAccount();
@@ -895,7 +905,7 @@ export class AgentHarness {
     }
   }
 
-  async _persistMessages(sessionId, messages = [], accountId = this.state.activeAccountId, actorSnapshot = null) {
+  async _persistMessagesUnguarded(sessionId, messages = [], accountId = this.state.activeAccountId, actorSnapshot = null) {
     if (!this.chatStore || !sessionId || !accountId) return;
     for (const message of messages) {
     if (!message || (!message?.content?.trim() && !message?.eventType && !message?.kind)) continue;

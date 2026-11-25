@@ -154,7 +154,7 @@ test('if the private file cannot be written the old layout is kept and the confi
   } finally { fs.rmSync(blocker, { force: true }); }
 });
 
-test('an unreadable private file keeps markers untouched and never writes empty keys over them', async () => {
+test('an unreadable private file keeps markers untouched; active startup now REFUSES instead of running without keys (Nov 25 H1-01), and nothing is written', async () => {
   const seed = await setup({ split: true });
   await silently(() => seed.store.loadConfig());
   await seed.store.saveConfig();
@@ -165,35 +165,32 @@ test('an unreadable private file keeps markers untouched and never writes empty 
   configSecrets.resetForTests();
   process.env.OPENPROPHET_CONFIG_PATH = seed.configPath;
   const again = await import('../agent/config-store.js?case=' + (++counter));
-  await silently(() => again.loadConfig());
-  assert.equal(configSecrets.isActive(), false);
-  await again.saveConfig();
-  const after = JSON.parse(readDisk(seed.configPath));
-  assert.equal(after.accounts[0].secretRef, 'account:aaaa1111', 'the marker survives');
-  assert.equal(after.accounts[0].publicKey, undefined);
-  assert.equal(JSON.parse(markersOnly).accounts.length, after.accounts.length);
+  const outcome = await silently(() => again.loadConfig().then(() => null, e => e));
+  assert.equal(outcome.result?.code, 'CONFIG_UNRECOVERABLE');
+  assert.match(outcome.result.message, /private_store_unavailable/);
+  assert.equal(readDisk(seed.configPath), markersOnly, 'the markers file is byte-for-byte untouched');
   assert.equal(readDisk(seed.filePath), '{broken', 'the unreadable file is left alone');
 });
 
-test('a marker whose key is missing stays a marker and the other keys are unaffected', async () => {
+test('a marker whose key is missing keeps its marker and the other keys; active startup REFUSES (Nov 25 H1-01) and nothing is invented or rewritten', async () => {
   const seed = await setup({ split: true });
   await silently(() => seed.store.loadConfig());
   await seed.store.saveConfig();
   const store = JSON.parse(readDisk(seed.filePath));
   delete store.accounts.bbbb2222;
   fs.writeFileSync(seed.filePath, JSON.stringify(store));
+  const before = readDisk(seed.configPath), storeBefore = readDisk(seed.filePath);
 
   secrets.initSecrets({ filePath: seed.filePath, split: true });
   configSecrets.resetForTests();
   process.env.OPENPROPHET_CONFIG_PATH = seed.configPath;
   const again = await import('../agent/config-store.js?case=' + (++counter));
-  const { logs } = await silently(() => again.loadConfig());
-  assert.ok(logs.some(l => /account_keys_missing/.test(l)));
-  assert.equal(again.getAccountById('bbbb2222').secretKey, undefined, 'the missing key is not invented');
-  assert.equal(again.getAccountById('aaaa1111').secretKey, KEYS.a.secretKey);
-  await again.saveConfig();
-  const disk = JSON.parse(readDisk(seed.configPath));
-  assert.equal(disk.accounts.find(a => a.id === 'bbbb2222').secretRef, 'account:bbbb2222', 'the marker is kept so the reference is not lost');
+  const outcome = await silently(() => again.loadConfig().then(() => null, e => e));
+  assert.equal(outcome.result?.code, 'CONFIG_UNRECOVERABLE');
+  assert.match(outcome.result.message, /keys_missing/);
+  assert.equal(readDisk(seed.configPath), before, 'the config (markers for every account) is byte-for-byte untouched');
+  assert.equal(readDisk(seed.filePath), storeBefore, 'the private store (other accounts keys included) is untouched');
+  assert.equal(JSON.parse(readDisk(seed.configPath)).accounts.find(a => a.id === 'bbbb2222').secretRef, 'account:bbbb2222', 'the marker is kept so the reference is not lost');
 });
 
 test('with the split off (tests, inert mode) nothing about the file layout changes', async () => {

@@ -10,7 +10,7 @@ import { nativeOpenCodeEnv, stripOperatorSecrets } from './chatgpt-oauth.js';
 import * as secrets from './secrets-store.js';
 import * as configSecrets from './config-secrets.js';
 import { permissionPatchForFit, strategyOptionFit, validateOptionFitInput } from './agent-consistency.js';
-import { classifyReadError, safeCode, publishAtomic, preserveEvidence } from './durable-file.js';
+import { classifyReadError, safeCode, sha256Hex, publishAtomic, preserveEvidence } from './durable-file.js';
 
 // The last agent switch per sandbox, read once by the route that triggered it (to restart the slot's backend when the
 // switch changed permissions). In memory only.
@@ -890,34 +890,36 @@ function paperImportEndpoint() {
 }
 
 /**
- * Reads one config candidate (the primary file or its `.bak`) without publishing anything: read, parse, shape, secret preparation and
- * normalisation all run on detached objects, and the secret bookkeeping (the module-level "unresolved" set) is restored on rejection.
- * status: 'ok' | 'absent' | 'access' | 'corrupt' (stage: parse | shape | normalize | unresolved).
+ * Reads one config candidate (the primary file or its `.bak`) without publishing anything: read, parse, shape, key-reference check, secret
+ * preparation and normalisation all run on detached objects, and the secret bookkeeping (the module-level "unresolved" set) is restored on every
+ * rejection. status: 'ok' | 'absent' | 'access' | 'corrupt' (stage: parse | shape | normalize) | 'unresolved' (reason: private_store_unavailable |
+ * keys_missing). `enforceRefs` makes a marker whose key cannot be resolved (or a private store that cannot be read) a rejection; legacy plaintext
+ * keys carry their own values and are always accepted.
  */
-async function readConfigCandidate(file, useSecrets, { rejectUnresolved = false } = {}) {
-  let raw;
+async function readConfigCandidate(file, useSecrets, { enforceRefs = false } = {}) {
+  let bytes;
   try {
-    raw = await fs.readFile(file, 'utf-8');
+    bytes = await fs.readFile(file);
   } catch (error) {
-    const status = classifyReadError(error);
-    return { status, code: safeCode(error) };
+    return { status: classifyReadError(error), code: safeCode(error) };
   }
+  const digest = sha256Hex(bytes);
   const bookkeeping = configSecrets.bookkeepingSnapshot();
   try {
     let parsed;
-    try { parsed = JSON.parse(raw); } catch (error) { return { status: 'corrupt', stage: 'parse', code: safeCode(error) }; }
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { status: 'corrupt', stage: 'shape', code: 'NotAnObject' };
+    try { parsed = JSON.parse(bytes.toString('utf8')); } catch (error) { return { status: 'corrupt', stage: 'parse', code: safeCode(error), digest }; }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { status: 'corrupt', stage: 'shape', code: 'NotAnObject', digest };
+    if (enforceRefs) {
+      const refs = configSecrets.referenceStatus(parsed);
+      if (!refs.ok) return { status: 'unresolved', reason: refs.reason, code: refs.reason, missing: refs.missing, digest };
+    }
     const accountIds = (Array.isArray(parsed.accounts) ? parsed.accounts : []).map(a => a?.id);
     const plan = useSecrets ? configSecrets.prepareRaw(parsed) : null;
-    if (rejectUnresolved && configSecrets.unresolvedCount() > bookkeeping.size) {
-      configSecrets.bookkeepingRestore(bookkeeping);
-      return { status: 'corrupt', stage: 'unresolved', code: 'KeysMissing' };
-    }
     const config = normalizeConfig(parsed);
-    return { status: 'ok', config, plan, accountIds };
+    return { status: 'ok', config, plan, accountIds, digest };
   } catch (error) {
     configSecrets.bookkeepingRestore(bookkeeping);
-    return { status: 'corrupt', stage: 'normalize', code: safeCode(error, 'Invalid') };
+    return { status: 'corrupt', stage: 'normalize', code: safeCode(error, 'Invalid'), digest };
   }
 }
 
@@ -925,45 +927,60 @@ const configBackupPath = () => CONFIG_PATH + '.bak';
 const configLog = (stage, code) => console.error('[config] ' + stage + ':' + code);
 
 function unrecoverableConfigError(code) {
-  return Object.assign(new Error('config_unrecoverable:' + code + ' (the existing config file is kept as is; restore agent-config.json or its .bak, then restart)'), { code: 'CONFIG_UNRECOVERABLE' });
+  return Object.assign(new Error('config_unrecoverable:' + code + ' (the existing config files are kept as they are; restore agent-config.json or its .bak, then restart)'), { code: 'CONFIG_UNRECOVERABLE' });
 }
+
+// Digests of the on-disk config bytes that were ACCEPTED by the full candidate validation (loaded) or published by this process. Only such bytes
+// may become the known-good `.bak`: a parseable primary that failed validation (or was edited behind our back) never replaces a good backup.
+let knownGoodDigests = new Set();
 
 export async function loadConfig() {
   // When the private secrets file is in use, account and AlphaDesk keys live there and the config file holds
   // markers. Keys are put back into the loaded config here, so everything else sees exactly what it saw before.
   const useSecrets = secrets.isSplitEnabled() && !secrets.isCorrupt();
+  const strict = EXECUTION_START_ENABLED;       // active startup refuses what it cannot prove; inert startup only inspects and never writes
+  knownGoodDigests = new Set();
 
-  // Startup matrix (H1). Candidates are built detached; nothing is published, imported, synced or cleaned until one is accepted.
-  //   valid primary                          -> load it
-  //   absent primary + valid backup          -> recover from the backup (absent is not automatically a virgin install)
-  //   absent primary + no backup             -> first-run bootstrap (defaults, optional broker import) exactly as before
-  //   corrupt primary + valid backup         -> keep the corrupt bytes beside it, recover from the backup
-  //   corrupt primary + no usable backup     -> active mode: refuse to start, file untouched; inert mode: defaults, no write
-  //   unreadable primary (EACCES/EIO/...)    -> active mode: refuse to start; inert mode: defaults, no write. Never renamed, never defaulted over.
-  let candidate = await readConfigCandidate(CONFIG_PATH, useSecrets);
+  // Startup matrix (H1). Candidates are built detached; nothing is published, imported, synced, adopted or saved until one is accepted.
+  //   valid primary                                     -> load it (markers must resolve in active mode)
+  //   primary markers that cannot be resolved           -> active: refuse (no fallback to an older backup); never default
+  //   absent primary AND absent backup                  -> first-run bootstrap (defaults, optional broker import) exactly as before
+  //   absent primary + valid backup                     -> recover from the backup
+  //   absent primary + corrupt/unresolved/unreadable bak-> active: refuse (prior state cannot be proven safe), no import, no save
+  //   corrupt primary + valid backup                    -> keep the exact original bytes as evidence FIRST (failure refuses), then recover
+  //   corrupt primary + no usable backup                -> active: refuse, files untouched; inert: defaults, no write
+  //   unreadable primary (EACCES/EIO/EISDIR ...)        -> active: refuse; inert: defaults, no write. Never renamed, never defaulted over.
+  let candidate = await readConfigCandidate(CONFIG_PATH, useSecrets, { enforceRefs: strict });
   let sourcePath = CONFIG_PATH;
-  if (candidate.status !== 'ok') {
+  if (candidate.status === 'ok') {
+    knownGoodDigests.add(candidate.digest);
+  } else {
     const primary = candidate;
     if (primary.status === 'access') {
       configLog('primary_unreadable', primary.code);
-      if (EXECUTION_START_ENABLED) throw unrecoverableConfigError('primary_unreadable');
+      if (strict) throw unrecoverableConfigError('primary_unreadable');
       candidate = { status: 'default' };
+    } else if (primary.status === 'unresolved') {
+      configLog('primary_references', primary.reason);
+      throw unrecoverableConfigError(primary.reason);          // only produced in active mode (enforceRefs)
     } else {
-      if (primary.status === 'corrupt') {
-        configLog('primary_invalid', (primary.stage || 'parse') + ':' + primary.code);
-        if (EXECUTION_START_ENABLED) await preserveEvidence(CONFIG_PATH);
-      }
-      const backup = await readConfigCandidate(configBackupPath(), useSecrets, { rejectUnresolved: true });
+      if (primary.status === 'corrupt') configLog('primary_invalid', (primary.stage || 'parse') + ':' + primary.code);
+      const backup = await readConfigCandidate(configBackupPath(), useSecrets, { enforceRefs: true });
       if (backup.status === 'ok') {
+        if (primary.status === 'corrupt' && strict) {
+          const kept = await preserveEvidence(CONFIG_PATH);      // the exact original must be provably kept before anything overwrites it
+          if (!kept) { configLog('evidence_not_preserved', 'refused'); throw unrecoverableConfigError('evidence_not_preserved'); }
+        }
         configLog('recovered_from_backup', primary.status);
         candidate = backup;
         sourcePath = configBackupPath();
-      } else if (primary.status === 'absent') {
-        candidate = { status: 'default' };            // virgin install (or an inert tool): today's behaviour
-      } else if (EXECUTION_START_ENABLED) {
-        throw unrecoverableConfigError('no_valid_backup');
+      } else if (primary.status === 'absent' && backup.status === 'absent') {
+        candidate = { status: 'default' };                       // a genuine first run (the operator preflight decides whether that is expected)
       } else {
-        candidate = { status: 'default' };            // inert startup never writes
+        if (primary.status === 'corrupt' && strict) await preserveEvidence(CONFIG_PATH);
+        configLog('backup_unusable', backup.status === 'unresolved' ? backup.reason : backup.status);
+        if (strict) throw unrecoverableConfigError(primary.status === 'absent' ? 'backup_unusable' : 'no_valid_backup');
+        candidate = { status: 'default' };                       // inert startup: defaults for inspection, nothing written
       }
     }
   }
@@ -976,7 +993,9 @@ export async function loadConfig() {
   } else {
     _config = createDefaultConfig();
   }
-  if (secretsPlan) {
+  // Disk adoption (moving plaintext keys into the private file) only happens in active mode, or in the explicit split rehearsal
+  // (OPENPROPHET_SECRETS_SPLIT=1, a documented exception for a throwaway data folder). A plain inert load never writes.
+  if (secretsPlan && (EXECUTION_START_ENABLED || process.env.OPENPROPHET_SECRETS_SPLIT === '1')) {
     const outcome = configSecrets.adopt(secretsPlan, { configPath: sourcePath, accountIds: rawAccountIds });
     if (outcome.migrated) console.log('  Moved ' + outcome.migrated + ' stored key(s) to the private secrets file' + (outcome.backup ? ' (backup: ' + outcome.backup + ')' : ''));
   }
@@ -1037,10 +1056,19 @@ export async function saveConfig() {
       configSecrets.syncFromConfig(_config);
       toWrite = configSecrets.toDiskConfig(_config);
     }
-    // The payload is the DISK form (markers), never the hydrated in-memory object. The previous on-disk bytes become the single known-good
-    // `.bak` only when they validate; a corrupt primary never replaces a good `.bak`.
-    const result = await publishAtomic(CONFIG_PATH, JSON.stringify(toWrite, null, 2), { backup: true, validateExisting: looksLikeConfigBytes });
-    if (result.backup === 'failed') configLog('backup_not_written', 'publish_failed');
+    // The payload is the DISK form (markers), never the hydrated in-memory object. Only bytes this process accepted (loaded and validated, or
+    // published itself) become the single known-good `.bak`; a rejected, recovered-from or externally edited primary never replaces it. Backup policy:
+    // when the backup cannot be written and no valid `.bak` exists, the save fails BEFORE the primary is replaced (BACKUP_REQUIRED); when an older
+    // valid `.bak` exists the save continues with a warning and that older backup remains the fallback.
+    const payload = JSON.stringify(toWrite, null, 2);
+    const result = await publishAtomic(CONFIG_PATH, payload, {
+      backup: true,
+      requireFallback: true,
+      validateExisting: bytes => knownGoodDigests.has(sha256Hex(bytes)) && looksLikeConfigBytes(bytes),
+      validateFallback: looksLikeConfigBytes,
+    });
+    knownGoodDigests.add(sha256Hex(Buffer.from(payload, 'utf8')));
+    if (result.backup === 'failed') configLog('backup_not_written', 'older_backup_kept');
   });
   _writeLock = write;
   return write;

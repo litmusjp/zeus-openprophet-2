@@ -27,7 +27,10 @@ import { loadOrderActorMap, resolveOrderActorWithJournal } from './history-attri
 import { OrderAttributionJournal } from './order-attribution-journal.js';
 import { IvHistoryCollector, IvHistoryStore, IV_CAPTURE, createIvHistoryHandler, parseStartList, underlyingOf } from './iv-history.js';
 import { createDataUsage } from './data-usage.js';
-import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
+import ChatStore, { isValidHistoryAccountId, isHistoryIndexUnavailable } from './chat-store.js';
+import { createChatsListHandler } from './chats-route.js';
+// Manager history is best-effort: an unavailable session index is logged, the message file is already written, nothing is retried.
+const historyGuard = async fn => { try { return await fn(); } catch (error) { if (!isHistoryIndexUnavailable(error)) throw error; console.error('[history] index_unavailable:manager:' + error.reason); } };
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
 import { enqueueProphetBotBinaryOperation } from './binary-operation-lock.js';
@@ -1057,17 +1060,17 @@ ${message.trim()}${customPromptAddition}`;
       // Persist Manager sessions outside process memory so restarts retain context.
       if (_managerSessionId) {
         const activityId = randomBytes(16).toString('hex');
-        await chatStore.startSession(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
+        await historyGuard(() => chatStore.startSession(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
           mode: 'manager', agentId: 'manager', agentName: 'Manager',
           accountId: MANAGER_HISTORY_ACCOUNT, accountName: 'Manager',
           sandboxId: null, sandboxName: 'Manager', model: ocModel,
-        });
-        await chatStore.addMessage(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
+        }));
+        await historyGuard(() => chatStore.addMessage(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
           role: 'user', kind: 'manager_message', content: _managerCurrentUserMessage, activityId, origin: 'User',
-        });
-        await chatStore.addMessage(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
+        }));
+        await historyGuard(() => chatStore.addMessage(MANAGER_HISTORY_ACCOUNT, _managerSessionId, {
           role: 'assistant', kind: 'manager_response', content: _managerCurrentText, activityId, origin: 'User',
-        });
+        }));
       }
       // Update session tracking
       const last = _managerSessions[_managerSessions.length - 1];
@@ -1597,15 +1600,7 @@ app.get('/api/activities/:activityId', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/chats', async (req, res) => {
-  try {
-    const accountId = req.query.accountId || getActiveAccount()?.id;
-    if (!accountId) return res.json({ sessions: [] });
-    const limit = Number(req.query.limit || 50);
-    const sessions = await chatStore.listSessions(accountId, limit);
-    res.json({ accountId, sessions });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+app.get('/api/chats', createChatsListHandler({ chatStore, getActiveAccountId: () => getActiveAccount()?.id }));
 
 app.get('/api/chats/all', async (req, res) => {
   try {

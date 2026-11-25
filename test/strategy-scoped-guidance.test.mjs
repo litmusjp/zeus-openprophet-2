@@ -49,7 +49,7 @@ test('catalyst guidance is direction-aware, intraday, and drops the daily defini
   assert.match(text, /prophet_get_news, prophet_search_news, prophet_get_market_news/);
   assert.match(text, /prophet_get_earnings_dates only warns you off positions ahead of a scheduled release; it is never entry evidence/);
   assert.match(text, /call prophet_get_alpaca_news first for your watch-list names/);
-  assert.match(text, /follow has_more with page_token/);
+  assert.match(text, /Page with has_more and page_token/);
   assert.match(text, /for targeted verification, missing timing or detail, wider discovery, or when Alpaca is empty, unavailable or insufficient/);
   assert.doesNotMatch(text, /only for names or events Alpaca does not cover/);
   assert.match(text, /anchor the event at the earliest publication time you have for it: an earlier event time you already know wins, otherwise the earliest created_at among the articles about the same event; record which article set the anchor; look further only when no article gives a time; later coverage, updated_at or fetched_at never restarts the catalyst clock/);

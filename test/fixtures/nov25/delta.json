@@ -1,0 +1,36 @@
+{
+  "catalyst": [
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "(symbols in batches of up to 30, the last 36 hours; follow has_more with page_token while your step budget allows; after your first full scan of the day, keep paging only until you reach articles you have already reviewed, and say so if your step budget ran out first). Then use prophet_get_news",
+      "new": "(symbols in batches of up to 30, limit 20 per page). Discovery is bounded best-effort: it never proves complete coverage and it never delays a due exit or the management of a position you hold. Your first full scan of a session chooses a lookback (hours, at most 72) that reaches back to the previous regular-session close; if 72 hours cannot reach it, say which interval stays uncovered. Page with has_more and page_token using the same query arguments and process every page you retrieve before you decide to stop; results are ordered by updated_at, so an old created_at on one article never ends the scan. One work allowance of 5 pages per heartbeat is shared by every news call of that heartbeat (watch-list batches, market-wide discovery and catch-up). When it runs out, or a page_token is missing or repeated, or the provider fails, stop and state the coverage: which symbols and window you read and which backlog or interval stays deferred, and continue that backlog at later heartbeats; a symbol you did not read is never NO_SETUP. After the first full scan, later heartbeats page only until they reach articles you have already reviewed, but a known article id does not prove that older items were reviewed: an unfinished earlier scan stays an explicit backlog, and after a restart, a gap or an unfinished scan you repeat a covering lookback instead of a one-hour window. Count an article or event once by its id; a changed updated_at never makes it new. Then use prophet_get_news"
+    },
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "also call prophet_get_alpaca_news with no symbols (limit up to 50) to see the newest market-wide headlines.",
+      "new": "also call prophet_get_alpaca_news with no symbols (limit 20) to see the newest market-wide headlines; this call counts against the shared page allowance of the heartbeat, and when the allowance is spent you record that market-wide coverage as deferred instead of skipping it silently."
+    },
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "- Missing or incomplete data (no completed bars yet, unknown publication time, unverified source) is INCOMPLETE_RESEARCH, never confirmation. A news result with has_more true is not by itself incomplete research: say which symbols and window you checked and whether newer relevant items may remain.",
+      "new": "- Missing or incomplete data (no completed bars yet, unknown publication time, unverified source) is INCOMPLETE_RESEARCH, never confirmation. A news result with has_more true is not by itself incomplete research: say which symbols and window you checked and whether newer relevant items may remain.\n- Reusing a rejection: within one session you may reuse an earlier rejection only when it rests on a completed-daily-bar trend verdict whose inputs are unchanged (same session date, symbol, direction and event, same data as-of date, same failed values), and you record that you reused it. Never reuse a missing confirmation, a price or side-of-open check, a quote, a gap measured from the current price, unknown or missing data, or a scheduled-earnings rejection once the result is published or corrected; check those again when the evidence changes. A rejection of one direction or event never suppresses another direction or event, and re-entry after an exit still follows its own rule."
+    },
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "and trail the remainder by exiting on a completed 5-minute close back through the broken level. This target exit happens once per position",
+      "new": "and trail the remainder by exiting on a completed 5-minute close back through the broken level. For the range-based target and trail defined here, the remaining call exits on a completed 5-minute close below its original recorded broken level and the remaining put exits on a completed 5-minute close above it (equality does not count); use the original event and position plan, not a later event or session range. This clarification does not replace an explicit different exit rule or historical override in your Strategy Rules or recorded plan. This target exit happens once per position"
+    },
+    {
+      "file": "agent/harness.js",
+      "old": "In the entry decision log equity, direction, held cost, reserved cost, candidate cost and the resulting percent.",
+      "new": "For every opening attempt, including a replacement and one later cancelled unfilled, write the decision log before place_options_order, with the equity, the direction, the held cost of every same-direction account holding and live group (lots filled today included), the reserved cost of every unfilled opening, the candidate's final bounded quantity and limit, the resulting percent, its client order id and the time of the evidence; recompute it if the quantity, the limit or any state changes before the order. If that log cannot be written, do not open; this never delays a reducing order, a cancel or a read."
+    }
+  ],
+  "shared": [
+    {
+      "file": "agent/harness.js",
+      "old": "a due exit with no fresh exact-contract quote remains DATA_BLOCK under the exit rule, and is still due.",
+      "new": "a due exit with no fresh exact-contract quote remains DATA_BLOCK under the exit rule, and is still due. Broker acknowledgement without confirmed execution is a submitted, unconfirmed order to reconcile; pending status alone, or an entry assessment score that does not apply to a reducing order, is not DATA_BLOCK. Never infer a fill, and never retry or duplicate an uncertain order. If required order, position or quote evidence is unavailable, the DATA_BLOCK rule above applies and a due exit stays due."
+    }
+  ]
+}

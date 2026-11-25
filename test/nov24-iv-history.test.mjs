@@ -519,3 +519,41 @@ test('R3 QW-04: the baseline counter read is clamped to the window like every ot
   assert.equal(seen[0].timeout, IV_CAPTURE.accountingFloorMs, 'the baseline got the one-second floor, not the full three seconds');
   assert.ok(seen.every(o => o.timeout <= IV_CAPTURE.accountingTimeoutMs && o.signal instanceof AbortSignal));
 });
+
+// Nov 25 C3 (Hermes NOTE-01): the running guard is taken before the first await, so two explicit tick() calls cannot both capture.
+test('C3: a second tick() while the first awaits its calendar returns busy, makes no calendar read, and the day is captured once', async t => {
+  const h = harness();
+  const { store, collector } = await collectorFor(t, h);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const base = collector.deps.open;
+  collector.deps.open = () => { const backend = base(); return { ...backend, get: async (p, o) => { if (p.startsWith('/api/v1/calendar')) await gate; return backend.get(p, o); } }; };
+  const first = collector.tick();                       // pending on its calendar read
+  assert.equal(collector.running, true, 'the guard is held before the first await');
+  assert.deepEqual(await collector.tick(), { status: 'busy' });
+  assert.equal(h.calls.filter(c => c.path.startsWith('/api/v1/calendar')).length, 0, 'the busy tick made no calendar read');
+  release();
+  assert.equal((await first).status, 'captured');
+  assert.equal(h.calls.filter(c => c.path.startsWith('/api/v1/calendar')).length, 1);
+  assert.equal((await store.read({ symbol: 'AAA', days: 5, nowMs: h.clock.t })).length, 1, 'one row per symbol, never two captures');
+  assert.equal(collector.running, false);
+});
+
+test('C3: running clears after success, a failed calendar read and an outside-window early return', async t => {
+  const h = harness();
+  const { collector } = await collectorFor(t, h);
+  const base = collector.deps.open;
+  collector.deps.open = () => { const backend = base(); return { ...backend, get: async (p, o) => { if (p.startsWith('/api/v1/calendar') && h.failCalendar) throw new Error('calendar down'); return backend.get(p, o); } }; };
+  h.failCalendar = true;
+  assert.equal((await collector.tick()).status, 'calendar_unreadable');
+  assert.equal(collector.running, false);
+  h.failCalendar = false;
+  assert.equal((await collector.tick()).status, 'captured');
+  assert.equal(collector.running, false);
+  assert.equal((await collector.tick()).status, 'done_today');
+  assert.equal(collector.running, false);
+  const early = harness({ now: Date.parse('2026-11-23T20:40:00Z') });
+  const { collector: c2 } = await collectorFor(t, early);
+  assert.equal((await c2.tick()).status, 'outside_window');
+  assert.equal(c2.running, false);
+});

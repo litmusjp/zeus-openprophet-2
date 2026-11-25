@@ -118,11 +118,34 @@ const CATALYST_END = '(for example the gap percent, the range break or the volum
 const withB1 = text => { assert.equal(text.split(DECISIVE).length - 1, 1); return text.replace(DECISIVE, DECISIVE + B1_ADDED); };
 const stripB1 = text => { assert.equal(text.split(B1_ADDED).length - 1, 1); return text.replace(B1_ADDED, ''); };
 const withB2 = text => { assert.equal(text.split(CATALYST_END).length - 1, 1); return text.replace(CATALYST_END, CATALYST_END + B2_ADDED); };
+// Nov 25: baseline (05cfd92) and allowed delta; defined before the first test because tests start while the module is still evaluating
+const NOV25 = JSON.parse(await fs.readFile(new URL('../nov25/delta.json', FX), 'utf8'));
+const BASE25 = JSON.parse(await fs.readFile(new URL('../nov25/baseline-05cfd92.json', FX), 'utf8'));
+const count25 = (text, part) => text.split(part).length - 1;
+const forward25 = (text, entries) => { for (const e of entries) { assert.equal(count25(text, e.old), 1, e.old.slice(0, 70)); text = text.replace(e.old, () => e.new); } return text; };
+const expected25 = base => {
+  let text = forward25(base, NOV25.shared);
+  if (base.includes('Catalyst discovery:')) return forward25(text, NOV25.catalyst);
+  for (const e of NOV25.catalyst) assert.equal(count25(base, e.old), 0, 'a non-catalyst prompt never carries the catalyst owners');
+  return text;
+};
+const revert25 = text => {
+  for (const e of NOV25.shared) { assert.equal(count25(text, e.new), 1, e.new.slice(0, 70)); text = text.replace(e.new, () => e.old); }
+  const catalyst = count25(text, NOV25.catalyst[0].new) === 1;
+  for (const e of NOV25.catalyst) {
+    if (catalyst) { assert.equal(count25(text, e.new), 1, e.new.slice(0, 70)); text = text.replace(e.new, () => e.old); }
+    else assert.equal(count25(text, e.new), 0);
+  }
+  return text;
+};
+
 // ── Herald and Pendulum keep today's prompts byte for byte (attribution for Monday's first spreads) ───────────────
 test('Herald on L1 renders byte-identical to the live preview, apart from the new option-groups menu entry', async () => {
   const expected = withB2(withB1(goldenL1.replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups')));
   assert.notEqual(expected, goldenL1);
-  const actual = await promptFor('sbx_723be98b');
+  const actualNow = await promptFor('sbx_723be98b');
+  assert.equal(actualNow, expected25(BASE25['live:sbx_723be98b']), 'baseline 05cfd92 plus only the approved Nov 25 delta');
+  const actual = revert25(actualNow);
   assert.equal(actual, expected);
 });
 
@@ -132,12 +155,15 @@ test('Pendulum on L2 renders byte-identical to the live preview, apart from the 
   assert.ok(l1Paragraph.length > 400 && goldenL2.includes(old));
   // The third allowed difference: the corrupted dash in the ETF rules is fixed (config edit C6).
   const expected = goldenL2.replace(old, l1Paragraph).replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups').split('â€“').join('-');
-  const actual = stripB1(await promptFor('sbx_956ff9e4'));
+  const actualNow = await promptFor('sbx_956ff9e4');
+  assert.equal(actualNow, expected25(BASE25['live:sbx_956ff9e4']), 'baseline 05cfd92 plus only the shared Nov 25 clause');
+  const actual = stripB1(revert25(actualNow));
   assert.equal(actual, expected);
 });
 
 test('Prophet on L3 gets its restored identity, list and B2 rules, and the shared workflow between identity and list', async () => {
   const prompt = await promptFor('sbx_0d35471e');
+  assert.equal(prompt, expected25(BASE25['live:sbx_0d35471e']), 'baseline 05cfd92 plus only the shared Nov 25 clause');
   assert.ok(prompt.startsWith(PROPHET_IDENTITY));
   assert.ok(prompt.includes(PROPHET_UNIVERSE_BLOCK));
   for (const line of PROPHET_B2_RULES.split('\n')) assert.ok(prompt.includes(line), line.slice(0, 60));
@@ -336,4 +362,139 @@ test('an open group gets the closing recipe when the slot does not list a vertic
 test('every Nov 21 line of Prophet\'s start list and rules is still in the rendered prompt', async () => {
   const prompt = await promptFor('sbx_0d35471e');
   for (const line of [...prophetNov21.slice(13, 19), ...prophetNov21.slice(23, 30)]) assert.ok(prompt.includes(line), line.slice(0, 70));
+});
+
+
+// ── Nov 25 text release (C1 discovery owner, C1b reuse, C2 B2 logging, C2b B1 clause, C4 trail wording) ──────────────────────────
+// Evidence boundary: these are TEXT changes. The tests below prove the exact rendered clauses, the preserved owners, the family scope and
+// the 8-agent render; the arithmetic fixtures document the expected numbers. None of them proves that a live model follows the text.
+// Baseline = the prompts that ran live at 05cfd92 (B1 and Herald's B2 included), rendered by this same harness in a clean checkout.
+// The allowed delta (fixtures/nov25/delta.json) is the only difference permitted between that baseline and the current render.
+test('Nov 25: all 8 agents render as the 05cfd92 baseline plus only the approved delta (C2b everywhere, the catalyst owners on catalyst-family only)', async () => {
+  const live = {};
+  const perAgent = {};
+  for (const agentId of AGENT_IDS) { await switchTo('sbx_723be98b', agentId); perAgent[agentId] = await promptFor('sbx_723be98b'); }
+  for (const agentId of AGENT_IDS) assert.equal(perAgent[agentId], expected25(BASE25[`L1:${agentId}`]), agentId);
+  // Family follows the strategy, not the slot: only the catalyst agent renders the catalyst owners, on any slot.
+  const withOwners = AGENT_IDS.filter(id => perAgent[id].includes(NOV25.catalyst[0].new));
+  assert.deepEqual(withOwners, ['catalyst']);
+  await switchTo('sbx_956ff9e4', 'catalyst');
+  assert.ok((await promptFor('sbx_956ff9e4')).includes(NOV25.catalyst[0].new), 'catalyst behaviour on a different slot');
+  await switchTo('sbx_723be98b', 'catalyst');
+  await switchTo('sbx_956ff9e4', 'mean-reversion');
+  // The shared B1 clause is present exactly once in every prompt, together with the sentences it extends.
+  for (const text of Object.values(perAgent)) {
+    assert.equal(count25(text, NOV25.shared[0].new), 1);
+    assert.equal(count25(text, 'Be decisive.'), 1);
+    assert.match(text, /a due exit with no fresh exact-contract quote remains DATA_BLOCK under the exit rule, and is still due\./);
+    assert.match(text, /If required order, position or quote evidence is unavailable, the DATA_BLOCK rule above applies and a due exit stays due\./);
+  }
+});
+
+test('Nov 25: the discovery owner keeps its non-scheduling clauses and the neighbouring catalyst rules, and states the bounded contract', async () => {
+  const baseline = BASE25['L1:catalyst'];
+  const current = await (async () => { await switchTo('sbx_723be98b', 'catalyst'); return promptFor('sbx_723be98b'); })();
+  // Everything outside the five catalyst replacements and the shared clause is byte-identical to the baseline.
+  assert.equal(revert25(current), baseline);
+  for (const part of [
+    'Verify that the item is a real published company event from a reliable source and note its publication time',
+    'anchor the event at the earliest publication time you have for it',
+    'later coverage, updated_at or fetched_at never restarts the catalyst clock',
+    'Alpaca is the news provider AlphaDesk reads',
+    'prophet_get_earnings_dates only warns you off positions ahead of a scheduled release; it is never entry evidence',
+    '- Same news event: articles about the same company and the same subject within 36 hours are one event.',
+    '- Close-time exit: an exit is due by the close only when the reaction has failed to develop',
+    '- Missing or incomplete data (no completed bars yet, unknown publication time, unverified source) is INCOMPLETE_RESEARCH, never confirmation.',
+    '- Exhausted gap: skip a setup when the gap from the previous close is more than',
+    'Re-entering an event: after you have been stopped out of an event',
+  ]) assert.ok(current.includes(part), part.slice(0, 70));
+  // The bounded best-effort contract, in words (document of the approved text, not of model behaviour).
+  for (const part of [
+    'Discovery is bounded best-effort: it never proves complete coverage and it never delays a due exit or the management of a position you hold.',
+    'a lookback (hours, at most 72) that reaches back to the previous regular-session close',
+    'results are ordered by updated_at, so an old created_at on one article never ends the scan',
+    'One work allowance of 5 pages per heartbeat is shared by every news call of that heartbeat (watch-list batches, market-wide discovery and catch-up).',
+    'a symbol you did not read is never NO_SETUP',
+    'a known article id does not prove that older items were reviewed',
+    'an unfinished earlier scan stays an explicit backlog',
+    'instead of a one-hour window',
+    'a changed updated_at never makes it new',
+    'this call counts against the shared page allowance of the heartbeat',
+  ]) assert.ok(current.includes(part), part.slice(0, 70));
+  assert.doesNotMatch(current, /the last 36 hours; follow has_more/);
+});
+
+test('Nov 25: rejection reuse is limited to unchanged completed-daily trend verdicts; dynamic checks and other events stay reviewable', async () => {
+  await switchTo('sbx_723be98b', 'catalyst');
+  const text = await promptFor('sbx_723be98b');
+  const line = text.split('\n').find(l => l.startsWith('- Reusing a rejection:'));
+  assert.ok(line);
+  assert.match(line, /only when it rests on a completed-daily-bar trend verdict whose inputs are unchanged \(same session date, symbol, direction and event, same data as-of date, same failed values\)/);
+  for (const never of ['a missing confirmation', 'a price or side-of-open check', 'a quote', 'a gap measured from the current price', 'unknown or missing data', 'a scheduled-earnings rejection once the result is published or corrected'])
+    assert.ok(line.includes(never), never);
+  assert.match(line, /A rejection of one direction or event never suppresses another direction or event, and re-entry after an exit still follows its own rule\./);
+  assert.equal(count25(text, '- Reusing a rejection:'), 1);
+});
+
+test('Nov 25: C4 clarifies the range-based trail (call below, put above, strict), keeps historical and custom exits, and leaves the target and J2 text alone', async () => {
+  await switchTo('sbx_723be98b', 'catalyst');
+  const text = await promptFor('sbx_723be98b');
+  const target = text.split('\n').find(l => l.startsWith('- Target (an exit-rule choice for paper trading'));
+  assert.ok(target);
+  assert.match(target, /the remaining call exits on a completed 5-minute close below its original recorded broken level and the remaining put exits on a completed 5-minute close above it \(equality does not count\)/);
+  assert.match(target, /use the original event and position plan, not a later event or session range/);
+  assert.match(target, /does not replace an explicit different exit rule or historical override in your Strategy Rules or recorded plan/);
+  // The target allocation, once-only and spent-target rules and the J2 close-time rule are untouched.
+  for (const part of ['This target exit happens once per position', 'When the cumulative filled quantity already equals the allocation, the target is spent', 'After the first target exit, a later touch of the target never closes the remainder'])
+    assert.ok(target.includes(part), part);
+  assert.equal(revert25(text), BASE25['L1:catalyst']);
+  // A debit-vertical slot keeps the spread mechanics next to the same directional underlying predicate.
+  assert.match(text, /Debit vertical mechanics \(your permissions allow: bull call debit and bear put debit\)/);
+});
+
+test('Nov 25: B2 logging text keeps the accounting contract and adds the opening-only log prerequisite', async () => {
+  await switchTo('sbx_723be98b', 'catalyst');
+  const text = await promptFor('sbx_723be98b');
+  for (const part of [
+    'never net the two directions',
+    'each order counted once and released only after its terminal cancel or withdrawal is reconciled',
+    'a partly filled candidate has its filled units in (a) and only the unfilled part here, and the whole candidate is never added twice',
+    'an intact vertical counted once as remaining spread units x its recorded filled net debit x 100',
+    'if any exposure or price bound cannot be read or reconciled, skip the entry instead of assuming zero',
+    'For every opening attempt, including a replacement and one later cancelled unfilled, write the decision log before place_options_order',
+    'If that log cannot be written, do not open; this never delays a reducing order, a cancel or a read.',
+    'Existing sizing, max-position limits and every exit are unchanged.',
+  ]) assert.ok(text.includes(part), part.slice(0, 70));
+  assert.equal(count25(text, 'Direction budget (new openings only'), 1);
+});
+
+test('Nov 25: delta text is timeless (no tickers, dates, prices, counts or moment references)', () => {
+  const all = [...NOV25.catalyst, ...NOV25.shared].map(e => e.new).join('\n');
+  assert.doesNotMatch(all, /\b(WMT|META|UNH|DIS|AMD|CRM|ABBV|NVDA|BA|HPE|ANF|SPY|COST)\b/);
+  assert.doesNotMatch(all, /\b20\d\d\b|yesterday|tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday|Nov\b|\$\d/);
+});
+
+// Documentation fixtures of the expected B2 arithmetic (NOT model tests): the three Nov 24 openings, partial fills, replacement, direction netting.
+function b2Expected({ equity, held = [], reserved = [], candidate }) {
+  const sum = list => list.reduce((n, x) => n + x, 0);
+  const total = sum(held) + sum(reserved) + candidate;
+  return { total, pct: (total / equity) * 100 };
+}
+test('Nov 25 (fixture, not a model test): expected B2 numbers for the three Nov 24 openings and the contract edge cases', () => {
+  const wmt = b2Expected({ equity: 92899.23, held: [1950, 5700], candidate: 6 * 8.19 * 100 });
+  assert.equal(wmt.total, 12564); assert.ok(Math.abs(wmt.pct - 13.5243317) < 1e-6);
+  const meta = b2Expected({ equity: 93574.58, held: [], candidate: 2 * 36.28 * 100 });
+  assert.equal(Math.round(meta.total), 7256); assert.ok(Math.abs(meta.pct - 7.7542427) < 1e-6);
+  const dis = b2Expected({ equity: 92899.48, held: [1950], candidate: 10 * 5.72 * 100 });
+  assert.equal(dis.total, 7670); assert.ok(Math.abs(dis.pct - 8.2562357) < 1e-6);
+  // A changed final limit changes the number: 5.71 is not the submitted bound.
+  assert.notEqual(b2Expected({ equity: 92899.48, held: [1950], candidate: 10 * 5.71 * 100 }).total, dis.total);
+  // Partial fill: filled units move to held, only the unfilled part is the candidate; the whole is never counted twice.
+  const partial = b2Expected({ equity: 90000, held: [4 * 3 * 100], candidate: 6 * 3 * 100 });
+  assert.equal(partial.total, 3000);
+  // A same-side working order stays reserved until its terminal cancel or withdrawal is reconciled, then the replacement counts once.
+  assert.equal(b2Expected({ equity: 90000, reserved: [2000], candidate: 2000 }).total, 4000);
+  assert.equal(b2Expected({ equity: 90000, reserved: [], candidate: 2000 }).total, 2000);
+  // Opposite directions are never netted: a bearish book does not reduce the bullish total.
+  assert.equal(b2Expected({ equity: 90000, held: [5000], candidate: 1000 }).total, 6000);
 });

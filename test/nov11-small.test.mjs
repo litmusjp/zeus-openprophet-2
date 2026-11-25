@@ -122,8 +122,8 @@ test('the sizing rule, the UNAVAILABLE re-assessment and news paging reach the p
     assert.match(prompt, /Never split one intent into several orders/, id);
   }
   const herald = guidance('catalyst-news');
-  assert.match(herald, /after your first full scan of the day, keep paging only until you reach articles you have already reviewed, and say so if your step budget ran out first/);
-  assert.match(herald, /follow has_more with page_token while your step budget allows/);
+  assert.match(herald, /later heartbeats page only until they reach articles you have already reviewed, but a known article id does not prove that older items were reviewed/);
+  assert.match(herald, /Page with has_more and page_token using the same query arguments and process every page you retrieve/);
   assert.doesNotMatch(guidance('equity-momentum'), /keep paging only until you reach articles/);
 });
 

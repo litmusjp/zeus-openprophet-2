@@ -55,7 +55,13 @@ test('B2: the rendered rule states the accounting contract (held, reserved, cand
     'exceeds 15% of current account equity, skip the entry and record REJECT with the single number that failed',
     'fresh equity, positions, spread groups and orders from this beat',
     'if any exposure or price bound cannot be read or reconciled, skip the entry instead of assuming zero',
-    'equity, direction, held cost, reserved cost, candidate cost and the resulting percent',
+    'write the decision log before place_options_order',
+    'the held cost of every same-direction account holding and live group (lots filled today included)',
+    'the reserved cost of every unfilled opening',
+    "the candidate's final bounded quantity and limit",
+    'its client order id and the time of the evidence',
+    'recompute it if the quantity, the limit or any state changes before the order',
+    'If that log cannot be written, do not open; this never delays a reducing order, a cancel or a read',
     'Existing sizing, max-position limits and every exit are unchanged',
   ];
   for (const part of must) assert.ok(rule.includes(part), part.slice(0, 70));

@@ -274,8 +274,13 @@ export class IvHistoryCollector {
   }
 
   async tick() {
-    const { now, log } = this.deps;
     if (this.running) return { status: 'busy' };
+    this.running = true;   // taken before the first await so two explicit tick() calls cannot both pass the guard
+    try { return await this.runTick(); } finally { this.running = false; }
+  }
+
+  async runTick() {
+    const { now, log } = this.deps;
     let fields;
     try {
       const calendar = await this.deps.open().get('/api/v1/calendar', { timeout: 8000 });
@@ -287,7 +292,6 @@ export class IvHistoryCollector {
     if (!window || fields.minutes_to_close === null || t < window.startMs || t >= window.endMs) return { status: 'outside_window' };
     const sessionDate = nyDateOf(t);
     if (this.completedDay === sessionDate) return { status: 'done_today' };
-    this.running = true;
     try {
       const result = await this.captureSession({ sessionDate, window });
       if (result.finished) this.completedDay = sessionDate;
@@ -295,7 +299,7 @@ export class IvHistoryCollector {
     } catch (e) {
       log?.(`iv-history: capture stopped (${e.message})`);
       return { status: e?.code === 'storage_unreadable' ? 'storage_unreadable' : 'error', error: e.message };
-    } finally { this.running = false; }
+    }
   }
 
   async captureSession({ sessionDate, window }) {

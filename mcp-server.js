@@ -673,6 +673,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             symbol: { type: 'string', description: 'Stock symbol (e.g., NVDA)' },
             window_start: { type: 'string', description: 'RFC3339 UTC timestamp ending in Z: the session open (session_open_utc from get_datetime) for news published before the open, or the publication time for news published during the session. A pre-open time on the current session date is moved to the open and reported as anchor_used; a date the broker calendar does not cover is refused with status session_not_covered' },
             window_minutes: { type: 'number', description: 'Window length in minutes, a multiple of 5 from 5 to 60 (default 15, the range length in your Strategy Rules)' },
+            event_published_at: { type: 'string', description: 'Optional, diagnostic only: the news event\'s own publication time (RFC3339 UTC, seconds kept). The answer then adds anchor_check, which says whether window_start/anchor_used is the anchor that publication time implies (the exact publication time for news published during the session, the session open for pre-open news). It never changes the window or refuses a read.' },
           },
           required: ['symbol', 'window_start'],
         },

@@ -35,6 +35,37 @@ export function parseStrictUtc(value) {
   return fraction ? ms + Math.floor(Number(`0.${fraction[1]}`) * 1000) : ms;
 }
 
+/**
+ * Nov 26 W5, diagnostic only. When the caller also supplies event_published_at, say whether the anchor the window was computed from (anchor_used)
+ * is the anchor that publication time implies: the exact publication time (seconds kept, never rounded) for news published during the event's
+ * session, or that session's broker open for pre-open and overnight news. The event's session is the first listed session that has not closed at
+ * the publication time. It is only judged when the broker calendar lists the publication's own New York date or an earlier day, so an event
+ * older than the calendar coverage is reported as unavailable instead of being compared with the wrong session. It never changes the window or any
+ * number, never refuses a read, and says nothing about whether the news itself is real or on time.
+ */
+export function eventAnchorCheck(rawPublished, rows, anchorUsedMs) {
+  const published = parseStrictUtc(rawPublished);
+  if (published === null) return { status: 'unavailable', reason: 'event_published_at is not a real RFC3339 UTC timestamp, so the anchor was not checked' };
+  const sessions = [...rows].sort((a, b) => a.open - b.open);
+  if (!sessions.length || sessions[0].date > nyDateOf(published)) {
+    return { status: 'unavailable', event_published_at: iso(published), reason: 'the broker calendar does not list the event\'s own date, so its session cannot be judged; use the anchor recorded for the event' };
+  }
+  const session = sessions.find(s => published < s.close);
+  if (!session) return { status: 'unavailable', event_published_at: iso(published), reason: 'the broker calendar lists no session after event_published_at' };
+  const implied = published >= session.open ? published : session.open;
+  const matches = implied === anchorUsedMs;
+  return {
+    status: matches ? 'matches' : 'mismatch',
+    event_published_at: iso(published),
+    reaction_session: session.date,
+    implied_anchor: iso(implied),
+    anchor_used: iso(anchorUsedMs),
+    note: matches
+      ? 'the anchor used is the anchor this publication time implies'
+      : `the anchor this publication time implies is ${iso(implied)} (${implied === published ? 'the exact publication time, news published during the session' : 'the session open, news published before the open'}) but the window was computed from ${iso(anchorUsedMs)}; the numbers above are for the anchor you supplied. This is a consistency check on the two timestamps, not a check of the news`,
+  };
+}
+
 export function normalizeBars(rawBars) {
   const out = [];
   for (const raw of Array.isArray(rawBars) ? rawBars : []) {
@@ -215,7 +246,13 @@ export async function getRangeConfirmation(args, { fetchBars, fetchCalendar, now
   const reportedCount = typeof response?.count === 'number' ? response.count : null;
   const bars = raw.filter(bar => { const at = typeof (bar?.Timestamp ?? bar?.timestamp ?? bar?.t) === 'number' ? (bar.Timestamp ?? bar.timestamp ?? bar.t) : Date.parse(bar?.Timestamp ?? bar?.timestamp ?? bar?.t); return Number.isFinite(at) && at >= open && at < close; });
   const common = { windowStart: anchor, windowMinutes: minutes, symbol, feed: response?.feed ?? null };
-  const stamp = result => { result.anchor_requested = iso(requested); result.anchor_used = iso(anchor); return result; };
+  const stamp = result => {
+    result.anchor_requested = iso(requested);
+    result.anchor_used = iso(anchor);
+    // optional diagnostic (Nov 26 W5): only when the caller supplied event_published_at; absent, the answer is exactly as before
+    if (args?.event_published_at !== undefined) result.anchor_check = eventAnchorCheck(args.event_published_at, rows, anchor);
+    return result;
+  };
   // The source count must agree with what the source returned BEFORE out-of-session bars are dropped; only then is the filtered set computed.
   if (reportedCount !== null && reportedCount !== raw.length) return stamp(computeRangeConfirmation({ bars: raw, ...common, reportedCount }));
   const result = stamp(computeRangeConfirmation({ bars, ...common, reportedCount: null }));

@@ -842,16 +842,19 @@ export class AgentHarness {
       // bounded: a slow or stuck history read must never hold up the heartbeat
       let timer;
       const items = await Promise.race([
-        this.chatStore.listSessionCarryEvidence(accountId, { nowMs }),
+        this.chatStore.listSessionCarryEvidence(accountId, { nowMs, sandboxId }),
         new Promise(resolve => { timer = setTimeout(() => resolve(null), 5000); timer.unref?.(); }),
       ]).finally(() => clearTimeout(timer));
       if (sessionEpoch !== this._sessionEpoch || accountId !== this.state.activeAccountId
         || sandboxId !== this.sandboxId || sandboxId !== this.state.activeSandboxId || agentId !== this.state.activeAgentId) return '';
       if (!Array.isArray(items) || !items.length) return '';
+      // defence in depth: whatever the reader returned, a note whose trusted origin names another sandbox or account is never shown here
+      const scoped = items.filter(entry => !(entry?.sandboxId && entry.sandboxId !== sandboxId) && !(entry?.accountId && entry.accountId !== accountId));
+      if (!scoped.length) return '';
       const context = this.state.positionPlanContext;
       const matched = context?.status === 'matched' && context.accountId === accountId && context.sandboxId === sandboxId ? context.matches || [] : [];
       const heldLots = matched.map(plan => ({ symbol: plan.symbol, entryOrderId: plan.entryBrokerId || null }));
-      return buildCarryForwardBlock({ items, nowMs, currentAgentId: agentId, heldLots });
+      return buildCarryForwardBlock({ items: scoped, nowMs, currentAgentId: agentId, heldLots });
     } catch { return ''; }
   }
 

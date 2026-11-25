@@ -84,6 +84,8 @@ export function sanitizeCarry(raw) {
 }
 
 const hhmm = ms => new Date(ms).toISOString().slice(11, 16) + 'Z';
+// the underlying of an OCC contract: everything before the 15-character date/type/strike suffix (an adjusted-root digit is not part of the ticker)
+const underlyingOfOcc = occ => occ.slice(0, -15).replace(/\d$/, '');
 
 /**
  * items: [{ timestamp (record time, trusted metadata), actorId (trusted record/session metadata or null), actorName?, carry }] from the persisted
@@ -109,6 +111,7 @@ export function buildCarryForwardBlock({ items, nowMs, currentAgentId, heldLots 
     const who = entry => (mine(entry) ? 'you' : `another agent${entry.actorName ? ` (${entry.actorName})` : entry.actorId ? ` (${entry.actorId.slice(0, 24)})` : ''}`);
 
     const sections = { held: [], ranges: [], pending: [], rejected: [] };
+    let ignoredLinks = 0;
 
     // Held lots: exact lot identity (symbol + entry order id). A closed and re-opened contract has another entry order and inherits nothing.
     for (const lot of heldLots) {
@@ -121,18 +124,24 @@ export function buildCarryForwardBlock({ items, nowMs, currentAgentId, heldLots 
       for (const e of allocations) {
         const prior = byOrder.get(e.carry.order_id);
         // a later note can never reduce an already-noted fill, and a later status only replaces an earlier one
-        byOrder.set(e.carry.order_id, { filled: Math.max(prior?.filled ?? 0, e.carry.filled_qty), original: e.carry.original_qty, status: e.carry.status, entry: e });
+        // the original quantity is whatever the first note said; a later note that disagrees makes the quantity inconsistent, never a shrinking denominator
+        const originals = prior ? (prior.originals.includes(e.carry.original_qty) ? prior.originals : [...prior.originals, e.carry.original_qty]) : [e.carry.original_qty];
+        byOrder.set(e.carry.order_id, { filled: Math.max(prior?.filled ?? 0, e.carry.filled_qty), originals, status: e.carry.status, entry: e });
       }
       if (byOrder.size) {
         const total = [...byOrder.values()].reduce((sum, o) => sum + o.filled, 0);
         const open = [...byOrder.values()].filter(o => o.status === 'submitted' || o.status === 'partial').length;
         sections.held.push(`TARGET ALLOCATION ${symbol} (entry order ${entryOrderId}): notes show ${total} contract(s) filled across ${byOrder.size} order note(s)${open ? `, ${open} still noted as working or unconfirmed` : ''}; this is a note, not a broker-confirmed fill: read this contract's orders before any target order`);
-        for (const [orderId, o] of byOrder) sections.held.push(`  order ${orderId}: noted ${o.filled}/${o.original} filled, last status ${o.status}, by ${who(o.entry)}`);
+        for (const [orderId, o] of byOrder) sections.held.push(`  order ${orderId}: noted ${o.originals.length === 1 ? `${o.filled}/${o.originals[0]} filled` : `${o.filled} filled, original quantity noted inconsistently (${o.originals.join(' then ')})`}, last status ${o.status}, by ${who(o.entry)}`);
       } else {
         sections.held.push(`TARGET ALLOCATION ${symbol} (entry order ${entryOrderId}): no note in the last ${lookbackDays} days (not proof that none exists; read this contract's orders)`);
       }
-      // a range note names the underlying; the lot is identified by its entry order id alone
-      const ranges = valid.filter(e => e.carry.kind === 'range' && e.carry.entry_order_id === entryOrderId);
+      // a held lot's range is bound by BOTH its entry order id and the underlying of the held contract; a note that names the entry order but another
+      // underlying is a known identity contradiction and is ignored (counted below), never shown as this lot's range and never rewritten
+      const underlying = underlyingOfOcc(symbol);
+      const linked = valid.filter(e => e.carry.kind === 'range' && e.carry.entry_order_id === entryOrderId);
+      ignoredLinks += linked.filter(e => e.carry.symbol !== underlying).length;
+      const ranges = linked.filter(e => e.carry.symbol === underlying);
       const latest = new Map();
       for (const e of ranges) latest.set(e.carry.event_id, e);
       for (const e of latest.values()) {
@@ -187,6 +196,7 @@ export function buildCarryForwardBlock({ items, nowMs, currentAgentId, heldLots 
     const footerNotes = [];
     if (notReusable) footerNotes.push(`${notReusable} other rejection note(s) today are not reusable (re-check them if they matter).`);
     if (foreign) footerNotes.push(`${foreign} candidate note(s) written by another agent are ignored.`);
+    if (ignoredLinks) footerNotes.push(`${ignoredLinks} range note(s) name a held lot's entry order but another underlying and are ignored.`);
 
     const lines = [header, ...usage];
     let chars = lines.join('\n').length;

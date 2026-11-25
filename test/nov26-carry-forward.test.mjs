@@ -200,16 +200,18 @@ test('reader: completed successful decisions with a valid note only; actor and t
   assert.equal(items[1].carry.actorId, undefined);
 });
 
-test('reader: a long-running older session with new records counts; records older than the window do not; the session index is not required', async t => {
+test('reader: a long-running older session with new records counts; records older than the window do not; the session index (sessions.json) is not required', async t => {
   const { store, root } = await storeWith(t, 'acct-2', [['old-session', [
     decisionRow('2026-09-01T14:00:00Z', cand('OLD', 'call', 'pending')),
     decisionRow('2026-11-25T15:00:00Z', cand('NEW', 'call', 'pending')),
   ]]]);
   // the session was created long ago (index createdAt) but has new records
-  const indexFile = path.join(root, 'sandboxes', 'acct-2', 'chat-history', 'sessions-index.json');
+  const indexFile = path.join(root, 'sandboxes', 'acct-2', 'chat-history', 'sessions.json');
   await fs.rm(indexFile, { force: true });
+  assert.equal(await fs.stat(indexFile).then(() => true, () => false), false, 'the real session index file is gone');
   const items = await store.listSessionCarryEvidence('acct-2', { nowMs: NOW });
   assert.deepEqual(items.map(i => i.carry.symbol), ['NEW']);
+  assert.equal(items[0].actorId, 'catalyst', 'the actor comes from the record itself');
 });
 
 test('reader: strictly per account directory; the cache is invalidated by an append and never serves another account', async t => {
@@ -316,4 +318,114 @@ test('the published log_decision schema declares carry as an optional object; th
   const source = await fs.readFile(new URL('../mcp-server.js', import.meta.url), 'utf8');
   assert.equal(source.split("            carry: {\n              type: 'object',").length - 1 + source.split("            carry: {\r\n              type: 'object',").length - 1 >= 1, true);
   assert.match(source, /required: \['action', 'reasoning'\]/);
+});
+
+// ---- Hermes implementation QA corrections (N26-01 .. N26-04) ----
+test('N26-01: a range note that names a held lot\'s entry order but ANOTHER underlying is never shown as that lot\'s range; the correctly linked range stays; through persistence, reader and builder', async t => {
+  const llyWithWmtEntry = { kind: 'range', symbol: 'LLY', event_id: 'evt-1', entry_order_id: 'entry-A', anchor_used: '2026-11-25T14:32:23Z', range_high: 1407.51, range_low: 1375.23 };
+  const wmtRange = { kind: 'range', symbol: 'WMT', event_id: 'evt-w', entry_order_id: 'entry-A', anchor_used: '2026-11-19T14:30:00Z', range_high: 125.3, range_low: 123.3 };
+  // 1) persistence: the MCP log_decision stores both notes exactly as valid shapes (shape is all it checks)
+  const backend = await startFakeBackend({});
+  const stored = [];
+  try {
+    for (const [index, carry] of [llyWithWmtEntry, wmtRange].entries()) {
+      await callMcpTool(backend.url, 'log_decision', { action: 'RANGE_RECORDED', symbol: carry.symbol, reasoning: 'x', carry }, { beforeCleanup: async cwd => {
+        const dir = path.join(cwd, 'data', 'sandboxes', 'sbx_acct-n17', 'decisive_actions');
+        stored.push(JSON.parse(await fs.readFile(path.join(dir, (await fs.readdir(dir))[0]), 'utf8')).carry);
+      } });
+      assert.equal(stored[index].symbol, carry.symbol);
+    }
+  } finally { await backend.close(); }
+  // 2) reader: both notes come back from the persisted chat records
+  const { store } = await storeWith(t, 'acct-r', [['sr', [
+    decisionRow('2026-11-24T15:00:00Z', stored[0], { args: { action: 'RANGE_RECORDED', symbol: 'LLY', reasoning: 'x', carry: stored[0] } }),
+    decisionRow('2026-11-24T15:05:00Z', stored[1], { args: { action: 'RANGE_RECORDED', symbol: 'WMT', reasoning: 'x', carry: stored[1] } }),
+  ]]]);
+  const items = await store.listSessionCarryEvidence('acct-r', { nowMs: NOW });
+  assert.equal(items.length, 2);
+  // 3) builder: only the WMT range is the held WMT lot's range; the contradiction is counted and the note is not rewritten
+  const text = build(items, { heldLots: [{ symbol: OCC, entryOrderId: 'entry-A' }] });
+  assert.equal(text.includes('RANGE LLY'), false);
+  assert.equal(lines(text).filter(l => l.startsWith('RANGE WMT event evt-w (held lot entry-A)')).length, 1);
+  assert.match(text, /1 range note\(s\) name a held lot's entry order but another underlying and are ignored\./);
+  // an adjusted-root contract still binds to its ticker; a different ticker with the same entry id never does
+  const other = build(items, { heldLots: [{ symbol: 'LLY261218P00700000', entryOrderId: 'entry-A' }] });
+  assert.equal(lines(other).filter(l => l.startsWith('RANGE LLY event evt-1 (held lot entry-A)')).length, 1);
+  assert.equal(other.includes('RANGE WMT'), false);
+});
+
+test('N26-02: a later note with a different original quantity never shrinks the denominator; the order shows an inconsistent quantity, fills stay cumulative', () => {
+  const alloc = (ts, filled, original, status) => item(ts, { kind: 'target_allocation', symbol: OCC, entry_order_id: 'entry-A', order_id: 'tgt-1', filled_qty: filled, original_qty: original, status });
+  const text = build([alloc('2026-11-25T14:00:00Z', 5, 5, 'filled'), alloc('2026-11-25T14:30:00Z', 3, 3, 'filled')], { heldLots: [{ symbol: OCC, entryOrderId: 'entry-A' }] });
+  assert.equal(text.includes('5/3'), false);
+  assert.match(text, /order tgt-1: noted 5 filled, original quantity noted inconsistently \(5 then 3\), last status filled/);
+  assert.match(text, /notes show 5 contract\(s\) filled across 1 order note\(s\)/);
+  // a consistent repeat stays a plain fraction
+  const same = build([alloc('2026-11-25T14:00:00Z', 3, 5, 'partial'), alloc('2026-11-25T14:30:00Z', 5, 5, 'filled')], { heldLots: [{ symbol: OCC, entryOrderId: 'entry-A' }] });
+  assert.match(same, /order tgt-1: noted 5\/5 filled, last status filled/);
+});
+
+test('N26-03: scope is preserved through the reader and the cache: a note of another sandbox is excluded, explicit conflicts are excluded, unknown provenance is kept for the current actor, another account stays inaccessible', async t => {
+  const note = cand('JPM', 'put', 'pending');
+  const { store, root } = await storeWith(t, 'acct-S', [
+    ['sA', [decisionRow('2026-11-25T14:00:00Z', note)], { agentId: 'catalyst', agentName: 'Herald', sandboxId: 'sbx_A', accountId: 'acct-S' }],
+    ['sB', [decisionRow('2026-11-25T14:05:00Z', cand('MSFT', 'put', 'pending'))], { agentId: 'catalyst', agentName: 'Herald', sandboxId: 'sbx_B', accountId: 'acct-S' }],
+    ['sU', [decisionRow('2026-11-25T14:10:00Z', cand('XOM', 'call', 'pending'))], { agentId: 'catalyst', agentName: 'Herald' }],
+    ['sX', [decisionRow('2026-11-25T14:15:00Z', cand('BA', 'call', 'pending'), { sandboxId: 'sbx_other' })], { agentId: 'catalyst', agentName: 'Herald', sandboxId: 'sbx_A', accountId: 'acct-S' }],
+    ['sY', [decisionRow('2026-11-25T14:20:00Z', cand('TSLA', 'call', 'pending'), { accountId: 'acct-other' })], { agentId: 'catalyst', agentName: 'Herald', sandboxId: 'sbx_A', accountId: 'acct-S' }],
+    ['sZ', [decisionRow('2026-11-25T14:25:00Z', cand('GE', 'call', 'pending'))], { agentId: 'catalyst', agentName: 'Herald', sandboxId: 'sbx_A', accountId: 'acct-different' }],
+  ]);
+  const symbols = async sandboxId => (await store.listSessionCarryEvidence('acct-S', { nowMs: NOW, sandboxId })).map(i => i.carry.symbol).sort();
+  assert.deepEqual(await symbols('sbx_A'), ['JPM', 'XOM'], 'sandbox A: its own note and the unknown-provenance note; B, the row conflict, the account conflicts are out');
+  assert.deepEqual(await symbols('sbx_B'), ['MSFT', 'XOM']);
+  // a cache hit and a scope switch obey the same rule
+  assert.deepEqual(await symbols('sbx_A'), ['JPM', 'XOM']);
+  assert.deepEqual(await symbols('sbx_B'), ['MSFT', 'XOM']);
+  // the cache keeps the trusted scope after the session index no longer lists the session
+  await fs.rm(path.join(root, 'sandboxes', 'acct-S', 'chat-history', 'sessions.json'), { force: true });
+  assert.deepEqual(await symbols('sbx_A'), ['JPM', 'XOM']);
+  assert.deepEqual(await symbols('sbx_B'), ['MSFT', 'XOM']);
+  // returned items carry their resolved origin; another account's directory is never read
+  const sample = (await store.listSessionCarryEvidence('acct-S', { nowMs: NOW, sandboxId: 'sbx_A' })).find(i => i.carry.symbol === 'JPM');
+  assert.equal(sample.sandboxId, 'sbx_A');
+  assert.deepEqual(await store.listSessionCarryEvidence('acct-other', { nowMs: NOW, sandboxId: 'sbx_A' }), []);
+  // without an expected sandbox the reader does not guess: only explicit conflicts are removed
+  assert.deepEqual(await symbols(null), ['JPM', 'MSFT', 'XOM']);
+});
+
+test('N26-03: the harness asks for its own sandbox and drops any returned note whose trusted origin names another sandbox or account', async () => {
+  const seen = [];
+  const stamp = new Date(Date.now() - 60000).toISOString();
+  const items = [
+    { ...item(stamp, cand('JPM', 'put', 'pending')), sandboxId: 'sbx_a', accountId: 'a' },
+    { ...item(stamp, cand('MSFT', 'put', 'pending')), sandboxId: 'sbx_OTHER', accountId: 'a' },
+    { ...item(stamp, cand('XOM', 'put', 'pending')), sandboxId: 'sbx_a', accountId: 'other-account' },
+    { ...item(stamp, cand('BA', 'put', 'pending')), sandboxId: null, accountId: null },
+  ];
+  const text = await hookHarness(async (account, options) => { seen.push([account, options.sandboxId]); return items; })._sessionCarryContext('a');
+  assert.deepEqual(seen, [['a', 'sbx_a']]);
+  assert.equal(text.includes('PENDING JPM'), true);
+  assert.equal(text.includes('PENDING BA'), true, 'unknown provenance is kept for the current actor');
+  assert.equal(text.includes('PENDING MSFT'), false);
+  assert.equal(text.includes('PENDING XOM'), false);
+});
+
+test('N26-04: only an explicit completed or success status seeds context; missing, empty, pending, failed and error statuses never do', async t => {
+  const note = cand('JPM', 'put', 'pending');
+  const row = (n, status, extra = {}) => { const r = decisionRow('2026-11-25T14:0' + n + ':00Z', note, extra); if (status === undefined) delete r.status; else r.status = status; return r; };
+  const { store } = await storeWith(t, 'acct-st', [['ss', [
+    row(1, 'completed'), row(2, 'success'), row(3, 'Completed'),
+    row(4, undefined), row(5, ''), row(6, 'pending'), row(7, 'failed'), row(8, 'error'), row(9, 'running'),
+  ]]]);
+  const items = await store.listSessionCarryEvidence('acct-st', { nowMs: NOW });
+  assert.deepEqual(items.map(i => i.timestamp), ['2026-11-25T14:01:00Z', '2026-11-25T14:02:00Z', '2026-11-25T14:03:00Z']);
+});
+
+test('the hook feeds only matched held lots (an unmatched holding is covered by the existing ORIGINAL EXIT PLAN CONTEXT text, not by a carry line)', async () => {
+  const stamp = new Date(Date.now() - 60000).toISOString();
+  const harness = hookHarness(async () => [item(stamp, cand('JPM', 'put', 'pending'))]);
+  harness.state.positionPlanContext = { status: 'matched', accountId: 'a', sandboxId: 'sbx_a', matches: [{ symbol: OCC, entryBrokerId: 'entry-A' }] };
+  const text = await harness._sessionCarryContext('a');
+  assert.match(text, /TARGET ALLOCATION WMT261218C00125000 \(entry order entry-A\)/);
+  assert.equal(text.includes('no matched entry order'), false, 'the hook is never fed an unmatched holding');
 });

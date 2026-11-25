@@ -657,4 +657,3 @@ test('Nov 26: the delta manifest names only the two approved source files, has d
   for (const e of entries) assert.equal(count25(base, e.old), 1, e.old.slice(0, 60));
   for (const e of NOV26.shared) assert.equal(count25(expected25(BASE25['L1:default']), e.old), 1);
 });
-

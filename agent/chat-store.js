@@ -538,21 +538,21 @@ function isPreEntryProbeNotFound(record, records) {
 // positions read in the same activity, and the payload must be exactly the structured quote answer. No model-authored note is consulted, nothing
 // is demoted, and no quote recovery or safe HOLD is inferred from the label.
 const HELD_QUOTE_PAYLOAD_KEYS = new Set(['category', 'endpoint', 'error', 'status', 'symbol', 'http_status']);
+const OCC_OPTION_SYMBOL = /^[A-Z.]{1,6}\d?\d{6}[CP]\d{8}$/;
 function heldOptionSymbols(records) {
   const held = new Set();
   for (const r of records) {
     if (!isToolCallRecord(r) || !['get_options_positions', 'get_positions'].includes(toolNameOf(r)) || hasStructuredFailure(r)) continue;
     const parsed = parseJsonish(r.result);
     const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.positions) ? parsed.positions : null;
-    if (list) {
-      for (const row of list) {
-        const symbol = String(row?.Symbol ?? row?.symbol ?? '').toUpperCase();
-        const qty = Number(row?.Qty ?? row?.qty ?? row?.quantity);
-        if (symbol && qty > 0) held.add(symbol);
-      }
-    } else if (typeof r.result === 'string') {
-      // a stored result that is no longer whole JSON still names the symbols it listed
-      for (const m of r.result.matchAll(/"Symbol"\s*:\s*"([A-Z0-9.]{1,30})"/g)) held.add(m[1]);
+    const rows = list || (typeof r.result === 'string'
+      // a stored result that is no longer whole JSON still yields every row object that is itself complete and readable
+      ? [...r.result.matchAll(/\{[^{}]*\}/g)].map(m => { try { return JSON.parse(m[0]); } catch { return null; } })
+      : []);
+    for (const row of rows) {
+      const symbol = String(row?.Symbol ?? row?.symbol ?? '').toUpperCase();
+      const qty = Number(row?.Qty ?? row?.qty ?? row?.quantity);
+      if (OCC_OPTION_SYMBOL.test(symbol) && qty > 0) held.add(symbol);
     }
   }
   return held;
@@ -568,21 +568,29 @@ function heldQuoteUnavailableSymbol(record, records) {
   if (payload.endpoint !== undefined && payload.endpoint !== 'options_quote') return null;
   if (payload.http_status !== undefined && payload.http_status !== 503) return null;
   if (payload.symbol !== undefined && String(payload.symbol).toUpperCase() !== asked) return null;
-  return heldOptionSymbols(records).has(asked) ? asked : null;
+  return { symbol: asked, held: heldOptionSymbols(records).has(asked) };
 }
 /** Cause text for an activity whose ONLY essential failures are held-contract quotes that were unavailable; [] otherwise (any other failure keeps the plain label). */
 export function failureCauses(records, essential) {
   if (!Array.isArray(essential) || !essential.length) return [];
   const symbols = [];
+  const verified = new Set();
   for (const record of essential) {
-    const symbol = heldQuoteUnavailableSymbol(record, records);
-    if (!symbol) return [];
-    if (!symbols.includes(symbol)) symbols.push(symbol);
+    const found = heldQuoteUnavailableSymbol(record, records);
+    if (!found) return [];
+    if (!symbols.includes(found.symbol)) symbols.push(found.symbol);
+    if (found.held) verified.add(found.symbol);
   }
   const done = (name, symbol) => records.some(r => isToolCallRecord(r) && toolNameOf(r) === name && !hasStructuredFailure(r)
     && (!symbol || String(r.args?.symbol || '').toUpperCase() === symbol));
   const logged = symbols.every(symbol => done('log_decision', symbol)) && done('log_activity');
-  return [`held-contract quote unavailable: ${symbols.join(', ')}${logged ? '; decision and activity logged' : ''}`];
+  // 'held' is only said when a complete, readable, positive-quantity option row of the same activity proves it
+  const held = symbols.filter(s => verified.has(s));
+  const unverified = symbols.filter(s => !verified.has(s));
+  const parts = [];
+  if (held.length) parts.push(`held-contract quote unavailable: ${held.join(', ')}`);
+  if (unverified.length) parts.push(`contract quote unavailable, held status not verified from the positions read: ${unverified.join(', ')}`);
+  return [`${parts.join('; ')}${logged ? '; decision and activity logged' : ''}`];
 }
 /** Split an activity's failing records into essential failures and optional-research warnings. */
 export function classifyFailures(records) {
@@ -949,11 +957,17 @@ export class ChatStore {
         try {
           const row = JSON.parse(line);
           if (!isToolCallRecord(row) || toolNameOf(row) !== 'log_decision') continue;
-          if (row.status && !['completed', 'success'].includes(String(row.status).toLowerCase())) continue;
+          // an explicit completed or success status is required: a missing, empty, pending or failed status never seeds context
+          if (!['completed', 'success'].includes(String(row.status || '').toLowerCase())) continue;
           if (hasStructuredFailure(row)) continue;
           const carry = sanitizeCarry(row.args?.carry);
           if (!carry || !Number.isFinite(Date.parse(row.timestamp))) continue;
-          items.push({ timestamp: row.timestamp, actorId: row.actorSnapshot?.agentId || null, actorName: row.actorSnapshot?.agentName || '', carry });
+          items.push({
+            timestamp: row.timestamp, actorId: row.actorSnapshot?.agentId || null, actorName: row.actorSnapshot?.agentName || '', carry,
+            // trusted origin metadata the record itself states (normally absent; the session metadata is the usual source)
+            rowSandboxId: typeof row.sandboxId === 'string' && row.sandboxId ? row.sandboxId : null,
+            rowAccountId: typeof row.accountId === 'string' && row.accountId ? row.accountId : null,
+          });
         } catch { /* ignore malformed or truncated JSONL records */ }
       }
     } catch (error) {
@@ -970,7 +984,7 @@ export class ChatStore {
    * (a long-running older session with new records still counts) and each note is bounded by its own record time. The per-file cache is keyed by
    * size and modification time, so any append invalidates it; it is advisory only and never crosses accounts (it lives in the account's directory).
    */
-  async listSessionCarryEvidence(accountId, { sinceDays = 30, nowMs = Date.now() } = {}) {
+  async listSessionCarryEvidence(accountId, { sinceDays = 30, nowMs = Date.now(), sandboxId = null } = {}) {
     const cutoff = nowMs - sinceDays * 86400000;
     let names = [];
     try { names = await fs.readdir(this._chatDir(accountId)); } catch { return []; }
@@ -996,10 +1010,27 @@ export class ChatStore {
         entry = { signature, items: await this._scanSessionCarryEvidence(accountId, match[1]) };
         changed = true;
       }
+      // trusted origin of the whole session: the index metadata when it lists the session, else what the cache kept from an earlier read
+      const meta = metaById.get(match[1]);
+      const scope = meta && (meta.sandboxId || meta.accountId)
+        ? { sandboxId: typeof meta.sandboxId === 'string' && meta.sandboxId ? meta.sandboxId : null, accountId: typeof meta.accountId === 'string' && meta.accountId ? meta.accountId : null }
+        : (entry.scope || null);
+      if (JSON.stringify(scope) !== JSON.stringify(entry.scope || null)) { entry = { ...entry, scope }; changed = true; }
       next[match[1]] = entry;
-      const fallback = metaById.get(match[1])?.agentId || null;
+      const fallback = meta?.agentId || null;
       for (const item of entry.items) {
-        if (Date.parse(item.timestamp) >= cutoff) result.push({ ...item, actorId: item.actorId || fallback });
+        if (!(Date.parse(item.timestamp) >= cutoff)) continue;
+        // explicit conflicts between the record, the session and the requested scope exclude the note; unknown provenance is never guessed into another scope
+        const rowSandbox = item.rowSandboxId || null;
+        const rowAccount = item.rowAccountId || null;
+        if (rowSandbox && scope?.sandboxId && rowSandbox !== scope.sandboxId) continue;
+        if (rowAccount && scope?.accountId && rowAccount !== scope.accountId) continue;
+        const resolvedSandbox = rowSandbox || scope?.sandboxId || null;
+        const resolvedAccount = rowAccount || scope?.accountId || null;
+        if (resolvedAccount && resolvedAccount !== accountId) continue;
+        if (sandboxId && resolvedSandbox && resolvedSandbox !== sandboxId) continue;
+        const { rowSandboxId, rowAccountId, ...rest } = item;
+        result.push({ ...rest, actorId: item.actorId || fallback, sandboxId: resolvedSandbox, accountId: resolvedAccount });
       }
     }
     if (changed || Object.keys(cache.sessions).length !== Object.keys(next).length) {

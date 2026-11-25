@@ -16,6 +16,7 @@ const positions = (symbol = HELD) => call('get_options_positions', {}, JSON.stri
 const staleQuote = (payload = quotePayload(), symbol = HELD) => call('get_options_quote', { symbol }, typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2));
 const decision = (symbol = HELD, extra = {}) => call('log_decision', { action: 'HOLD', symbol, reasoning: 'x', ...extra }, 'Decision logged to f.json');
 const activityLog = () => call('log_activity', { type: 'POSITION_CHECK', action: 'x' }, 'Activity logged: x');
+const UNVERIFIED = `contract quote unavailable, held status not verified from the positions read: ${HELD}`;
 const failedOrder = { kind: 'tool_call', tool: 'place_options_order', result: { content: [{ text: JSON.stringify({ isError: true, error: { message: 'uncertain' } }) }] } };
 
 test('cause text is produced only for an exact stale held-contract quote with held identity from the same activity', () => {
@@ -23,13 +24,14 @@ test('cause text is produced only for an exact stale held-contract quote with he
   const { essential } = classifyFailures(records);
   assert.equal(essential.length, 1, 'the failure stays essential');
   assert.deepEqual(failureCauses(records, essential), [`held-contract quote unavailable: ${HELD}`]);
-  // no positions read, a different held symbol, an empty list: no held identity, no cause
+  // no positions read, a different held symbol, an empty list: held identity is NOT established, so the label never says 'held' (it is still Failed, with the generic cause)
   for (const set of [[staleQuote()], [positions('WMT261218C00125000'), staleQuote()], [call('get_options_positions', {}, '[]'), staleQuote()]]) {
-    assert.deepEqual(failureCauses(set, classifyFailures(set).essential), []);
+    assert.deepEqual(failureCauses(set, classifyFailures(set).essential), [UNVERIFIED]);
   }
-  // a failed positions read proves no held identity
+  // a failed positions read is itself another essential failure, so the plain label stays and no cause text is produced
   const failedRead = call('get_options_positions', {}, '', { status: 'error', error: '{"error":"broker unavailable"}' });
   const set = [failedRead, staleQuote()];
+  assert.equal(classifyFailures(set).essential.length, 2);
   assert.deepEqual(failureCauses(set, classifyFailures(set).essential), []);
 });
 
@@ -73,12 +75,27 @@ test('the logged suffix appears only when a completed decision for that exact co
   assert.equal(classifyFailures(contradictory).essential.length, 1);
 });
 
-test('a stored positions result that is no longer whole JSON still identifies the held symbol; a held-looking name in prose does not', () => {
-  const truncated = call('get_options_positions', {}, `[\n  {\n    "BrokerAccountID": "x",\n    "Symbol": "${HELD}",\n    "Qty": 5,\n    "AvgEntryPrice": 5.7,\n    "MarketVal`);
-  const set = [truncated, staleQuote()];
-  assert.deepEqual(failureCauses(set, classifyFailures(set).essential), [`held-contract quote unavailable: ${HELD}`]);
-  const prose = [call('get_options_positions', {}, `we do hold ${HELD} maybe`), staleQuote()];
-  assert.deepEqual(failureCauses(prose, classifyFailures(prose).essential), []);
+test('N26-05: "held" needs a COMPLETE readable positive-quantity OCC row; a truncated row, zero or unknown quantity, a non-option name or prose is only "held status not verified"', () => {
+  const row = (symbol, qty) => JSON.stringify({ Symbol: symbol, Qty: qty, AvgEntryPrice: 5.7 }, null, 2);
+  // a stored result cut off after one complete row still proves that row
+  const cutAfterRow = call('get_options_positions', {}, `[\n${row(HELD, 5)},\n  {\n    "Symbol": "OTHER261218C0010000`);
+  const proven = [cutAfterRow, staleQuote()];
+  assert.deepEqual(failureCauses(proven, classifyFailures(proven).essential), [`held-contract quote unavailable: ${HELD}`]);
+  // the same symbol only half written (the row itself is cut off), zero quantity, missing quantity, a non-option name, and prose: never "held"
+  const cases = {
+    'row cut off': `[\n  {\n    "Symbol": "${HELD}",\n    "Qty": 5,\n    "AvgEntryPrice": 5.7,\n    "MarketVal`,
+    'zero quantity, complete JSON': `[${row(HELD, 0)}]`,
+    'zero quantity, truncated tail': `[${row(HELD, 0)},\n  {\n    "Sym`,
+    'quantity missing': `[{"Symbol":"${HELD}"}]`,
+    'prose': `we do hold ${HELD} maybe`,
+  };
+  for (const [name, text] of Object.entries(cases)) {
+    const set = [call('get_options_positions', {}, text), staleQuote()];
+    assert.deepEqual(failureCauses(set, classifyFailures(set).essential), [UNVERIFIED], name);
+  }
+  // a non-option name with a positive quantity cannot make a quote "held" (the quote tool only quotes option contracts)
+  const abc = [call('get_options_positions', {}, `[${row('ABC', 5)}]`), staleQuote(quotePayload({ symbol: 'ABC' }), 'ABC')];
+  assert.deepEqual(failureCauses(abc, classifyFailures(abc).essential), ['contract quote unavailable, held status not verified from the positions read: ABC']);
 });
 
 test('stored beats: the outcome names the cause in the list and detail views, keeps the Error label, and unrelated beats are unchanged', async t => {
@@ -104,7 +121,7 @@ test('stored beats: the outcome names the cause in the list and detail views, ke
   assert.equal(listed.get('held-quote').outcome, `Failed (held-contract quote unavailable: ${HELD}; decision and activity logged)`);
   assert.equal(listed.get('held-quote-no-log').outcome, `Failed (held-contract quote unavailable: ${HELD})`);
   assert.equal(listed.get('quote-and-order').outcome, 'Failed');
-  assert.equal(listed.get('quote-not-held').outcome, 'Failed');
+  assert.equal(listed.get('quote-not-held').outcome, `Failed (${UNVERIFIED})`);
   assert.equal(listed.get('clean').outcome, 'Recorded');
   for (const id of ['held-quote', 'held-quote-no-log', 'quote-and-order', 'quote-not-held']) assert.equal(listed.get(id).labels.includes('Error'), true, id);
   assert.equal(listed.get('clean').labels.includes('Error'), false);

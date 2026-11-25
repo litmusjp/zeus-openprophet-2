@@ -27,6 +27,7 @@ import { loadOrderActorMap, resolveOrderActorWithJournal } from './history-attri
 import { OrderAttributionJournal } from './order-attribution-journal.js';
 import { IvHistoryCollector, IvHistoryStore, IV_CAPTURE, createIvHistoryHandler, parseStartList, underlyingOf } from './iv-history.js';
 import { createDataUsage } from './data-usage.js';
+import { createDailyBackup, backupStatusPayload } from './daily-backup.js';
 import ChatStore, { isValidHistoryAccountId, isHistoryIndexUnavailable } from './chat-store.js';
 import { createChatsListHandler } from './chats-route.js';
 // Manager history is best-effort: an unavailable session index is logged, the message file is already written, nothing is retried.
@@ -2332,6 +2333,9 @@ const ivCollector = new IvHistoryCollector({
 app.get('/api/iv-history', createIvHistoryHandler(ivStore));
 // Bounded, cached, read-only size totals of the data folder (no names, no contents, no deletion). Behind the same outer and inner auth as every /api route.
 const dataUsage = createDataUsage({ root: path.join(PROJECT_ROOT, 'data') });
+// Daily in-volume backup of the settings and the trade record (order-to-agent journal, chat and activity records with the AlphaDesk results, decision logs, trade database, IV history).
+const dailyBackup = createDailyBackup({ root: path.join(PROJECT_ROOT, 'data'), log: message => console.log('  ' + message) });
+app.get('/api/backup-status', (req, res) => res.json(backupStatusPayload(dailyBackup, process.env.DAILY_BACKUP_ENABLED !== '0')));
 app.get('/api/data-usage', async (req, res) => {
   try { res.json(await dataUsage.get()); } catch { res.json({ status: 'unavailable', scannedAt: null, stale: false, partial: false, buckets: null }); }
 });
@@ -2617,6 +2621,7 @@ if (EXECUTION_START_ENABLED) {
     console.log(`  Network:                http://0.0.0.0:${PORT}`);
     console.log(`  Trading Bot Backend:    ${TRADING_BOT_URL}`);
     if (process.env.IV_HISTORY_ENABLED !== '0') setInterval(() => { ivCollector.tick().catch(() => {}); }, IV_CAPTURE.tickMs).unref();
+    if (process.env.DAILY_BACKUP_ENABLED !== '0') { setTimeout(() => { dailyBackup.tick().catch(() => {}); }, 60 * 1000).unref(); setInterval(() => { dailyBackup.tick().catch(() => {}); }, 15 * 60 * 1000).unref(); }
     console.log(`  Active Account:         ${activeAccount?.name || 'none'}\n`);
   });
 } else {

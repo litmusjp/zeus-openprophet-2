@@ -17,6 +17,7 @@ import { readNewsSummaryFile } from './news_summary.js';
 import { safeDecisionFilenameComponent } from './mcp-decision-filename.js';
 import { futureHistoricalBarsError } from './historical-bars-time.js';
 import { getRangeConfirmation } from './range-confirmation.js';
+import { withExitAudit } from './exit-audit.js';
 import { getEarningsDates } from './earnings-batching.js';
 import { normalizeOptionLimitPrice } from './option-price.js';
 import { spreadLegsRequest } from './spread-legs.js';
@@ -268,6 +269,28 @@ function isOpeningIntent(positionIntent) {
 }
 
 // Build an order tool response, nudging the agent if no thesis was captured to memory.
+// Nov 26 W1: warning-only exit audit (logic and contract in exit-audit.js). The verdict is also written best effort to the sandbox decision
+// directory; that write is never awaited, so a slow, stalled or failing disk cannot delay or change the order response.
+function writeExitAuditRecord(args) {
+  return ({ audit, evidence }) => {
+    const timestamp = new Date().toISOString();
+    const filename = `${timestamp.replace(/[:.]/g, '-')}_EXIT_AUDIT_${safeDecisionFilenameComponent(args.symbol)}.json`;
+    const record = {
+      timestamp,
+      sandbox_id: OPENPROPHET_SANDBOX_ID,
+      account_id: OPENPROPHET_ACCOUNT_ID,
+      action: 'EXIT_AUDIT',
+      symbol: args.symbol || null,
+      client_order_id: typeof args.client_order_id === 'string' ? args.client_order_id.slice(0, 120) : null,
+      verdict: audit.verdict,
+      reason: audit.reason,
+      checked: audit.checked,
+      evidence,
+    };
+    return Promise.resolve().then(() => fs.writeFile(path.join(DECISIONS_DIR, filename), JSON.stringify(record, null, 2)));
+  };
+}
+
 function orderResponse(data, args) {
   let text = JSON.stringify(data, null, 2);
   if (typeof args.thesis !== 'string' || !args.thesis.trim()) {
@@ -1032,6 +1055,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             market_scanner_features: {
               type: 'object',
               description: 'Provider-owned scanner features for the exact trade, if available; do not invent values or turn a missing score into a zero score.',
+            },
+            exit_evidence: {
+              type: 'object',
+              description: 'Optional, for a single-leg sell_to_close that exits on a stop, trail, invalidation or target of the underlying: the numbers you are citing. exit_kind (stop, trail, invalidation, target, time, news, close_time or other); rule_basis "underlying_completed_5min_bar" when the exit is a completed 5-minute underlying-bar rule; trigger_level; trigger_bar_start and trigger_bar_end (UTC, five minutes apart); bar_complete true; trigger_bar_close (stop, trail, invalidation) or trigger_bar_high / trigger_bar_low (target); feed; plan_ref (the entry order id). An advisory note comes back if the cited numbers contradict the rule; it never changes or blocks the order.',
             },
             legs: {
               type: 'array',
@@ -2319,7 +2346,7 @@ ${allNews.map((article, i) =>
         }
         const data = await callTradingBot('/options/order', 'POST', requestData);
         if (isOpeningIntent(args.position_intent)) void autoStoreSetup({ ...args, ...data }, args.side || 'buy');
-        return orderResponse(data, args);
+        return withExitAudit(orderResponse(data, args), args, writeExitAuditRecord(args));
       }
 
       case 'withdraw_planned_intent': {

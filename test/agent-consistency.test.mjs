@@ -586,7 +586,7 @@ test('Nov 25 H6: manifest provenance (exactly 1 shared and 5 catalyst entries, d
   // Tripwire, not authority: these are the sha256 of the files reviewed and approved at 11a8555. A reviewed change to the baseline or the manifest
   // must update them in the same commit AND be reviewed independently of this test.
   const nodeFs = await import('node:fs');
-  const sha = file => crypto.createHash('sha256').update(nodeFs.readFileSync(new URL(file, FX))).digest('hex');
+  const sha = file => crypto.createHash('sha256').update(Buffer.from(nodeFs.readFileSync(new URL(file, FX), 'latin1').replace(/\r\n/g, '\n'), 'latin1')).digest('hex');   // line-ending insensitive: a Windows checkout may turn LF into CRLF
   assert.equal(sha('../nov25/baseline-05cfd92.json'), '2f31b92fcd9484a3be4f082e1d3e422e0589e923fa5286118ac8aaa33c96d9f3');
   assert.equal(sha('../nov25/delta.json'), '739434cb9dfa5262572a80a056f7b004e717de79545c81c891779c9f7af3e7c7');
 });

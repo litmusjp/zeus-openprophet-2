@@ -196,6 +196,7 @@ export async function planBackup({ root, settings, maxFiles = BACKUP_DEFAULTS.ma
 
 async function readManifest(dir, fsx = fs) {
   try {
+    if ((await lst(fsx, path.join(dir, 'MANIFEST.json'))).kind !== 'file') return null;     // a link (or anything but an ordinary file) is never trusted
     const manifest = JSON.parse(await fsx.readFile(path.join(dir, 'MANIFEST.json'), 'utf8'));
     return manifest && manifest.owner === OWNER && manifest.version === MANIFEST_VERSION && Array.isArray(manifest.files) ? manifest : null;
   } catch { return null; }
@@ -309,13 +310,13 @@ async function captureFile(entry, dest, { fsx, maxFileBytes, onOpen = null, dead
   }
 }
 
-async function hashFile(file, fsx) {
+async function hashFile(file, fsx, deadline = null) {
   const hash = crypto.createHash('sha256');
   const handle = await fsx.open(file, 'r');
   let bytes = 0;
   try {
     const buffer = Buffer.allocUnsafe(1024 * 1024);
-    for (;;) { const { bytesRead } = await handle.read(buffer, 0, buffer.length, bytes); if (!bytesRead) break; hash.update(buffer.subarray(0, bytesRead)); bytes += bytesRead; }
+    for (;;) { if (deadline) deadline(); const { bytesRead } = await handle.read(buffer, 0, buffer.length, bytes); if (!bytesRead) break; hash.update(buffer.subarray(0, bytesRead)); bytes += bytesRead; }
   } finally { await handle.close(); }
   return { bytes, sha256: hash.digest('hex') };
 }
@@ -381,15 +382,16 @@ export async function runBackup(options = {}) {
     await fsx.writeFile(path.join(tmp, '.owner'), JSON.stringify({ owner: OWNER, startedAt: nowMs, pid: process.pid }), { mode: 0o600 });
     const manifest = [];
     let spent = 0, sinceCheck = 0, aborted = null, failed = 0;
-    let remaining = plan.entries.reduce((n, e) => n + e.bound, 0);              // planned bound of the entries not yet processed
+    let remaining = plan.entries.reduce((n, e) => n + e.bound, 0);              // outstanding ledger: planned bound of everything not yet processed, the pending settings pair INCLUDED
+    let retryHeadroom = pairBytes * o.pairRetries;                               // temporary space the pending settings retries may need; held until the pair is done
+    const othersAfter = entry => Math.max(0, remaining - entry.bound) + retryHeadroom;
 
     const admitOpen = entry => async actual => {                                // re-evaluates the ACTUAL opened size before an ordinary copy
       if (spent + actual > o.maxRunBytes) throw abortError('run_budget');
       const grew = actual > entry.bound;
       if (grew || actual >= o.largeFileCheckBytes) {
         const free = await freeBytes();
-        const after = grew ? Math.max(0, remaining - entry.bound) : 0;          // growth that admission did not cover must still leave room for the rest
-        if (free === null || free < o.reserveBytes + actual + after) throw abortError('low_space');
+        if (free === null || free < o.reserveBytes + actual + othersAfter(entry)) throw abortError('low_space');   // this copy PLUS every other outstanding allocation must fit above the reserve
       }
     };
     const ctxFor = entry => ({ fsx, maxFileBytes: o.maxFileBytes, onOpen: admitOpen(entry), deadline });
@@ -410,10 +412,11 @@ export async function runBackup(options = {}) {
         const bound = actualMain + (wal.kind === 'file' ? wal.stat.size : 0);
         const free = await freeBytes();
         if (free === null) throw abortError('low_space');
-        const allowance = Math.min(o.maxFileBytes, o.maxRunBytes - spent, free - o.reserveBytes);
+        const others = othersAfter(entry);
+        const allowance = Math.min(o.maxFileBytes, o.maxRunBytes - spent - others, free - o.reserveBytes - others);   // the native copy may use only what the other outstanding work leaves
         if (bound > o.maxFileBytes) throw coded('OVERSIZED', 'oversized');
-        if (bound > o.maxRunBytes - spent) throw abortError('run_budget');
-        if (bound > free - o.reserveBytes) throw abortError('low_space');
+        if (bound > o.maxRunBytes - spent - others) throw abortError('run_budget');
+        if (bound > free - o.reserveBytes - others) throw abortError('low_space');
         const guard = () => { deadline(); let size = 0; try { size = statSync(dest).size; } catch { size = 0; } if (size > allowance) throw coded('OVERSIZED', 'native_copy_exceeded_allowance'); };
         try { await sqliteBackup(entry.abs, dest, { guard, allowance }); }
         catch (error) { await fsx.rm(dest, { force: true }).catch(() => {}); throw error; }
@@ -422,11 +425,13 @@ export async function runBackup(options = {}) {
         if (size > allowance) { await fsx.rm(dest, { force: true }).catch(() => {}); throw coded('OVERSIZED', 'native_copy_exceeded_allowance'); }
         deadline();
         if (!(await sqliteVerify(dest))) throw coded('SQLITE_CHECK', 'sqlite_check');
-        const h = await hashFile(dest, fsx);
+        const h = await hashFile(dest, fsx, deadline);
         deadline();
         return { ...h, srcSize: entry.size, mtimeMs: entry.mtimeMs, discardedTail: 0, linked: false };
       }
-      let captured = await captureFile(entry, dest, ctxFor(entry));
+      let captured;
+      try { captured = await captureFile(entry, dest, ctxFor(entry)); }
+      catch (error) { await fsx.rm(dest, { force: true }).catch(() => {}); throw error; }      // never retain an unlisted partial copy
       spent += captured.written;
       if (CRITICAL.has(path.basename(entry.rel).replace(/\.bak$/, '')) || entry.rel.endsWith('chat-history/sessions.json')) {   // only the files a restore depends on must parse
         const parses = async () => { try { const v = JSON.parse(await fsx.readFile(dest, 'utf8')); return v !== undefined; } catch { return false; } };
@@ -437,14 +442,14 @@ export async function runBackup(options = {}) {
           if (!(await parses())) throw coded('INVALID_JSON', 'invalid_json');
         }
       }
-      const h = await hashFile(dest, fsx);
+      const h = await hashFile(dest, fsx, deadline);
       return { ...h, srcSize: captured.srcSize, mtimeMs: entry.mtimeMs, discardedTail: captured.discardedTail, linked: false };
     };
 
     const take = (entry, record) => manifest.push({ rel: entry.rel, kind: entry.kind, bytes: record.bytes, sha256: record.sha256, srcSize: record.srcSize, mtimeMs: record.mtimeMs, discardedTail: record.discardedTail, linked: record.linked, legacyNonActionable: entry.legacy === true });
 
     for (const entry of plan.entries) {
-      if (isPair(entry)) { remaining -= entry.bound; continue; }                 // the settings pair is captured and accepted as a unit below
+      if (isPair(entry)) continue;                                               // the settings pair stays in the ledger until it is processed below
       try {
         deadline();
         if (++sinceCheck >= o.recheckEvery) {
@@ -471,6 +476,7 @@ export async function runBackup(options = {}) {
           if (result.ok) accepted = result.records; else { lastCode = result.code; if (attempt < o.pairRetries) { await sleep(o.pairRetryDelayMs); } }
         }
       } catch (error) { if (error?.abort) aborted = error.abort; else throw error; }
+      remaining -= pairBytes; retryHeadroom = 0;
       if (accepted) for (const r of accepted) take(r.entry, r.record);
       else if (!aborted) { failed += pairEntries.length; addError(lastCode); }
     }
@@ -486,7 +492,7 @@ export async function runBackup(options = {}) {
           const dest = path.join(dir, entry.rel);
           const c = await captureFile(entry, dest, { fsx, maxFileBytes: o.maxFileBytes, onOpen: admitOpen({ bound: entry.bound }), deadline });
           spent += c.written;
-          got.push({ entry, dest, c, h: await hashFile(dest, fsx) });
+          got.push({ entry, dest, c, h: await hashFile(dest, fsx, deadline) });
         }
         const readJson = async file => JSON.parse(await fsx.readFile(file, 'utf8'));
         const configGot = got.find(g => g.entry.rel === 'agent-config.json'), secretsGot = got.find(g => g.entry.rel === 'secrets.json');
@@ -508,25 +514,35 @@ export async function runBackup(options = {}) {
 
     // Reconcile the manifest with the files actually retained: existence, length, and hash for the settings; counts come from what is really there.
     const retained = [];
-    for (const m of manifest) {
-      try {
-        const st = await fsx.lstat(path.join(tmp, m.rel));
-        if (!st.isFile() || st.size !== m.bytes) throw coded('MANIFEST_MISMATCH');
-        if (CRITICAL.has(path.basename(m.rel).replace(/\.bak$/, '')) && !m.linked) { const h = await hashFile(path.join(tmp, m.rel), fsx); if (h.sha256 !== m.sha256) throw coded('MANIFEST_MISMATCH'); }
-        retained.push(m);
-      } catch { failed += 1; addError('manifest_mismatch'); }
-    }
+    try {
+      for (const m of manifest) {
+        deadline();
+        try {
+          const st = await fsx.lstat(path.join(tmp, m.rel));
+          if (!st.isFile() || st.size !== m.bytes) throw coded('MANIFEST_MISMATCH');
+          if (CRITICAL.has(path.basename(m.rel).replace(/\.bak$/, '')) && !m.linked) { const h = await hashFile(path.join(tmp, m.rel), fsx, deadline); if (h.sha256 !== m.sha256) throw coded('MANIFEST_MISMATCH'); }
+          retained.push(m);
+        } catch (error) { if (error?.abort) throw error; failed += 1; addError('manifest_mismatch'); }
+        deadline();
+      }
+    } catch (error) { if (error?.abort) { if (!aborted) { aborted = error.abort; addError('aborted_' + aborted); } } else throw error; }
     if (!aborted && retained.length + failed !== plan.entries.length) addError('inventory_mismatch');
     summary.files = retained.length;
     summary.copied = retained.filter(m => !m.linked).length;
     summary.linked = retained.filter(m => m.linked).length;
     summary.bytes = retained.reduce((n, m) => n + m.bytes, 0);
     summary.discardedTails = retained.filter(m => m.discardedTail).length;
+    const buildManifest = isComplete => ({ version: MANIFEST_VERSION, owner: OWNER, date, createdAt: new Date(nowMs).toISOString(), complete: isComplete, counts: { files: summary.files, copied: summary.copied, linked: summary.linked, bytes: summary.bytes, errors: errorCount, discardedTails: summary.discardedTails, skippedLinks: plan.skippedLinks }, truncated: plan.truncated, missing: plan.missing, errorCodes, excluded: EXCLUDED, scope: 'canonical records + settings + iv-history + legacy quarantine (non-actionable)', files: retained });
+    let complete = errorCount === 0 && !plan.truncated && plan.missing === 0 && !aborted;
+    const lateExpiry = () => { try { deadline(); return false; } catch (error) { if (!error?.abort) throw error; aborted = aborted || error.abort; addError('aborted_' + error.abort); return true; } };
+    if (complete && lateExpiry()) complete = false;
     summary.errors = errorCount;
-    const complete = errorCount === 0 && !plan.truncated && plan.missing === 0 && !aborted;
-    const body = { version: MANIFEST_VERSION, owner: OWNER, date, createdAt: new Date(nowMs).toISOString(), complete, counts: { files: summary.files, copied: summary.copied, linked: summary.linked, bytes: summary.bytes, errors: errorCount, discardedTails: summary.discardedTails, skippedLinks: plan.skippedLinks }, truncated: plan.truncated, missing: plan.missing, errorCodes, excluded: EXCLUDED, scope: 'canonical records + settings + iv-history + legacy quarantine (non-actionable)', files: retained };
-    await fsx.writeFile(path.join(tmp, 'MANIFEST.json'), JSON.stringify(body), { mode: 0o600 });
+    await fsx.writeFile(path.join(tmp, 'MANIFEST.json'), JSON.stringify(buildManifest(complete)), { mode: 0o600 });
     await fsx.rm(path.join(tmp, '.owner'), { force: true });
+    if (complete && lateExpiry()) {                                              // expired while preparing the manifest: the folder must not become a recovery point
+      complete = false; summary.errors = errorCount;
+      await fsx.writeFile(path.join(tmp, 'MANIFEST.json'), JSON.stringify(buildManifest(false)), { mode: 0o600 });
+    }
     if (complete) {
       await fsx.rename(tmp, final); tmp = null;                                  // complete-or-absent directory visibility; no power-loss claim
       summary.status = 'ok'; summary.complete = true;
@@ -615,8 +631,12 @@ async function persistStateFile(root, fsx, state) {
 /** True only if an owned COMPLETE dated manifest for `date` really exists in the validated daily folder. */
 async function datedPointExists(root, fsx, date) {
   try {
-    const { base } = await ensureOutput(root, fsx, { create: false });
-    const manifest = await readManifest(path.join(base, date), fsx);
+    const { base, realBase } = await ensureOutput(root, fsx, { create: false });
+    const leaf = path.join(base, date);
+    if ((await lst(fsx, leaf)).kind !== 'dir') return false;                    // a linked or non-directory dated leaf is not a recovery point
+    const rel = path.relative(realBase, await fsx.realpath(leaf));
+    if (rel !== date) return false;
+    const manifest = await readManifest(leaf, fsx);
     return !!manifest && manifest.complete === true && manifest.date === date;
   } catch { return false; }
 }

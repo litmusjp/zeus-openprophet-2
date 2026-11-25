@@ -419,6 +419,88 @@ test('H7R-10c: an omitted `now` means the current time (a function default is ne
   assert.equal((await runBackup({ root: makeRoot(), now: () => T1, ...FAST })).date, '2026-11-25', 'a function is called');
 });
 
+// ── Hermes last QA: H7F-01..03 ───────────────────────────────────────────────────────────────────────────────────────────────────
+const dirSize = dir => { let n = 0; const walk = d => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else n += fs.statSync(p).size; } }; walk(dir); return n; };
+
+test('H7F-01: a native copy whose source grew is admitted only if the OTHER outstanding work (later files, pending settings and their retries) still fits above the reserve; modeled free comes from actual allocated bytes', async () => {
+  const build = slack => {
+    const root = makeRoot();
+    const dbFile = path.join(root, 'sandboxes/sbx_a/prophet_trader.db');
+    return { root, dbFile };
+  };
+  const attempt = async slack => {
+    const { root, dbFile } = build();
+    let looks = 0, cap = null;
+    const grow = wrapFs({ lstat: async (real, p, ...rest) => {
+      if (String(p) === dbFile && ++looks === 2) { fs.appendFileSync(dbFile, Buffer.alloc(100000)); cap = dirSize(root) + 100000 /*reserve*/ + fs.statSync(dbFile).size + slack; }   // grows between planning and native admission
+      return real(p, ...rest);
+    } });
+    const reserve = 100000;
+    const stub = { sqliteBackup: async (src, dest) => { fs.writeFileSync(dest, fs.readFileSync(src)); }, sqliteVerify: async () => true };
+    const r = await run(root, T1, { fsx: grow, ...stub, reserveBytes: reserve, marginBytes: 0, statfs: async () => ({ bavail: cap === null ? 1e9 : Math.max(0, cap - dirSize(root)), bsize: 1 }) });
+    return { r, root, freeAfter: cap === null ? null : cap - dirSize(root), reserve };
+  };
+  const tight = await attempt(4000);                                      // less slack than the later sbx_b database, files and the settings pair still need
+  assert.notEqual(tight.r.status, 'ok'); assert.equal(tight.r.complete, false); assert.deepEqual(dated(tight.root), []);
+  assert.ok(tight.freeAfter >= tight.reserve, 'the reserve was protected (free after ' + tight.freeAfter + ')');
+  assert.ok(!heldDirs(tight.root).some(d => fs.existsSync(path.join(d, 'sandboxes/sbx_a/prophet_trader.db'))), 'no native copy was left behind');
+  const healthy = await attempt(500000);                                   // healthy control: the same growth with enough room
+  assert.equal(healthy.r.status, 'ok'); assert.ok(healthy.freeAfter >= healthy.reserve);
+  assertSnapshotConsistent(path.join(daily(healthy.root), '2026-11-25'), 'native growth control');
+  // the real-WAL positive control stays in H7R-8; a failed ordinary capture leaves no unlisted partial copy
+  const root = makeRoot();
+  const target = path.join(root, 'iv-history/2026-11.jsonl');
+  const failing = wrapFs({ open: async (real, p, ...rest) => { const h = await real(p, ...rest); if (!String(p).includes('.tmp-') || !String(p).endsWith('2026-11.jsonl')) return h; return new Proxy(h, { get(x, prop) { if (prop === 'write') return async () => { throw eio(); }; const v = x[prop]; return typeof v === 'function' ? v.bind(x) : v; } }); } });
+  const r = await run(root, T1, { fsx: failing });
+  assert.equal(r.status, 'incomplete');
+  assert.ok(!heldDirs(root).some(d => fs.existsSync(path.join(d, 'iv-history/2026-11.jsonl'))), 'the failed partial copy was removed'); assert.ok(fs.existsSync(target));
+});
+
+test('H7F-02: the deadline is checked through final reconciliation and manifest preparation, immediately before publication; an expired run is never a recovery point and evicts nothing', async () => {
+  for (const [label, hook] of [
+    ['reconcile lstat', (real, p) => String(p).includes('.tmp-') && String(p).endsWith('agent-config.json')],
+    ['manifest write', null],
+  ]) {
+    const root = makeRoot();
+    assert.equal((await run(root, T1, { keep: 1 })).status, 'ok');
+    let jump = false;
+    const fsx = hook
+      ? wrapFs({ lstat: async (real, p, ...rest) => { if (hook(real, p)) jump = true; return real(p, ...rest); } })
+      : wrapFs({ writeFile: async (real, p, ...rest) => { const out = await real(p, ...rest); if (String(p).endsWith('MANIFEST.json')) jump = true; return out; } });
+    const r = await run(root, T2, { fsx, keep: 1, clock: () => Date.now() + (jump ? 1e9 : 0), maxRunMs: 60000 });
+    assert.equal(r.status, 'incomplete', label); assert.equal(r.complete, false, label);
+    assert.deepEqual(dated(root), ['2026-11-25'], label + ': no dated point, the good one was not evicted');
+    for (const d of heldDirs(root)) assert.equal(JSON.parse(fs.readFileSync(path.join(d, 'MANIFEST.json'), 'utf8')).complete, false, label + ': held manifest not complete');
+  }
+  const ok = makeRoot();
+  assert.equal((await run(ok, T1, { clock: () => Date.now(), maxRunMs: 60000 })).status, 'ok', 'healthy control');
+});
+
+test('H7F-03: a linked dated directory or manifest leaf is not same-day proof: completeness is cleared, the run is blocked, and the link and its target are untouched', async t => {
+  const root = makeRoot();
+  const sched = createDailyBackup({ root, now: () => T1, runOptions: { ...FAST } });
+  assert.equal((await sched.tick()).status, 'ok'); assert.equal((await sched.tick()).status, 'done_today', 'ordinary-directory control');
+  const point = path.join(daily(root), '2026-11-25'), moved = path.join(daily(root), 'moved-copy');
+  fs.renameSync(point, moved);
+  fs.symlinkSync(moved, point, 'junction');
+  const before = tree(moved);
+  const r = await sched.tick();
+  executed.containment += 1;
+  assert.notEqual(r.status, 'done_today'); assert.equal(r.status, 'blocked_foreign_folder'); assert.equal(sched.status().complete, false);
+  assert.ok(fs.lstatSync(point).isSymbolicLink(), 'the link is still there'); assert.deepEqual(tree(moved), before, 'the target is unchanged');
+  // a manifest leaf that is a symlink (needs file-symlink permission)
+  const root2 = makeRoot();
+  const s2 = createDailyBackup({ root: root2, now: () => T1, runOptions: { ...FAST } });
+  assert.equal((await s2.tick()).status, 'ok');
+  const manifestFile = path.join(daily(root2), '2026-11-25/MANIFEST.json'), real = path.join(daily(root2), 'manifest-real.json');
+  fs.renameSync(manifestFile, real);
+  try { fs.symlinkSync(real, manifestFile); } catch { t.diagnostic('file symlinks are not permitted here; the manifest-leaf case runs on Linux CI'); return; }
+  executed.containment += 1;
+  const r2 = await s2.tick();
+  assert.notEqual(r2.status, 'done_today'); assert.equal(s2.status().complete, false);
+  assert.ok(fs.lstatSync(manifestFile).isSymbolicLink() && fs.existsSync(real));
+});
+
 // ── 11. evidence that the containment cases really executed (Linux CI) ──────────────────────────────────────────────────────────
 test('H7R-11: the containment cases executed in this process (counted; on Linux CI none may be skipped)', t => {
   t.diagnostic(`containment cases executed: ${executed.containment}`);

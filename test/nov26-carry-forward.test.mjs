@@ -258,7 +258,10 @@ test('harness hook: an account, sandbox or agent change while the read is awaite
 
 test('harness hook: a history read that never settles cannot hold up the heartbeat', async t => {
   const realSetTimeout = globalThis.setTimeout;
-  t.after(() => { globalThis.setTimeout = realSetTimeout; });
+  // the guard timer is unref'd (the real agent server always has live handles); a bare test process needs one referenced handle, or Node ends the
+  // event loop while the never-settling read is still pending and cancels every later test (seen on Linux CI, Node 22)
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => { clearInterval(keepAlive); globalThis.setTimeout = realSetTimeout; });
   globalThis.setTimeout = (fn, ms, ...rest) => realSetTimeout(fn, ms === 5000 ? 5 : ms, ...rest);
   assert.equal(await hookHarness(() => new Promise(() => {}))._sessionCarryContext('a'), '');
 });

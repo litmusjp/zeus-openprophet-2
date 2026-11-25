@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { isSubmittingOrderToolCall } from './history-attribution.js';
 import { parseStrictUtc } from '../range-confirmation.js';
 import { isRealIsoDay, nyDateOf } from '../session-clock.js';
+import { classifyReadError, safeCode, publishAtomic, preserveEvidence } from './durable-file.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -633,17 +634,40 @@ export class ChatStore {
   // ── Session Index ────────────────────────────────────────────────
 
   async _loadSessionIndex(accountId) {
+    const file = this._sessionIndexFile(accountId);
+    let raw;
     try {
-      const raw = await fs.readFile(this._sessionIndexFile(accountId), 'utf-8');
-      return JSON.parse(raw);
-    } catch {
-      return { sessions: [] };
+      raw = await fs.readFile(file, 'utf-8');
+    } catch (error) {
+      if (classifyReadError(error) === 'absent') return { sessions: [] };     // a first index
+      return this._unavailableIndex(safeCode(error));                         // unreadable is not empty
     }
+    try {
+      const index = JSON.parse(raw);
+      if (index && typeof index === 'object' && Array.isArray(index.sessions)) return index;
+    } catch { /* corrupt: recover below */ }
+    await preserveEvidence(file);
+    try {
+      const backup = JSON.parse(await fs.readFile(file + '.bak', 'utf-8'));
+      if (backup && typeof backup === 'object' && Array.isArray(backup.sessions)) return backup;
+    } catch { /* no usable backup */ }
+    return this._unavailableIndex('corrupt');
+  }
+
+  // An index that could not be read is reported as unavailable and is never replaced by an empty one: the original file and the
+  // session JSONL files stay as they are (the flag is not enumerable, so callers that only read the sessions see an empty list).
+  _unavailableIndex(code) {
+    console.error('[chat-store] session_index_unavailable:' + code);
+    const index = { sessions: [] };
+    Object.defineProperty(index, 'unavailable', { value: true, enumerable: false });
+    return index;
   }
 
   async _saveSessionIndex(accountId, index) {
     await this._ensureDirs(accountId);
-    await fs.writeFile(this._sessionIndexFile(accountId), JSON.stringify(index, null, 2));
+    if (index?.unavailable) return;
+    const validIndex = bytes => { try { const value = JSON.parse(bytes.toString('utf8')); return !!value && typeof value === 'object' && Array.isArray(value.sessions); } catch { return false; } };
+    await publishAtomic(this._sessionIndexFile(accountId), JSON.stringify(index, null, 2), { backup: true, validateExisting: validIndex });
   }
 
   // ── Public API ───────────────────────────────────────────────────

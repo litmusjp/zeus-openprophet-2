@@ -10,6 +10,7 @@ import { nativeOpenCodeEnv, stripOperatorSecrets } from './chatgpt-oauth.js';
 import * as secrets from './secrets-store.js';
 import * as configSecrets from './config-secrets.js';
 import { permissionPatchForFit, strategyOptionFit, validateOptionFitInput } from './agent-consistency.js';
+import { classifyReadError, safeCode, publishAtomic, preserveEvidence } from './durable-file.js';
 
 // The last agent switch per sandbox, read once by the route that triggered it (to restart the slot's backend when the
 // switch changed permissions). In memory only.
@@ -888,24 +889,95 @@ function paperImportEndpoint() {
   return PAPER_TRADING_URL;
 }
 
+/**
+ * Reads one config candidate (the primary file or its `.bak`) without publishing anything: read, parse, shape, secret preparation and
+ * normalisation all run on detached objects, and the secret bookkeeping (the module-level "unresolved" set) is restored on rejection.
+ * status: 'ok' | 'absent' | 'access' | 'corrupt' (stage: parse | shape | normalize | unresolved).
+ */
+async function readConfigCandidate(file, useSecrets, { rejectUnresolved = false } = {}) {
+  let raw;
+  try {
+    raw = await fs.readFile(file, 'utf-8');
+  } catch (error) {
+    const status = classifyReadError(error);
+    return { status, code: safeCode(error) };
+  }
+  const bookkeeping = configSecrets.bookkeepingSnapshot();
+  try {
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch (error) { return { status: 'corrupt', stage: 'parse', code: safeCode(error) }; }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { status: 'corrupt', stage: 'shape', code: 'NotAnObject' };
+    const accountIds = (Array.isArray(parsed.accounts) ? parsed.accounts : []).map(a => a?.id);
+    const plan = useSecrets ? configSecrets.prepareRaw(parsed) : null;
+    if (rejectUnresolved && configSecrets.unresolvedCount() > bookkeeping.size) {
+      configSecrets.bookkeepingRestore(bookkeeping);
+      return { status: 'corrupt', stage: 'unresolved', code: 'KeysMissing' };
+    }
+    const config = normalizeConfig(parsed);
+    return { status: 'ok', config, plan, accountIds };
+  } catch (error) {
+    configSecrets.bookkeepingRestore(bookkeeping);
+    return { status: 'corrupt', stage: 'normalize', code: safeCode(error, 'Invalid') };
+  }
+}
+
+const configBackupPath = () => CONFIG_PATH + '.bak';
+const configLog = (stage, code) => console.error('[config] ' + stage + ':' + code);
+
+function unrecoverableConfigError(code) {
+  return Object.assign(new Error('config_unrecoverable:' + code + ' (the existing config file is kept as is; restore agent-config.json or its .bak, then restart)'), { code: 'CONFIG_UNRECOVERABLE' });
+}
+
 export async function loadConfig() {
   // When the private secrets file is in use, account and AlphaDesk keys live there and the config file holds
   // markers. Keys are put back into the loaded config here, so everything else sees exactly what it saw before.
   const useSecrets = secrets.isSplitEnabled() && !secrets.isCorrupt();
+
+  // Startup matrix (H1). Candidates are built detached; nothing is published, imported, synced or cleaned until one is accepted.
+  //   valid primary                          -> load it
+  //   absent primary + valid backup          -> recover from the backup (absent is not automatically a virgin install)
+  //   absent primary + no backup             -> first-run bootstrap (defaults, optional broker import) exactly as before
+  //   corrupt primary + valid backup         -> keep the corrupt bytes beside it, recover from the backup
+  //   corrupt primary + no usable backup     -> active mode: refuse to start, file untouched; inert mode: defaults, no write
+  //   unreadable primary (EACCES/EIO/...)    -> active mode: refuse to start; inert mode: defaults, no write. Never renamed, never defaulted over.
+  let candidate = await readConfigCandidate(CONFIG_PATH, useSecrets);
+  let sourcePath = CONFIG_PATH;
+  if (candidate.status !== 'ok') {
+    const primary = candidate;
+    if (primary.status === 'access') {
+      configLog('primary_unreadable', primary.code);
+      if (EXECUTION_START_ENABLED) throw unrecoverableConfigError('primary_unreadable');
+      candidate = { status: 'default' };
+    } else {
+      if (primary.status === 'corrupt') {
+        configLog('primary_invalid', (primary.stage || 'parse') + ':' + primary.code);
+        if (EXECUTION_START_ENABLED) await preserveEvidence(CONFIG_PATH);
+      }
+      const backup = await readConfigCandidate(configBackupPath(), useSecrets, { rejectUnresolved: true });
+      if (backup.status === 'ok') {
+        configLog('recovered_from_backup', primary.status);
+        candidate = backup;
+        sourcePath = configBackupPath();
+      } else if (primary.status === 'absent') {
+        candidate = { status: 'default' };            // virgin install (or an inert tool): today's behaviour
+      } else if (EXECUTION_START_ENABLED) {
+        throw unrecoverableConfigError('no_valid_backup');
+      } else {
+        candidate = { status: 'default' };            // inert startup never writes
+      }
+    }
+  }
   let secretsPlan = useSecrets ? configSecrets.emptyPlan() : null;
   let rawAccountIds = [];
-  try {
-    const raw = await fs.readFile(CONFIG_PATH, 'utf-8');
-    const parsed = JSON.parse(raw);
-    rawAccountIds = (parsed.accounts || []).map(a => a.id);
-    if (useSecrets) secretsPlan = configSecrets.prepareRaw(parsed);
-    _config = normalizeConfig(parsed);
-  } catch (err) {
-    if (err.code !== 'ENOENT') console.error('Warning: Failed to parse config file:', err.message);
+  if (candidate.status === 'ok') {
+    _config = candidate.config;
+    if (useSecrets) secretsPlan = candidate.plan;
+    rawAccountIds = candidate.accountIds;
+  } else {
     _config = createDefaultConfig();
   }
   if (secretsPlan) {
-    const outcome = configSecrets.adopt(secretsPlan, { configPath: CONFIG_PATH, accountIds: rawAccountIds });
+    const outcome = configSecrets.adopt(secretsPlan, { configPath: sourcePath, accountIds: rawAccountIds });
     if (outcome.migrated) console.log('  Moved ' + outcome.migrated + ' stored key(s) to the private secrets file' + (outcome.backup ? ' (backup: ' + outcome.backup + ')' : ''));
   }
 
@@ -948,6 +1020,13 @@ export async function loadConfig() {
   return _config;
 }
 
+const looksLikeConfigBytes = bytes => {
+  try {
+    const value = JSON.parse(bytes.toString('utf8'));
+    return value !== null && typeof value === 'object' && !Array.isArray(value) && (Array.isArray(value.accounts) || (value.sandboxes && typeof value.sandboxes === 'object'));
+  } catch { return false; }
+};
+
 export async function saveConfig() {
   const write = _writeLock.catch(() => {}).then(async () => {
     syncLegacyAliases(_config);
@@ -958,7 +1037,10 @@ export async function saveConfig() {
       configSecrets.syncFromConfig(_config);
       toWrite = configSecrets.toDiskConfig(_config);
     }
-    await fs.writeFile(CONFIG_PATH, JSON.stringify(toWrite, null, 2));
+    // The payload is the DISK form (markers), never the hydrated in-memory object. The previous on-disk bytes become the single known-good
+    // `.bak` only when they validate; a corrupt primary never replaces a good `.bak`.
+    const result = await publishAtomic(CONFIG_PATH, JSON.stringify(toWrite, null, 2), { backup: true, validateExisting: looksLikeConfigBytes });
+    if (result.backup === 'failed') configLog('backup_not_written', 'publish_failed');
   });
   _writeLock = write;
   return write;

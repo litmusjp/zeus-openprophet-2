@@ -420,7 +420,7 @@ if (EXECUTION_START_ENABLED) {
 // OPENPROPHET_SECRETS_SPLIT=1 lets a rehearsal on a throwaway data folder exercise the move without a broker.
 secretsStore.initSecrets({ split: EXECUTION_START_ENABLED || process.env.OPENPROPHET_SECRETS_SPLIT === '1' });
 secretsStore.applyProviderEnv();
-await loadConfig();
+try { await loadConfig(); } catch (error) { if (error?.code === 'CONFIG_UNRECOVERABLE') { console.error('FATAL: ' + error.message); process.exit(1); } throw error; }
 await loadTradingGuidance();
 const initialActiveAccount = getActiveAccount();
 if (EXECUTION_START_ENABLED && initialActiveAccount?.id) {

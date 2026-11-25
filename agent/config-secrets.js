@@ -13,6 +13,11 @@ const note = (code) => console.error('[secrets] ' + code);
 export function isActive() { return active; }
 export function resetForTests() { active = false; unresolved.clear(); }
 
+// Staged loading: a candidate that is rejected must leave no trace in the module-level bookkeeping.
+export function bookkeepingSnapshot() { return new Set(unresolved); }
+export function bookkeepingRestore(snapshot) { unresolved.clear(); for (const item of snapshot) unresolved.add(item); }
+export function unresolvedCount() { return unresolved.size; }
+
 const hasValue = (v) => typeof v === 'string' && v.length > 0;
 
 /** Rebuilds an object key by key so replaced entries keep their position. */

@@ -532,6 +532,57 @@ function isPreEntryProbeNotFound(record, records) {
   }
   return positionReads > 0 && completeOrderReads > 0;
 }
+// Nov 26 (display only): a held option contract's exact quote answered quote_stale_or_invalid (HTTP 503). The failure is real (a due exit needs a
+// price), so it stays an essential failure and the beat stays Failed; the outcome only NAMES the cause. Held identity must come from a successful
+// positions read in the same activity, and the payload must be exactly the structured quote answer. No model-authored note is consulted, nothing
+// is demoted, and no quote recovery or safe HOLD is inferred from the label.
+const HELD_QUOTE_PAYLOAD_KEYS = new Set(['category', 'endpoint', 'error', 'status', 'symbol', 'http_status']);
+function heldOptionSymbols(records) {
+  const held = new Set();
+  for (const r of records) {
+    if (!isToolCallRecord(r) || !['get_options_positions', 'get_positions'].includes(toolNameOf(r)) || hasStructuredFailure(r)) continue;
+    const parsed = parseJsonish(r.result);
+    const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.positions) ? parsed.positions : null;
+    if (list) {
+      for (const row of list) {
+        const symbol = String(row?.Symbol ?? row?.symbol ?? '').toUpperCase();
+        const qty = Number(row?.Qty ?? row?.qty ?? row?.quantity);
+        if (symbol && qty > 0) held.add(symbol);
+      }
+    } else if (typeof r.result === 'string') {
+      // a stored result that is no longer whole JSON still names the symbols it listed
+      for (const m of r.result.matchAll(/"Symbol"\s*:\s*"([A-Z0-9.]{1,30})"/g)) held.add(m[1]);
+    }
+  }
+  return held;
+}
+function heldQuoteUnavailableSymbol(record, records) {
+  if (!isToolCallRecord(record) || toolNameOf(record) !== 'get_options_quote' || record.isError === true || record.error) return null;
+  const asked = String(record.args?.symbol || '').trim().toUpperCase();
+  if (!asked) return null;
+  const payload = parseJsonish(record.result);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (!Object.keys(payload).every(key => HELD_QUOTE_PAYLOAD_KEYS.has(key))) return null;
+  if (payload.category !== 'quote_stale_or_invalid' || payload.status !== 'unavailable') return null;
+  if (payload.endpoint !== undefined && payload.endpoint !== 'options_quote') return null;
+  if (payload.http_status !== undefined && payload.http_status !== 503) return null;
+  if (payload.symbol !== undefined && String(payload.symbol).toUpperCase() !== asked) return null;
+  return heldOptionSymbols(records).has(asked) ? asked : null;
+}
+/** Cause text for an activity whose ONLY essential failures are held-contract quotes that were unavailable; [] otherwise (any other failure keeps the plain label). */
+export function failureCauses(records, essential) {
+  if (!Array.isArray(essential) || !essential.length) return [];
+  const symbols = [];
+  for (const record of essential) {
+    const symbol = heldQuoteUnavailableSymbol(record, records);
+    if (!symbol) return [];
+    if (!symbols.includes(symbol)) symbols.push(symbol);
+  }
+  const done = (name, symbol) => records.some(r => isToolCallRecord(r) && toolNameOf(r) === name && !hasStructuredFailure(r)
+    && (!symbol || String(r.args?.symbol || '').toUpperCase() === symbol));
+  const logged = symbols.every(symbol => done('log_decision', symbol)) && done('log_activity');
+  return [`held-contract quote unavailable: ${symbols.join(', ')}${logged ? '; decision and activity logged' : ''}`];
+}
 /** Split an activity's failing records into essential failures and optional-research warnings. */
 export function classifyFailures(records) {
   const essential = [];
@@ -553,7 +604,7 @@ export function classifyFailures(records) {
   return { essential, warnings: [...new Set(warnings)] };
 }
 const EXACT_WARNINGS = new Set([POSITION_NOT_FOUND_WARNING, UNFILLED_OPENING_WARNING, CLOSED_POSITION_WARNING, CANCELED_ORDER_WARNING, PRE_ENTRY_PROBE_WARNING, MARKET_CLOSED_CHAIN_WARNING, RANGE_NOT_COVERED_WARNING]);
-function activityOutcome({ recovery, status, essential, warnings }) {
+function activityOutcome({ recovery, status, essential, warnings, causes = [] }) {
   // A warning is appended to a Recorded or Recovered outcome, so it is never hidden by a recorded order status or a recovery.
   // An essential failure that was not recovered is never hidden: a recorded status or a recovery marker does not erase it, and
   // warnings are not shown next to a Failed outcome. Only a heartbeat_failure is recovered by a heartbeat_recovery of the same
@@ -572,7 +623,8 @@ function activityOutcome({ recovery, status, essential, warnings }) {
   if (warnings.includes(RANGE_NOT_COVERED_WARNING)) parts.push(RANGE_NOT_COVERED_WARNING);
   const warning = parts.length ? ` (warning: ${parts.join('; ')})` : '';
   const residual = recovery ? essential.filter(record => record?.kind !== 'heartbeat_failure') : essential;
-  if (residual.length) return status ? `Failed (recorded: ${status})` : 'Failed';
+  const cause = causes.length ? causes.join('; ') : '';
+  if (residual.length) return status ? `Failed (recorded: ${status}${cause ? `; ${cause}` : ''})` : cause ? `Failed (${cause})` : 'Failed';
   if (recovery) return `Recovered${warning}`;
   if (status) return `Recorded: ${status}${warning}`;
   return `Recorded${warning}`;
@@ -942,7 +994,7 @@ export class ChatStore {
       const toolRecords = g.records.filter(r => r.kind === 'tool_call' || r.eventType === 'tool_call');
       const recovery = g.records.some(r => r.kind === 'heartbeat_recovery');
       const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
-      const outcome = activityOutcome({ recovery, status, essential, warnings });
+      const outcome = activityOutcome({ recovery, status, essential, warnings, causes: failureCauses(g.records, essential) });
       return { activityId: g.activityId, accountId, sessionId: g.sessionId, timestamp: g.timestamp, origin: g.origin, labels, title: last?.content?.slice(0, 140) || `${g.origin} activity`, outcome, warnings, agentName: g.session.metadata?.agentName || g.session.metadata?.agentId || '--', sandboxName: g.session.metadata?.sandboxName || '--', recordCount: g.records.length, toolCount: toolRecords.length, _session: g.session, _records: g.records };
     });
     result = result.filter(a => (!account || a.accountId === account || a.sandboxName === account) && (!labels.length || labels.some(l => a.labels.includes(l))));
@@ -981,7 +1033,7 @@ export class ChatStore {
       if (essential.length === 0) labels.delete('Error');
       const status = [...toolRecords].reverse().map(recordedToolStatus).find(Boolean);
       const last = [...activityRecords].reverse().find(record => record.content);
-      const summary = { activityId, accountId, sessionId: session.id, origin: activityRecords.find(record => record.origin)?.origin || 'User', timestamp: activityRecords[0].timestamp, labels: [...labels], title: last?.content?.slice(0, 140) || 'Activity', outcome: activityOutcome({ recovery, status, essential, warnings }), warnings, agentName: session.metadata?.agentName || session.metadata?.agentId || '--', sandboxName: session.metadata?.sandboxName || '--', recordCount: activityRecords.length, toolCount: toolRecords.length };
+      const summary = { activityId, accountId, sessionId: session.id, origin: activityRecords.find(record => record.origin)?.origin || 'User', timestamp: activityRecords[0].timestamp, labels: [...labels], title: last?.content?.slice(0, 140) || 'Activity', outcome: activityOutcome({ recovery, status, essential, warnings, causes: failureCauses(activityRecords, essential) }), warnings, agentName: session.metadata?.agentName || session.metadata?.agentId || '--', sandboxName: session.metadata?.sandboxName || '--', recordCount: activityRecords.length, toolCount: toolRecords.length };
       return { ...summary, totalRecords: activityRecords.length, records: activityRecords.slice(offset, offset + limit), offset, hasMore: offset + limit < activityRecords.length };
     }
     return null;

@@ -511,26 +511,173 @@ test('N4: a new inode that cannot reproduce the existing owner/group/mode fails 
   assert.equal(fs.statSync(file).mode & 0o777, 0o640, 'the existing mode is reproduced exactly, not narrowed by the umask');
 });
 
-// ── read-only deploy preflight: counts and labels only ──────────────────────────────────────────────────────────────────────────
-test('preflight: reports the next-start outcome for each state with counts only, never a key, path or id, and writes nothing unless asked', async () => {
-  const { inspectConfigState } = await import('../agent/config-preflight.js');
-  const healthy = await setup({ config: markerConfig() }); seedKeys();
-  const before = listing(healthy.dir);
-  const report = await inspectConfigState({ configPath: healthy.configPath, secretsPath: healthy.filePath });
-  assert.equal(report.nextStart, 'load_primary');
-  assert.deepEqual(report.primary, { status: 'readable', accounts: 1, markers: 1, markersMissing: 0, referencesOk: true, referenceProblem: null });
-  assert.equal(report.backup.status, 'absent'); assert.equal(report.writeCheck, 'skipped');
-  assert.deepEqual(listing(healthy.dir), before, 'a plain preflight creates nothing');
-  const text = JSON.stringify(report);
-  for (const secret of [PUB, SEC, ID, healthy.dir, 'account:']) assert.ok(!text.includes(secret), secret);
 
-  const missing = await setup({ config: markerConfig() });
-  assert.equal((await inspectConfigState({ configPath: missing.configPath, secretsPath: missing.filePath })).nextStart, 'refuse_keys_missing');
-  const corrupt = await setup({ config: '{bad', backup: markerConfig() }); seedKeys();
-  assert.equal((await inspectConfigState({ configPath: corrupt.configPath, secretsPath: corrupt.filePath })).nextStart, 'recover_from_backup_after_evidence_copy');
-  const virgin = await setup({});
-  assert.equal((await inspectConfigState({ configPath: virgin.configPath, secretsPath: virgin.filePath })).nextStart, 'first_run_bootstrap');
-  const writes = await inspectConfigState({ configPath: virgin.configPath, secretsPath: virgin.filePath, checkWrite: true });
-  assert.equal(writes.writeCheck, 'create_and_rename_ok');
-  assert.deepEqual(listing(virgin.dir).filter(n => n.includes('preflight')), [], 'the write check cleans up after itself');
+// ── Hermes final QA (R2-01 .. R2-04): real integration cases ─────────────────────────────────────────────────────────────────────────
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const MSG = n => ({ role: 'assistant', kind: n === 3 ? 'tool_call' : 'message', content: 'record ' + n, tool: n === 3 ? 'place_options_order' : undefined });
+const jsonlLines = file => fs.readFileSync(file, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+
+test('R2-01: with a broken session index the REAL _persistMessages appends EVERY message (user, assistant, tool event) once, in order, without failing the beat; a healthy index still counts', async () => {
+  const { AgentHarness } = await import('../agent/harness.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'op2-r2a-'));
+  const chatStore = new ChatStore(dir);
+  await chatStore.startSession('acc', 's1', {});
+  const self = Object.assign(Object.create(AgentHarness.prototype), { chatStore, state: { activeAccountId: 'acc' } });
+  await AgentHarness.prototype._persistMessages.call(self, 's1', [MSG(1)]);                          // healthy baseline
+  const jsonl = chatStore._sessionFile('acc', 's1'), indexFile = chatStore._sessionIndexFile('acc');
+  assert.equal(JSON.parse(fs.readFileSync(indexFile, 'utf8')).sessions[0].messageCount, 1, 'healthy index control');
+  const prefix = fs.readFileSync(jsonl);
+  fs.rmSync(indexFile + '.bak', { force: true }); fs.writeFileSync(indexFile, '{"sessions":[');   // corrupt index, no usable backup
+  const lines = []; const realError = console.error; console.error = (...a) => lines.push(a.join(' '));
+  try { await AgentHarness.prototype._persistMessages.call(self, 's1', [MSG(2), MSG(3), MSG(4)], 'acc', { agentId: 'catalyst', agentName: 'Herald' }); } finally { console.error = realError; }
+  const records = jsonlLines(jsonl);
+  assert.deepEqual(records.map(r => r.content), ['record 1', 'record 2', 'record 3', 'record 4'], 'all three later records were appended once, in order');
+  assert.ok(fs.readFileSync(jsonl).subarray(0, prefix.length).equals(prefix), 'the earlier JSONL prefix is untouched');
+  assert.ok(records.slice(1).every(r => r.actorSnapshot?.agentName === 'Herald'), 'the actor snapshot is kept on every record');
+  assert.equal(fs.readFileSync(indexFile, 'utf8'), '{"sessions":[', 'no fabricated index success');
+  assert.equal(lines.filter(l => l.includes('[history] index_unavailable:message')).length, 3, 'logged per message with the appended truth');
+});
+
+// Injects a failure on one index operation without touching the JSONL append.
+async function withIndexFailure(match, code, run) {
+  const realRename = fsp.rename, realOpen = fsp.open;
+  fsp.rename = async function (a, b, ...r) { if (match === 'rename' && String(b).endsWith('sessions.json')) throw Object.assign(new Error('injected'), { code }); return realRename.call(this, a, b, ...r); };
+  fsp.open = async function (p, ...r) { if (match === 'open' && /sessions\.json.*\.tmp$/.test(String(p))) throw Object.assign(new Error('injected'), { code }); return realOpen.call(this, p, ...r); };
+  try { return await run(); } finally { fsp.rename = realRename; fsp.open = realOpen; }
+}
+
+test('R2-02: an index PUBLICATION failure after a successful append (EACCES, EIO, ENOSPC, owner mismatch) is typed with appended truth, never fails the beat, never duplicates, and the queue recovers; a real append failure stays a real error', async () => {
+  const { AgentHarness } = await import('../agent/harness.js');
+  for (const [where, code] of [['rename', 'EACCES'], ['rename', 'EIO'], ['open', 'ENOSPC'], ['open', 'OWNER_MISMATCH']]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'op2-r2b-'));
+    const store = new ChatStore(dir);
+    await store.startSession('acc', 's1', {});
+    const jsonl = store._sessionFile('acc', 's1');
+    const typed = await withIndexFailure(where, code, () => store.addMessage('acc', 's1', MSG(1)).then(() => null, e => e));
+    assert.ok(isHistoryIndexUnavailable(typed) && typed.appended === true && typed.reason.includes(code), `${where}/${code}: typed, appended=true, safe code`);
+    assert.equal(jsonlLines(jsonl).length, 1, 'one durable append, no retry');
+    const self = Object.assign(Object.create(AgentHarness.prototype), { chatStore: store, state: { activeAccountId: 'acc' } });
+    await withIndexFailure(where, code, () => AgentHarness.prototype._persistMessages.call(self, 's1', [MSG(2), MSG(3)]));
+    assert.deepEqual(jsonlLines(jsonl).map(r => r.content), ['record 1', 'record 2', 'record 3'], 'later messages are still appended after an index failure');
+    await store.addMessage('acc', 's1', MSG(4));                                              // the queue is not wedged
+    assert.equal(jsonlLines(jsonl).at(-1).content, 'record 4');
+    assert.equal(JSON.parse(fs.readFileSync(store._sessionIndexFile('acc'), 'utf8')).sessions[0].messageCount, 1, 'the index is usable again after a healthy write; it counts only what it saw (the JSONL is the truth for the 3 earlier messages)');
+  }
+  // startSession's own index write
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'op2-r2c-'));
+  const store = new ChatStore(dir);
+  const started = await withIndexFailure('rename', 'EACCES', () => store.startSession('acc', 's9', {}).then(() => null, e => e));
+  assert.ok(isHistoryIndexUnavailable(started) && started.appended === false, 'a session-only index failure is typed with appended=false');
+  // a genuine append failure is NOT converted to success
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'op2-r2d-'));
+  const store2 = new ChatStore(dir2);
+  await store2.startSession('acc', 's1', {});
+  fs.mkdirSync(store2._sessionFile('acc', 'sx'));                                                   // appending to a directory path fails (EISDIR)
+  await assert.rejects(store2.addMessage('acc', 'sx', MSG(1)), e => !isHistoryIndexUnavailable(e) && e.code === 'EISDIR');
+});
+
+// ── R2-03 fallback validation with the real loader semantics ───────────────────────────────────────────────────────────────────────
+async function failBackupRename(run) {
+  const realRename = fsp.rename;
+  fsp.rename = async function (a, b, ...r) { if (String(b).endsWith('.bak')) throw Object.assign(new Error('injected'), { code: 'EIO' }); return realRename.call(this, a, b, ...r); };
+  try { return await run(); } finally { fsp.rename = realRename; }
+}
+
+test('R2-03: a failed backup write continues ONLY when the older .bak is a fully loadable recovery source; weak shapes (null account, malformed, normalisation failure, unresolved markers) fail BEFORE the primary is replaced; the accepted fallback really loads in a fresh module', async () => {
+  const mutate = async s => { const cfg = JSON.parse(bytes(s.configPath).toString()); cfg.accounts[0].name = 'renamed ' + Math.random(); return cfg; };
+  for (const [label, fallback] of [
+    ['null account', JSON.stringify({ accounts: [null], sandboxes: {} })],
+    ['malformed', '{"accounts":['],
+    ['normalisation failure', JSON.stringify({ accounts: [null] })],
+    ['unresolved markers', JSON.stringify({ ...markerConfig(), accounts: [{ ...markerConfig().accounts[0], id: 'zzzz9999' }] })],
+  ]) {
+    const s = await setup({ config: markerConfig() }); seedKeys();
+    await quiet(() => s.store.loadConfig());
+    fs.writeFileSync(s.configPath + '.bak', fallback);
+    const primaryBefore = bytes(s.configPath), bakBefore = bytes(s.configPath + '.bak');
+    s.store.getConfig().accounts[0].name = 'changed ' + label;
+    const failure = await failBackupRename(() => s.store.saveConfig().then(() => null, e => e));
+    assert.equal(failure?.code, 'BACKUP_REQUIRED', label);
+    assert.ok(bytes(s.configPath).equals(primaryBefore), label + ': the primary is preserved');
+    assert.ok(bytes(s.configPath + '.bak').equals(bakBefore), label + ': the backup is untouched');
+  }
+  // a fully valid older backup permits the documented warned continuation, and a fresh module can actually recover from it
+  const s = await setup({ config: markerConfig() }); seedKeys();
+  await quiet(() => s.store.loadConfig());
+  const olderValid = bytes(s.configPath);                                                           // a real, loadable previous disk form
+  fs.writeFileSync(s.configPath + '.bak', olderValid);
+  s.store.getConfig().accounts[0].name = 'changed after a failed backup write';
+  const ok = await failBackupRename(() => s.store.saveConfig().then(() => 'saved', e => e));
+  assert.equal(ok, 'saved');
+  assert.match(bytes(s.configPath).toString(), /changed after a failed backup write/);
+  assert.ok(bytes(s.configPath + '.bak').equals(olderValid), 'the older valid backup stays the fallback');
+  fs.writeFileSync(s.configPath, '{corrupt');                                                       // later corruption: recovery from that fallback must really work
+  const fresh = await reopen(s);
+  assert.equal((await quiet(() => fresh.loadConfig())).error, undefined);
+  assert.deepEqual(fresh.getConfig().accounts.map(a => a.id), [ID]);
+  assert.equal(calls.length, 0, 'validating a fallback never imports a broker or rewrites a file');
+});
+
+// ── R2-04 preflight == loader ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+const CLI = fileURLToPath(new URL('../scripts/config-preflight.mjs', import.meta.url));
+const runCli = (configPath, extra = []) => spawnSync(process.execPath, [CLI, ...extra], { env: { ...process.env, OPENPROPHET_CONFIG_PATH: configPath, OPENPROPHET_SECRETS_PATH: path.join(path.dirname(configPath), 'secrets.json') }, encoding: 'utf8' });
+
+test('R2-04: the preflight accepts and refuses exactly what the real loader does (healthy split, legacy plaintext, null account, normalisation failure, unresolved markers, bad backup, absent private store)', async () => {
+  const { inspectConfigState } = await import('../agent/config-preflight.js');
+  const cases = [
+    ['healthy split', { config: markerConfig() }, true, 'load_primary'],
+    ['legacy plaintext', { config: plaintextConfig() }, false, 'load_primary'],
+    ['null account', { config: JSON.stringify({ accounts: [null], sandboxes: {} }) }, false, 'refuse'],
+    ['normalisation failure', { config: JSON.stringify({ accounts: [null] }) }, false, 'refuse'],
+    ['unresolved markers', { config: markerConfig() }, false, 'refuse_keys_missing'],
+    ['corrupt primary + null-account backup', { config: '{', backup: JSON.stringify({ accounts: [null], sandboxes: {} }) }, false, 'refuse'],
+    ['corrupt primary + good backup', { config: '{', backup: markerConfig() }, true, 'recover_from_backup_after_evidence_copy'],
+    ['absent primary + good backup', { backup: markerConfig() }, true, 'recover_from_backup'],
+    ['absent + absent', {}, false, 'first_run_bootstrap'],
+  ];
+  for (const [label, seed, keys, expected] of cases) {
+    const s = await setup({ ...seed });
+    if (keys) seedKeys();
+    if (label === 'absent + absent') { delete process.env.ALPACA_PUBLIC_KEY; delete process.env.ALPACA_SECRET_KEY; }
+    const report = await inspectConfigState({ configPath: s.configPath, secretsPath: s.filePath });
+    assert.equal(report.nextStart, expected, label);
+    // the real loader agrees on whether active startup would proceed
+    const loaded = await quiet(() => s.store.loadConfig());
+    const loaderProceeds = !loaded.error;
+    const predictsProceed = !report.nextStart.startsWith('refuse');
+    assert.equal(predictsProceed, loaderProceeds, `${label}: the preflight and the loader agree`);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('R2-04: an absent private store is reported as absent (not "readable"); a marker-free legacy plaintext config still loads without one', async () => {
+  const { inspectConfigState } = await import('../agent/config-preflight.js');
+  const s = await setup({ config: plaintextConfig() });
+  const report = await inspectConfigState({ configPath: s.configPath, secretsPath: s.filePath });
+  assert.equal(report.privateStore, 'absent');
+  assert.equal(report.nextStart, 'load_primary');
+  const withStore = await setup({ config: markerConfig() }); seedKeys();
+  assert.equal((await inspectConfigState({ configPath: withStore.configPath, secretsPath: withStore.filePath })).privateStore, 'readable');
+});
+
+test('R2-04: the CLI exit-status contract (0 load, 2 operator decision, 1 refuse or failed write check) and its output never carries keys, paths, ids or fragments', async () => {
+  const load = await setup({ config: markerConfig() }); seedKeys();
+  const r0 = runCli(load.configPath, ['--check-write']);
+  assert.equal(r0.status, 0, r0.stdout + r0.stderr);
+  const bootstrap = await setup({});
+  assert.equal(runCli(bootstrap.configPath).status, 2);
+  const recover = await setup({ config: '{', backup: markerConfig() }); seedKeys();
+  assert.equal(runCli(recover.configPath).status, 2);
+  const refuse = await setup({ config: JSON.stringify({ accounts: [null], sandboxes: {} }) });
+  assert.equal(runCli(refuse.configPath).status, 1);
+  const unresolved = await setup({ config: markerConfig() });
+  const r1 = runCli(unresolved.configPath);
+  assert.equal(r1.status, 1);
+  for (const result of [r0, r1, runCli(recover.configPath)]) {
+    const text = result.stdout + result.stderr;
+    for (const secret of [PUB, SEC, ID, load.dir, recover.dir, 'account:', '{"accounts"']) assert.ok(!text.includes(secret), secret);
+  }
+  assert.ok(!fs.existsSync(path.join(refuse.dir, 'agent-config.json.bak')), 'the CLI writes nothing');
 });

@@ -672,10 +672,16 @@ export class ChatStore {
   }
 
   async _saveSessionIndex(accountId, index) {
-    await this._ensureDirs(accountId);
-    const validIndex = bytes => { try { const value = JSON.parse(bytes.toString('utf8')); return !!value && typeof value === 'object' && Array.isArray(value.sessions); } catch { return false; } };
-    const result = await publishAtomic(this._sessionIndexFile(accountId), JSON.stringify(index, null, 2), { backup: true, validateExisting: validIndex });
-    if (result.backup === 'failed') console.error('[chat-store] index_backup_not_written');   // degraded recovery is visible, not silent
+    try {
+      await this._ensureDirs(accountId);
+      const validIndex = bytes => { try { const value = JSON.parse(bytes.toString('utf8')); return !!value && typeof value === 'object' && Array.isArray(value.sessions); } catch { return false; } };
+      const result = await publishAtomic(this._sessionIndexFile(accountId), JSON.stringify(index, null, 2), { backup: true, validateExisting: validIndex });
+      if (result.backup === 'failed') console.error('[chat-store] index_backup_not_written');   // degraded recovery is visible, not silent
+    } catch (error) {
+      // temp open/sync, rename, disk full, owner or mode mismatch: all are INDEX maintenance failures, typed so history stays best-effort (the caller adds appended truth)
+      if (isHistoryIndexUnavailable(error)) throw error;
+      throw new HistoryIndexUnavailableError('publish_' + safeCode(error));
+    }
   }
 
   // ── Public API ───────────────────────────────────────────────────

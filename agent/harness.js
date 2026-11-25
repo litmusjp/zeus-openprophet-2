@@ -909,7 +909,9 @@ export class AgentHarness {
     if (!this.chatStore || !sessionId || !accountId) return;
     for (const message of messages) {
     if (!message || (!message?.content?.trim() && !message?.eventType && !message?.kind)) continue;
-      await this.chatStore.addMessage(accountId, sessionId, { ...message, ...(actorSnapshot ? { actorSnapshot } : {}) });
+      // The message is appended BEFORE the index is updated; an index failure is typed (appended truth) and must never drop the messages that follow.
+      try { await this.chatStore.addMessage(accountId, sessionId, { ...message, ...(actorSnapshot ? { actorSnapshot } : {}) }); }
+      catch (error) { if (error?.code !== 'HISTORY_INDEX_UNAVAILABLE') throw error; console.error('[history] index_unavailable:message:' + error.reason + (error.appended ? ':appended' : '')); }
     }
   }
 

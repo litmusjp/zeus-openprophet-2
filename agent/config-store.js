@@ -924,6 +924,12 @@ async function readConfigCandidate(file, useSecrets, { enforceRefs = false } = {
 }
 
 const configBackupPath = () => CONFIG_PATH + '.bak';
+
+/** Read-only acceptance of a config file by the SAME rules the loader applies to a candidate; labels only (status, stage, reason), no content. For the preflight tool. */
+export async function inspectConfigCandidate(file, { enforceRefs = true } = {}) {
+  const outcome = await readConfigCandidate(file, secrets.isSplitEnabled() && !secrets.isCorrupt(), { enforceRefs });
+  return { status: outcome.status, stage: outcome.stage || null, reason: outcome.reason || null, code: outcome.code || null };
+}
 const configLog = (stage, code) => console.error('[config] ' + stage + ':' + code);
 
 function unrecoverableConfigError(code) {
@@ -1065,7 +1071,9 @@ export async function saveConfig() {
       backup: true,
       requireFallback: true,
       validateExisting: bytes => knownGoodDigests.has(sha256Hex(bytes)) && looksLikeConfigBytes(bytes),
-      validateFallback: looksLikeConfigBytes,
+      // The older fallback must be a REAL recovery source: the same detached candidate acceptance the loader applies (shape, key references, normalisation),
+      // evaluated read-only; a weak JSON shape (a null account, unresolved markers) does not count.
+      validateFallback: async () => (await readConfigCandidate(configBackupPath(), secrets.isSplitEnabled() && !secrets.isCorrupt(), { enforceRefs: true })).status === 'ok',
     });
     knownGoodDigests.add(sha256Hex(Buffer.from(payload, 'utf8')));
     if (result.backup === 'failed') configLog('backup_not_written', 'older_backup_kept');

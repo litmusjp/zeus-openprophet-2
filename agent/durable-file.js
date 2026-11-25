@@ -104,7 +104,7 @@ export async function publishAtomic(file, data, { backup = false, validateExisti
   }
   if (requireFallback && backupStatus === 'failed') {
     let fallback = false;
-    try { fallback = validateFallback(await fsx.readFile(file + '.bak')); } catch { fallback = false; }
+    try { fallback = await validateFallback(await fsx.readFile(file + '.bak')); } catch { fallback = false; }   // may be async: the caller can apply full candidate semantics
     if (!fallback) {
       await fsx.rm(tmp, { force: true }).catch(() => {});
       throw failure('BACKUP_REQUIRED', 'backup_required');

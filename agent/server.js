@@ -26,6 +26,7 @@ import { registerSecretsRoutes } from './secrets-routes.js';
 import { loadOrderActorMap, resolveOrderActorWithJournal } from './history-attribution.js';
 import { OrderAttributionJournal } from './order-attribution-journal.js';
 import { IvHistoryCollector, IvHistoryStore, IV_CAPTURE, createIvHistoryHandler, parseStartList, underlyingOf } from './iv-history.js';
+import { createDataUsage } from './data-usage.js';
 import ChatStore, { isValidHistoryAccountId } from './chat-store.js';
 import AgentOrchestrator, { buildGoBackendEnv } from './orchestrator.js';
 import { replaceBinaryWithRollback } from './binary-replacement.js';
@@ -2334,6 +2335,11 @@ const ivCollector = new IvHistoryCollector({
   },
 });
 app.get('/api/iv-history', createIvHistoryHandler(ivStore));
+// Bounded, cached, read-only size totals of the data folder (no names, no contents, no deletion). Behind the same outer and inner auth as every /api route.
+const dataUsage = createDataUsage({ root: path.join(PROJECT_ROOT, 'data') });
+app.get('/api/data-usage', async (req, res) => {
+  try { res.json(await dataUsage.get()); } catch { res.json({ status: 'unavailable', scannedAt: null, stale: false, partial: false, buckets: null }); }
+});
 
 app.get('/api/trades', async (req, res) => {
   try {

@@ -59,10 +59,12 @@ await fs.writeFile(configPath, JSON.stringify({
   sandboxes: Object.fromEntries(SLOT_IDS.map((sid, i) => [sid, { id: sid, name: `L${i + 1}`, accountId: `acc${i + 1}`, agent: after.slots[sid].agent, permissions: after.perms[sid] }])),
 }, null, 2));
 const store = await import('../agent/config-store.js?agent-consistency');
+const nodeFsSync = await import('node:fs');
 await store.loadConfig();
 
-test.after(async () => {
-  await fs.rm(tempDir, { recursive: true, force: true });
+// Cleaned up when the process exits: a runner-driven after hook can fire while later tests are still saving the config (it made the atomic save flaky).
+process.once('exit', () => {
+  nodeFsSync.rmSync(tempDir, { recursive: true, force: true });
   delete process.env.OPENPROPHET_CONFIG_PATH;
   delete process.env.OPENPROPHET_EXECUTION_MODE;
 });
@@ -474,27 +476,117 @@ test('Nov 25: delta text is timeless (no tickers, dates, prices, counts or momen
   assert.doesNotMatch(all, /\b20\d\d\b|yesterday|tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday|Nov\b|\$\d/);
 });
 
-// Documentation fixtures of the expected B2 arithmetic (NOT model tests): the three Nov 24 openings, partial fills, replacement, direction netting.
-function b2Expected({ equity, held = [], reserved = [], candidate }) {
-  const sum = list => list.reduce((n, x) => n + x, 0);
-  const total = sum(held) + sum(reserved) + candidate;
-  return { total, pct: (total / equity) * 100 };
+// Documentation fixtures of the expected B2 arithmetic. These are LABELLED EXAMPLES of what a correct budget line contains (NOT model tests, NOT a broker
+// guard): they show the expected numbers for the Nov 24 openings and the contract's edge cases, using explicit positions with a direction.
+// Cost rules (from the rendered text): single option = remaining qty x average entry premium x 100; an intact vertical = remaining spread units x its
+// recorded filled net debit x 100 (counted ONCE, never as a group plus its two legs); reserved = unfilled opening qty x limit x 100 per working order,
+// counted once and kept until its terminal cancel/withdrawal is reconciled; candidate = its unfilled qty x its final bounded limit x 100.
+const BULLISH = new Set(['long_call', 'bull_call_debit']), BEARISH = new Set(['long_put', 'bear_put_debit']);
+function b2Documented({ equity, direction, positions = [], orders = [], candidate }) {
+  const sameDirection = list => list.filter(x => (direction === 'bullish' ? BULLISH : BEARISH).has(x.structure));
+  const held = sameDirection(positions).reduce((n, p) => n + (p.units ?? p.qty) * (p.netDebit ?? p.avgEntry) * 100, 0);
+  const reserved = sameDirection(orders).filter(o => !o.terminalReconciled).reduce((n, o) => n + o.unfilledQty * o.limit * 100, 0);
+  const cand = candidate.unfilledQty * candidate.limit * 100;
+  const total = held + reserved + cand;
+  return { held, reserved, candidate: cand, total, pct: (total / equity) * 100 };
 }
-test('Nov 25 (fixture, not a model test): expected B2 numbers for the three Nov 24 openings and the contract edge cases', () => {
-  const wmt = b2Expected({ equity: 92899.23, held: [1950, 5700], candidate: 6 * 8.19 * 100 });
-  assert.equal(wmt.total, 12564); assert.ok(Math.abs(wmt.pct - 13.5243317) < 1e-6);
-  const meta = b2Expected({ equity: 93574.58, held: [], candidate: 2 * 36.28 * 100 });
-  assert.equal(Math.round(meta.total), 7256); assert.ok(Math.abs(meta.pct - 7.7542427) < 1e-6);
-  const dis = b2Expected({ equity: 92899.48, held: [1950], candidate: 10 * 5.72 * 100 });
-  assert.equal(dis.total, 7670); assert.ok(Math.abs(dis.pct - 8.2562357) < 1e-6);
-  // A changed final limit changes the number: 5.71 is not the submitted bound.
-  assert.notEqual(b2Expected({ equity: 92899.48, held: [1950], candidate: 10 * 5.71 * 100 }).total, dis.total);
-  // Partial fill: filled units move to held, only the unfilled part is the candidate; the whole is never counted twice.
-  const partial = b2Expected({ equity: 90000, held: [4 * 3 * 100], candidate: 6 * 3 * 100 });
+const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-6, `${actual} vs ${expected}`);
+
+test('Nov 25 (documentation fixture, not a model test): the three Nov 24 openings, from explicit same-direction holdings', () => {
+  // WMT 6-call order: the held bullish book was the WMT calls (5 x 3.90) AND the DIS calls (10 x 5.70); the logged line omitted DIS.
+  const wmt = b2Documented({ equity: 92899.23, direction: 'bullish',
+    positions: [{ structure: 'long_call', qty: 5, avgEntry: 3.9 }, { structure: 'long_call', qty: 10, avgEntry: 5.7 }],
+    candidate: { unfilledQty: 6, limit: 8.19 } });
+  assert.equal(wmt.total, 12564); near(wmt.pct, 13.5243317);
+  // META put: CRM and UNH were already closed, so the bearish book was empty.
+  const meta = b2Documented({ equity: 93574.58, direction: 'bearish', positions: [], candidate: { unfilledQty: 2, limit: 36.28 } });
+  assert.equal(Math.round(meta.total), 7256); near(meta.pct, 7.7542427);
+  // DIS call: the final submitted bound was 5.72 (not the 5.71 midpoint of the log).
+  const dis = b2Documented({ equity: 92899.48, direction: 'bullish', positions: [{ structure: 'long_call', qty: 5, avgEntry: 3.9 }], candidate: { unfilledQty: 10, limit: 5.72 } });
+  assert.equal(dis.total, 7670); near(dis.pct, 8.2562357);
+  assert.equal(b2Documented({ equity: 92899.48, direction: 'bullish', positions: [{ structure: 'long_call', qty: 5, avgEntry: 3.9 }], candidate: { unfilledQty: 10, limit: 5.71 } }).total, 7660, 'the old limit gives the old (wrong) number');
+});
+
+test('Nov 25 (documentation fixture): directions are never netted, an intact vertical counts once, a changed quantity changes the candidate, a partially filled replacement keeps its reservation until terminal reconciliation', () => {
+  const equity = 90000;
+  const bullishCandidate = { unfilledQty: 1, limit: 10 };                                  // 1000
+  // never netted: bullish 5000 held + bearish 7000 held + a bullish candidate of 1000 => bullish total 6000, not 5000 + 1000 - 7000
+  const book = [{ structure: 'long_call', qty: 5, avgEntry: 10 }, { structure: 'long_put', qty: 7, avgEntry: 10 }];
+  assert.equal(b2Documented({ equity, direction: 'bullish', positions: book, candidate: bullishCandidate }).total, 6000);
+  assert.equal(b2Documented({ equity, direction: 'bearish', positions: book, candidate: { unfilledQty: 1, limit: 10 } }).total, 7000 + 1000);
+  // an intact vertical: 2 spread units at 3.00 net debit contribute 600 ONCE (not the group plus its two gross legs)
+  const vertical = [{ structure: 'bull_call_debit', units: 2, netDebit: 3.0 }];
+  assert.equal(b2Documented({ equity, direction: 'bullish', positions: vertical, candidate: { unfilledQty: 0, limit: 0 } }).held, 600);
+  // the same limit with a changed unfilled quantity changes the candidate cost (a changed bound invalidates the old calculation)
+  assert.equal(b2Documented({ equity, direction: 'bullish', candidate: { unfilledQty: 4, limit: 2.5 } }).candidate, 1000);
+  assert.equal(b2Documented({ equity, direction: 'bullish', candidate: { unfilledQty: 5, limit: 2.5 } }).candidate, 1250);
+  // a partially filled candidate: filled units are held, only the unfilled part is the candidate or reservation (the whole is never counted twice)
+  const partial = b2Documented({ equity, direction: 'bullish', positions: [{ structure: 'long_call', qty: 4, avgEntry: 3 }], candidate: { unfilledQty: 6, limit: 3 } });
   assert.equal(partial.total, 3000);
-  // A same-side working order stays reserved until its terminal cancel or withdrawal is reconciled, then the replacement counts once.
-  assert.equal(b2Expected({ equity: 90000, reserved: [2000], candidate: 2000 }).total, 4000);
-  assert.equal(b2Expected({ equity: 90000, reserved: [], candidate: 2000 }).total, 2000);
-  // Opposite directions are never netted: a bearish book does not reduce the bullish total.
-  assert.equal(b2Expected({ equity: 90000, held: [5000], candidate: 1000 }).total, 6000);
+  // a replacement: the old working order stays reserved until its terminal cancel is reconciled, then only the replacement counts
+  const working = [{ structure: 'long_call', unfilledQty: 3, limit: 2, terminalReconciled: false }];
+  assert.equal(b2Documented({ equity, direction: 'bullish', orders: working, candidate: { unfilledQty: 3, limit: 2 } }).total, 1200, 'old order still reserved');
+  assert.equal(b2Documented({ equity, direction: 'bullish', orders: [{ ...working[0], terminalReconciled: true }], candidate: { unfilledQty: 3, limit: 2 } }).total, 600, 'released after the terminal cancel is reconciled');
+});
+
+test('Nov 25 H6: C4 and the exit owners keep their protected words; a deliberately different custom exit survives unchanged next to the C4 qualifier', async () => {
+  await switchTo('sbx_723be98b', 'catalyst');
+  const base = await promptFor('sbx_723be98b');
+  const baseline = BASE25['L1:catalyst'];
+  for (const part of [
+    'is met when any eligible completed bar since its reference point satisfies it. Check every eligible bar since that point, never only the first bar or only the latest bar, and a later bar on the other side never undoes a trigger that an earlier eligible bar already met.',
+    'the bars that count for a stop completed after your entry fill',
+    'the bars that count for a confirmation start at or after the end of the range window',
+    'When price reaches it, close half of the broker-confirmed contracts rounded down to whole contracts, and trail the remainder by exiting on a completed 5-minute close back through the broken level.',
+    '(equality does not count)',
+    'This clarification does not replace an explicit different exit rule or historical override in your Strategy Rules or recorded plan.',
+  ]) { assert.equal(count25(base, part), 1, part.slice(0, 60)); }
+  const closeLine = text => text.split('\n').find(l => l.startsWith('- Close-time exit:'));
+  assert.equal(closeLine(base), closeLine(baseline), 'the J2 close-time exit line is identical to the live 05cfd92 prompt');
+  // a custom exit written in the slot's Strategy Rules is rendered exactly once and unchanged
+  const CUSTOM = 'CUSTOM-EXIT-RULE-FIXTURE: for this slot a put trail exits on a completed 15-minute close above the 10-day average instead.';
+  await store.updateSandboxAgentOverrides('sbx_723be98b', { customStrategyRules: CUSTOM });
+  const custom = await promptFor('sbx_723be98b');
+  assert.equal(count25(custom, CUSTOM), 1, 'the custom exit is kept verbatim');
+  assert.ok(custom.includes('does not replace an explicit different exit rule or historical override'), 'C4 states it does not override it');
+  await store.updateSandboxAgentOverrides('sbx_723be98b', { customStrategyRules: null });
+  assert.equal(await promptFor('sbx_723be98b'), base, 'clearing the override restores the same prompt');
+});
+
+test('Nov 25 H6: each C2b exception is present once in every agent prompt (shared, not catalyst-only)', async () => {
+  const exceptions = [
+    'Broker acknowledgement without confirmed execution is a submitted, unconfirmed order to reconcile',
+    'pending status alone, or an entry assessment score that does not apply to a reducing order, is not DATA_BLOCK',
+    'Never infer a fill, and never retry or duplicate an uncertain order.',
+    'If required order, position or quote evidence is unavailable, the DATA_BLOCK rule above applies and a due exit stays due.',
+  ];
+  for (const agentId of AGENT_IDS) {
+    await switchTo('sbx_723be98b', agentId);
+    const prompt = await promptFor('sbx_723be98b');
+    for (const part of exceptions) assert.equal(count25(prompt, part), 1, agentId + ': ' + part.slice(0, 50));
+  }
+  await switchTo('sbx_723be98b', 'catalyst');
+});
+
+test('Nov 25 H6: manifest provenance (exactly 1 shared and 5 catalyst entries, distinct non-empty anchors found once in the baseline; the approved files are pinned as a tripwire)', async () => {
+  const crypto = await import('node:crypto');
+  assert.equal(NOV25.shared.length, 1);
+  assert.equal(NOV25.catalyst.length, 5);
+  const entries = [...NOV25.shared, ...NOV25.catalyst];
+  for (const e of entries) {
+    assert.ok(typeof e.old === 'string' && e.old.length > 20, 'non-empty anchor');
+    assert.ok(typeof e.new === 'string' && e.new.startsWith(e.old.slice(0, 10)) || e.new.length > e.old.length, 'a replacement extends or rewrites its anchor');
+    assert.ok(['agent/harness.js', 'agent/trading-guidance.js'].includes(e.file), 'only the two approved source files: ' + e.file);
+  }
+  assert.equal(new Set(entries.map(e => e.old)).size, entries.length, 'anchors are distinct');
+  assert.equal(Object.keys(BASE25).length, 11);
+  for (const key of ['live:sbx_723be98b', 'live:sbx_956ff9e4', 'live:sbx_0d35471e', ...AGENT_IDS.map(id => 'L1:' + id)]) assert.ok(typeof BASE25[key] === 'string' && BASE25[key].length > 10000, key);
+  assert.equal(count25(BASE25['L1:catalyst'], NOV25.shared[0].old), 1);
+  for (const e of NOV25.catalyst) assert.equal(count25(BASE25['L1:catalyst'], e.old), 1, e.old.slice(0, 50));
+  // Tripwire, not authority: these are the sha256 of the files reviewed and approved at 11a8555. A reviewed change to the baseline or the manifest
+  // must update them in the same commit AND be reviewed independently of this test.
+  const nodeFs = await import('node:fs');
+  const sha = file => crypto.createHash('sha256').update(nodeFs.readFileSync(new URL(file, FX))).digest('hex');
+  assert.equal(sha('../nov25/baseline-05cfd92.json'), '2f31b92fcd9484a3be4f082e1d3e422e0589e923fa5286118ac8aaa33c96d9f3');
+  assert.equal(sha('../nov25/delta.json'), '739434cb9dfa5262572a80a056f7b004e717de79545c81c891779c9f7af3e7c7');
 });

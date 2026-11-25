@@ -1,0 +1,31 @@
+{
+  "shared": [
+    {
+      "file": "agent/harness.js",
+      "old": "verify them against live data before acting.",
+      "new": "verify them against live data before acting. When a SESSION CARRY-FORWARD block appears, it lists your own earlier structured notes from the logs of this account; it is not market or broker data, so verify with live tools before acting. Finish its PENDING names before repeating research, and when you log a candidate, a recorded range or a target allocation with prophet_log_decision, attach the matching carry object so your next heartbeat has it."
+    }
+  ],
+  "catalyst": [
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "This target exit happens once per position",
+      "new": "A call's underlying target is touched when a completed 5-minute bar's high reaches or exceeds the level, and a put's when a bar's low reaches or falls below it. This target exit happens once per position"
+    },
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "- Close-time exit: an exit is due by the close only when",
+      "new": "- Exit evidence: when you sell to close a single option because of a stop, trail, invalidation or target of the underlying, pass exit_evidence to prophet_place_options_order with the numbers you are citing: exit_kind, rule_basis \"underlying_completed_5min_bar\", trigger_level, trigger_bar_start and trigger_bar_end (UTC, five minutes apart), bar_complete true, and trigger_bar_close (stop, trail, invalidation) or trigger_bar_high for a call target or trigger_bar_low for a put target. It is an advisory arithmetic check of your own numbers: it never changes or blocks the order, so a due exit is still placed.\n- Close-time exit: an exit is due by the close only when"
+    },
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "Record RANGE_RECORDED once per event and cite it on later passes.",
+      "new": "Record RANGE_RECORDED once per event and cite it on later passes. When you know the publication time of the event itself, also pass it as event_published_at: the answer then adds anchor_check, and a mismatch means window_start was not the anchor that publication time implies (use the exact publication time, seconds kept, for news published during the session, and the session open for news published before it)."
+    },
+    {
+      "file": "agent/trading-guidance.js",
+      "old": "A rejection of one direction or event never suppresses another direction or event, and re-entry after an exit still follows its own rule.",
+      "new": "A rejection of one direction or event never suppresses another direction or event, and re-entry after an exit still follows its own rule. Use a REJECTED daily_trend note from the carry-forward block only under this rule (same symbol, direction, event, data-as-of date and failed values), never for any other gate or check."
+    }
+  ]
+}

@@ -123,6 +123,8 @@ const withB2 = text => { assert.equal(text.split(CATALYST_END).length - 1, 1); r
 // Nov 25: baseline (05cfd92) and allowed delta; defined before the first test because tests start while the module is still evaluating
 const NOV25 = JSON.parse(await fs.readFile(new URL('../nov25/delta.json', FX), 'utf8'));
 const BASE25 = JSON.parse(await fs.readFile(new URL('../nov25/baseline-05cfd92.json', FX), 'utf8'));
+// Nov 26: the allowed delta on top of the Nov 25 chain (fixtures/nov26/delta.json). Current render = BASE25 + NOV25 delta + NOV26 delta.
+const NOV26 = JSON.parse(await fs.readFile(new URL('../nov26/delta.json', FX), 'utf8'));
 const count25 = (text, part) => text.split(part).length - 1;
 const forward25 = (text, entries) => { for (const e of entries) { assert.equal(count25(text, e.old), 1, e.old.slice(0, 70)); text = text.replace(e.old, () => e.new); } return text; };
 const expected25 = base => {
@@ -131,7 +133,24 @@ const expected25 = base => {
   for (const e of NOV25.catalyst) assert.equal(count25(base, e.old), 0, 'a non-catalyst prompt never carries the catalyst owners');
   return text;
 };
-const revert25 = text => {
+const expected26 = base => {
+  let text = forward25(expected25(base), NOV26.shared);
+  if (base.includes('Catalyst discovery:')) return forward25(text, NOV26.catalyst);
+  for (const e of NOV26.catalyst) assert.equal(count25(text, e.new), 0, 'a non-catalyst prompt never carries the Nov 26 catalyst clauses');
+  return text;
+};
+const revert26 = text => {
+  for (const e of NOV26.shared) { assert.equal(count25(text, e.new), 1, e.new.slice(0, 70)); text = text.replace(e.new, () => e.old); }
+  const catalyst = count25(text, NOV26.catalyst[0].new) === 1;
+  for (const e of NOV26.catalyst) {
+    if (catalyst) { assert.equal(count25(text, e.new), 1, e.new.slice(0, 70)); text = text.replace(e.new, () => e.old); }
+    else assert.equal(count25(text, e.new), 0);
+  }
+  return text;
+};
+// revert25 takes a CURRENT render all the way back to the 05cfd92 baseline (Nov 26 delta first, then the Nov 25 delta)
+const revert25 = text => revertNov25(revert26(text));
+const revertNov25 = text => {
   for (const e of NOV25.shared) { assert.equal(count25(text, e.new), 1, e.new.slice(0, 70)); text = text.replace(e.new, () => e.old); }
   const catalyst = count25(text, NOV25.catalyst[0].new) === 1;
   for (const e of NOV25.catalyst) {
@@ -146,7 +165,7 @@ test('Herald on L1 renders byte-identical to the live preview, apart from the ne
   const expected = withB2(withB1(goldenL1.replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups')));
   assert.notEqual(expected, goldenL1);
   const actualNow = await promptFor('sbx_723be98b');
-  assert.equal(actualNow, expected25(BASE25['live:sbx_723be98b']), 'baseline 05cfd92 plus only the approved Nov 25 delta');
+  assert.equal(actualNow, expected26(BASE25['live:sbx_723be98b']), 'baseline 05cfd92 plus only the approved Nov 25 and Nov 26 deltas');
   const actual = revert25(actualNow);
   assert.equal(actual, expected);
 });
@@ -158,14 +177,14 @@ test('Pendulum on L2 renders byte-identical to the live preview, apart from the 
   // The third allowed difference: the corrupted dash in the ETF rules is fixed (config edit C6).
   const expected = goldenL2.replace(old, l1Paragraph).replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups').split('â€“').join('-');
   const actualNow = await promptFor('sbx_956ff9e4');
-  assert.equal(actualNow, expected25(BASE25['live:sbx_956ff9e4']), 'baseline 05cfd92 plus only the shared Nov 25 clause');
+  assert.equal(actualNow, expected26(BASE25['live:sbx_956ff9e4']), 'baseline 05cfd92 plus only the shared Nov 25 and Nov 26 clauses');
   const actual = stripB1(revert25(actualNow));
   assert.equal(actual, expected);
 });
 
 test('Prophet on L3 gets its restored identity, list and B2 rules, and the shared workflow between identity and list', async () => {
   const prompt = await promptFor('sbx_0d35471e');
-  assert.equal(prompt, expected25(BASE25['live:sbx_0d35471e']), 'baseline 05cfd92 plus only the shared Nov 25 clause');
+  assert.equal(prompt, expected26(BASE25['live:sbx_0d35471e']), 'baseline 05cfd92 plus only the shared Nov 25 and Nov 26 clauses');
   assert.ok(prompt.startsWith(PROPHET_IDENTITY));
   assert.ok(prompt.includes(PROPHET_UNIVERSE_BLOCK));
   for (const line of PROPHET_B2_RULES.split('\n')) assert.ok(prompt.includes(line), line.slice(0, 60));
@@ -376,7 +395,7 @@ test('Nov 25: all 8 agents render as the 05cfd92 baseline plus only the approved
   const live = {};
   const perAgent = {};
   for (const agentId of AGENT_IDS) { await switchTo('sbx_723be98b', agentId); perAgent[agentId] = await promptFor('sbx_723be98b'); }
-  for (const agentId of AGENT_IDS) assert.equal(perAgent[agentId], expected25(BASE25[`L1:${agentId}`]), agentId);
+  for (const agentId of AGENT_IDS) assert.equal(perAgent[agentId], expected26(BASE25[`L1:${agentId}`]), agentId);
   // Family follows the strategy, not the slot: only the catalyst agent renders the catalyst owners, on any slot.
   const withOwners = AGENT_IDS.filter(id => perAgent[id].includes(NOV25.catalyst[0].new));
   assert.deepEqual(withOwners, ['catalyst']);
@@ -590,4 +609,52 @@ test('Nov 25 H6: manifest provenance (exactly 1 shared and 5 catalyst entries, d
   const sha = file => crypto.createHash('sha256').update(Buffer.from(nodeFs.readFileSync(new URL(file, FX), 'latin1').replace(/\r\n/g, '\n'), 'latin1')).digest('hex');   // line-ending insensitive: a Windows checkout may turn LF into CRLF
   assert.equal(sha('../nov25/baseline-05cfd92.json'), '2f31b92fcd9484a3be4f082e1d3e422e0589e923fa5286118ac8aaa33c96d9f3');
   assert.equal(sha('../nov25/delta.json'), '739434cb9dfa5262572a80a056f7b004e717de79545c81c891779c9f7af3e7c7');
+  assert.equal(sha('../nov26/delta.json'), '7e3a8b8c786cc332bd9cf8ae480270fdc392794c4599687c8466b9ec6c3f15b6');
 });
+
+// ── Nov 26 text delta (W1 exit evidence, W3 carry-forward, W5 event_published_at, W6 target touch) ────────────────────
+// Evidence boundary: these prove the exact rendered clauses and their family scope. They do NOT prove that a live model follows them.
+test('Nov 26: all 8 prompts carry the shared carry-forward sentence once; only the catalyst family carries the exit-evidence, target-touch, anchor and reuse clauses; the chain reverts exactly to the 05cfd92 baseline', async () => {
+  const perAgent = {};
+  for (const agentId of AGENT_IDS) { await switchTo('sbx_723be98b', agentId); perAgent[agentId] = await promptFor('sbx_723be98b'); }
+  for (const agentId of AGENT_IDS) {
+    const text = perAgent[agentId];
+    assert.equal(count25(text, NOV26.shared[0].new), 1, agentId);
+    assert.equal(text, expected26(BASE25[`L1:${agentId}`]), agentId);
+    assert.equal(revert25(text), BASE25[`L1:${agentId}`], agentId);
+  }
+  assert.deepEqual(AGENT_IDS.filter(id => perAgent[id].includes('- Exit evidence:')), ['catalyst']);
+  assert.deepEqual(AGENT_IDS.filter(id => perAgent[id].includes('event_published_at')), ['catalyst']);
+  await switchTo('sbx_723be98b', 'catalyst');
+  await switchTo('sbx_956ff9e4', 'mean-reversion');
+});
+
+test('Nov 26: the clauses say what was approved (advisory only, no expiry, daily_trend reuse only, exact publication time, call high / put low)', async () => {
+  await switchTo('sbx_723be98b', 'catalyst');
+  const text = await promptFor('sbx_723be98b');
+  for (const part of [
+    'It is an advisory arithmetic check of your own numbers: it never changes or blocks the order, so a due exit is still placed.',
+    'rule_basis "underlying_completed_5min_bar"',
+    'trigger_bar_close (stop, trail, invalidation) or trigger_bar_high for a call target or trigger_bar_low for a put target',
+    "A call's underlying target is touched when a completed 5-minute bar's high reaches or exceeds the level, and a put's when a bar's low reaches or falls below it.",
+    'This target exit happens once per position',
+    'use the exact publication time, seconds kept, for news published during the session, and the session open for news published before it',
+    'Use a REJECTED daily_trend note from the carry-forward block only under this rule (same symbol, direction, event, data-as-of date and failed values), never for any other gate or check.',
+  ]) assert.ok(text.includes(part), part.slice(0, 70));
+  const shared = NOV26.shared[0].new.slice(NOV26.shared[0].old.length);
+  assert.match(shared, /it is not market or broker data, so verify with live tools before acting/);
+  assert.match(shared, /Finish its PENDING names before repeating research/);
+  assert.doesNotMatch(shared + NOV26.catalyst.map(e => e.new).join(' '), /expire|expiry|deadline|minutes? old|stale after/i, 'no candidate expiry anywhere');
+  // the Nov 25 reuse rule stays the owner of rejection reuse
+  assert.match(text, /- Reusing a rejection: within one session you may reuse an earlier rejection only when it rests on a completed-daily-bar trend verdict whose inputs are unchanged/);
+});
+
+test('Nov 26: the delta manifest names only the two approved source files, has distinct anchors, and every catalyst anchor exists once in the Nov 25 catalyst render', () => {
+  const entries = [...NOV26.shared, ...NOV26.catalyst];
+  for (const e of entries) assert.ok(['agent/harness.js', 'agent/trading-guidance.js'].includes(e.file), e.file);
+  assert.equal(new Set(entries.map(e => e.old)).size, entries.length);
+  const base = expected25(BASE25['L1:catalyst']);
+  for (const e of entries) assert.equal(count25(base, e.old), 1, e.old.slice(0, 60));
+  for (const e of NOV26.shared) assert.equal(count25(expected25(BASE25['L1:default']), e.old), 1);
+});
+

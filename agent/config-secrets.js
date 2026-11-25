@@ -210,6 +210,30 @@ export function referenceStatusAgainst(raw, store) {
   return missing ? { ok: false, reason: 'keys_missing', markers, missing } : { ok: true, markers, missing: 0 };
 }
 
+/**
+ * PURE structural acceptance of a parsed config and (optionally) private store, matching what the loader needs before it can normalize them (no global state, no environment,
+ * nothing is read or changed). Legitimate legacy omissions stay valid: no `accounts`, no `sandboxes`, null or absent optional sections. Rejected: a root that is not a plain
+ * object, `accounts` that is not a list, an account entry that is not an object, `sandboxes` that is not a plain object, a sandbox entry that is neither null nor an object, and
+ * a private store that is present but not a plain object (with an `accounts` / `alphadesk` section that is not a plain object). Returns { ok, reason }.
+ */
+export function structureStatusOf(raw, store) {
+  const plain = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (!plain(raw)) return { ok: false, reason: 'config_not_an_object' };
+  if (raw.accounts) {
+    if (!Array.isArray(raw.accounts)) return { ok: false, reason: 'accounts_not_a_list' };
+    if (raw.accounts.some(account => !plain(account))) return { ok: false, reason: 'account_entry_invalid' };
+  }
+  if (raw.sandboxes) {
+    if (!plain(raw.sandboxes)) return { ok: false, reason: 'sandboxes_not_an_object' };
+    if (Object.values(raw.sandboxes).some(sandbox => sandbox !== null && sandbox !== undefined && !plain(sandbox))) return { ok: false, reason: 'sandbox_entry_invalid' };
+  }
+  if (store !== undefined && store !== null) {
+    if (!plain(store)) return { ok: false, reason: 'store_not_an_object' };
+    for (const section of ['accounts', 'alphadesk']) if (store[section] !== undefined && store[section] !== null && !plain(store[section])) return { ok: false, reason: 'store_section_invalid' };
+  }
+  return { ok: true };
+}
+
 /** The copy of the config that is written to disk: each key replaced, in place, by a marker. */
 export function toDiskConfig(config) {
   const clone = JSON.parse(JSON.stringify(config));

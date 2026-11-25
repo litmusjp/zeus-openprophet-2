@@ -581,7 +581,7 @@ test('H2 orderUniverse: a plain array keeps its order; { head, tail } keeps a de
   assert.equal(sessionDayNumber('not a date'), 0);
 });
 
-test('H2 simulation over 12 trading weeks (holidays, a one-day-a-week gap): every tail name keeps being attempted, and the observed spread is reported honestly', async () => {
+test('H2 simulation over 60 selected weekdays (weekends and three hard-coded holidays removed; NOT an exchange calendar, early closes or provider failures): every tail name is attempted in this wide-tail case, and the observed spread is reported honestly', async () => {
   const { orderUniverse } = await import('../agent/iv-history.js');
   const tail = Array.from({ length: 28 }, (_, i) => 'T' + String(i).padStart(2, '0'));
   const head = ['SPY', 'QQQ', 'IWM', 'H1', 'H2'];
@@ -629,4 +629,37 @@ test('H2 collector: the order follows the session date, the budget and dedupe se
   assert.ok(['captured', 'done_today'].includes(restarted.status), 'a fresh process has no in-memory memory of the day');
   assert.equal(a.h.dataCalls().length, callsBefore, 'finished symbols cost no provider work');
   for (const symbol of ['AAA', 'BBB', 'CCC', 'DDD', 'EEE']) assert.equal((await a.store.read({ symbol, days: 5, nowMs: a.h.clock.t })).filter(r => r.sessionDate === '2026-11-23').length, 1, symbol);
+});
+
+// ── Hermes hardening QA N1: the H2 claim is best effort; the narrow-tail counterexample and restart/membership tests are explicit ──
+test('H2 (limit, documented): with ONE tail slot per session calendar-day rotation can leave some names at zero attempts; this is the accepted best-effort contract, not a fairness guarantee', async () => {
+  const { orderUniverse } = await import('../agent/iv-history.js');
+  const tail = Array.from({ length: 7 }, (_, i) => 'T' + i);
+  const sessions = [];
+  for (let d = Date.UTC(2026, 10, 24); sessions.length < 60; d += 86400000) {
+    const day = new Date(d), dow = day.getUTCDay(), iso = day.toISOString().slice(0, 10);
+    if (dow === 0 || dow === 6 || ['2026-11-26', '2026-12-25', '2027-01-01'].includes(iso)) continue;
+    sessions.push(iso);
+  }
+  const counts = Object.fromEntries(tail.map(s => [s, 0]));
+  for (const date of sessions) for (const s of orderUniverse({ head: ['SPY'], tail }, date, 2)) if (counts[s] !== undefined) counts[s] += 1;   // cap 2 = head + ONE tail slot
+  assert.equal(Math.min(...Object.values(counts)), 0, 'some names get nothing in this narrow case: ' + JSON.stringify(counts));
+  assert.ok(Object.values(counts).reduce((n, v) => n + v, 0) === sessions.length, 'exactly one tail name per session');
+});
+
+test('H2: a partial run followed by a restart and a membership change keeps every stored row (null rows included) once, keeps the persisted budget, and captures only what is new', async t => {
+  const calendar = { clock: { timestamp: iso(IN_WINDOW), is_open: true }, sessions: [{ date: '2026-11-23', open: '09:30', close: '16:00' }] };
+  const h = harness({ now: IN_WINDOW, calendar, universe: { head: ['AAA'], tail: ['BBB', 'CCC'] }, attemptsStart: 0 });
+  const { store, make } = await collectorFor(t, h);
+  assert.equal((await make().tick()).status, 'captured');
+  const budgetBefore = await store.readBudget('2026-11-23');
+  const callsBefore = h.dataCalls().length;
+  // a held name appears after the first run (membership change) and the process restarts
+  h.universe = async () => ({ head: ['AAA', 'NEW'], tail: ['BBB', 'CCC', 'DDD'] });
+  const restarted = new IvHistoryCollector({ store, now: () => h.clock.t, sleep: async () => {}, log: () => {}, open: h.open, universe: h.universe }, undefined);
+  await restarted.tick();
+  for (const symbol of ['AAA', 'BBB', 'CCC']) assert.equal((await store.read({ symbol, days: 5, nowMs: h.clock.t })).filter(r => r.sessionDate === '2026-11-23').length, 1, symbol + ' stays one row');
+  for (const symbol of ['NEW', 'DDD']) assert.equal((await store.read({ symbol, days: 5, nowMs: h.clock.t })).filter(r => r.sessionDate === '2026-11-23').length, 1, symbol + ' captured once');
+  assert.ok((await store.readBudget('2026-11-23')) >= budgetBefore, 'the persisted allowance is never reset');
+  assert.ok(h.dataCalls().length > callsBefore, 'only the new names cost provider work');
 });

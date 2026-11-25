@@ -116,3 +116,55 @@ test('no write, delete, move or network call exists in the module', () => {
   assert.doesNotMatch(source, /\b(writeFile|appendFile|unlink|rm\(|rmdir|rename|mkdir|copyFile|createWriteStream|fetch\(|axios|http\.)/);
   assert.doesNotMatch(source, /readFile\(/, 'contents are never read');
 });
+
+// ── Hermes hardening QA H4-01: the FIRST response and the filesystem enumeration are bounded even when I/O stalls ──────────────────
+const never = () => new Promise(() => {});
+
+test('H4-01: a stalled FIRST scan answers pending within the bound (never a fake zero), and later requests coalesce on the one scan instead of starting more', async () => {
+  let scans = 0;
+  const view = createDataUsage({ root: 'x', firstResponseMs: 30, scan: () => { scans += 1; return never(); } });
+  const t0 = Date.now();
+  const first = await view.get();
+  assert.ok(Date.now() - t0 < 500, 'the request resolved by the first-response bound');
+  assert.equal(first.status, 'pending'); assert.equal(first.buckets, null);
+  const second = await view.get();
+  assert.equal(second.status, 'pending');
+  assert.equal(scans, 1, 'one scan stays in flight; no replacement scan is started while it is outstanding');
+});
+
+test('H4-01: a stalled root enumeration or lstat (real scanner, injected fs) is bounded the same way', async () => {
+  const stallOpen = { opendir: never, lstat: never };
+  const a = createDataUsage({ root: 'x', firstResponseMs: 30, scanOptions: { fsx: stallOpen } });
+  assert.equal((await a.get()).status, 'pending');
+  const dirent = (name, kind) => ({ name, isSymbolicLink: () => false, isDirectory: () => kind === 'd', isFile: () => kind === 'f' });
+  const stallStat = { opendir: async () => ({ async *[Symbol.asyncIterator]() { yield dirent('a.bin', 'f'); }, close: async () => {} }), lstat: never };
+  const b = createDataUsage({ root: 'x', firstResponseMs: 30, scanOptions: { fsx: stallStat } });
+  const answer = await b.get();
+  assert.equal(answer.status, 'pending'); assert.equal(answer.buckets, null);
+});
+
+test('H4-01: a very broad directory is read incrementally: the entry cap bounds what is READ, and the handle is closed', async () => {
+  let produced = 0, closed = 0;
+  const dirent = i => ({ name: 'f' + i, isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true });
+  const fsx = {
+    opendir: async () => ({ async *[Symbol.asyncIterator]() { for (let i = 0; i < 1_000_000; i += 1) { produced += 1; yield dirent(i); } }, close: async () => { closed += 1; } }),
+    lstat: async () => ({ isFile: () => true, size: 1 }),
+  };
+  const result = await scanDataRoot('x', { fsx, maxEntries: 100 });
+  assert.equal(result.partial, true);
+  assert.ok(produced <= 101, `the iterator was read only up to the cap (${produced})`);
+  assert.ok(closed >= 1, 'the directory handle was closed');
+  assert.ok(result.buckets.top_level_files.files <= 100);
+});
+
+test('H4-01: a stale snapshot is returned at once while a refresh runs, and health stays untouched', async () => {
+  let clock = 1000, release, scans = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const view = createDataUsage({ root: 'x', ttlMs: 10, now: () => clock, firstResponseMs: 50, scan: async () => { scans += 1; if (scans === 2) await gate; return { buckets: { sandboxes: { bytes: scans, files: 1 } }, partial: false }; } });
+  assert.equal((await view.get()).status, 'ok');
+  clock += 100;
+  const t0 = Date.now(); const stale = await view.get();
+  assert.ok(Date.now() - t0 < 200 && stale.stale === true && stale.buckets.sandboxes.bytes === 1);
+  release(); await new Promise(r => setTimeout(r, 10));
+  assert.equal((await view.get()).buckets.sandboxes.bytes, 2);
+});

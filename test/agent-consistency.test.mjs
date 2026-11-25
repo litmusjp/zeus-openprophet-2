@@ -575,7 +575,8 @@ test('Nov 25 H6: manifest provenance (exactly 1 shared and 5 catalyst entries, d
   const entries = [...NOV25.shared, ...NOV25.catalyst];
   for (const e of entries) {
     assert.ok(typeof e.old === 'string' && e.old.length > 20, 'non-empty anchor');
-    assert.ok(typeof e.new === 'string' && e.new.startsWith(e.old.slice(0, 10)) || e.new.length > e.old.length, 'a replacement extends or rewrites its anchor');
+    assert.equal(typeof e.new, 'string', 'the replacement is a string');
+    assert.ok(e.new.length > 0 && e.new !== e.old, 'the replacement is non-empty and differs from its anchor');
     assert.ok(['agent/harness.js', 'agent/trading-guidance.js'].includes(e.file), 'only the two approved source files: ' + e.file);
   }
   assert.equal(new Set(entries.map(e => e.old)).size, entries.length, 'anchors are distinct');

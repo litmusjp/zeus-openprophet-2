@@ -3,6 +3,10 @@
 // What it returns: aggregate LOGICAL bytes and file counts in a fixed set of buckets. What it never does: return a path or a file name, read
 // a file's contents, follow a symlink or junction, delete, move or write anything, call a provider or the broker, or throw. Platform volume
 // capacity, free space and snapshot coverage are NOT knowable from here and are not reported.
+//
+// Bounds: directories are enumerated INCREMENTALLY (opendir), so the entry cap limits what is read and retained, not just what is processed; the scan
+// has its own time, entry and depth limits; and the FIRST response never waits longer than `firstResponseMs` even when a filesystem call stalls
+// (the answer is then `pending`, never a fake zero). One scan is owned at a time: a stalled scan is not replaced by another until it actually ends.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -22,52 +26,53 @@ export async function scanDataRoot(root, { maxEntries = 200000, maxDepth = 10, m
   const buckets = emptyBuckets();
   let entries = 0;
   let partial = false;
-  let top;
-  try { top = await fsx.readdir(root, { withFileTypes: true }); } catch { return null; }
+  const stop = () => {
+    if (entries >= maxEntries || now() > deadline) { partial = true; return true; }
+    return partial;
+  };
 
-  async function walk(dir, bucket, depth) {
-    if (partial) return;
-    if (depth > maxDepth) { partial = true; return; }
-    let children;
-    try { children = await fsx.readdir(dir, { withFileTypes: true }); } catch { partial = true; return; }
-    for (const child of children) {
-      if (entries >= maxEntries || now() > deadline) { partial = true; return; }
-      entries += 1;
-      if (child.isSymbolicLink()) continue;                         // links and junctions are never followed or counted
-      const full = path.join(dir, child.name);
-      if (child.isDirectory()) { await walk(full, bucket, depth + 1); if (partial) return; continue; }
-      if (!child.isFile()) continue;
-      try {
-        const stat = await fsx.lstat(full);
-        if (!stat.isFile()) continue;
-        buckets[bucket].bytes += stat.size;
-        buckets[bucket].files += 1;
-      } catch { partial = true; }
-    }
+  async function walk(dir, bucket, depth, topLevel) {
+    if (stop()) return true;
+    if (depth > maxDepth) { partial = true; return true; }
+    let handle;
+    try { handle = await fsx.opendir(dir); } catch { if (topLevel) return null; partial = true; return true; }
+    try {
+      for await (const child of handle) {                           // one directory entry at a time: the cap bounds what is READ
+        if (stop()) break;
+        entries += 1;
+        if (child.isSymbolicLink()) continue;                       // links and junctions are never followed or counted
+        const full = path.join(dir, child.name);
+        if (child.isDirectory()) {
+          if (topLevel) await walk(full, BUCKETS.get(child.name) || 'other', depth + 1, false);
+          else await walk(full, bucket, depth + 1, false);
+          if (partial) break;
+        } else if (child.isFile()) {
+          try {
+            const stat = await fsx.lstat(full);
+            if (stat.isFile()) {
+              const into = topLevel ? 'top_level_files' : bucket;
+              buckets[into].bytes += stat.size;
+              buckets[into].files += 1;
+            }
+          } catch { partial = true; }
+        }
+      }
+    } catch { partial = true; }
+    finally { try { await handle.close(); } catch { /* already closed by the iterator */ } }
+    return true;
   }
 
-  for (const child of top) {
-    if (entries >= maxEntries || now() > deadline) { partial = true; break; }
-    entries += 1;
-    if (child.isSymbolicLink()) continue;
-    const full = path.join(root, child.name);
-    if (child.isDirectory()) await walk(full, BUCKETS.get(child.name) || 'other', 1);
-    else if (child.isFile()) {
-      try {
-        const stat = await fsx.lstat(full);
-        if (stat.isFile()) { buckets.top_level_files.bytes += stat.size; buckets.top_level_files.files += 1; }
-      } catch { partial = true; }
-    }
-    if (partial && (entries >= maxEntries || now() > deadline)) break;
-  }
+  const ok = await walk(root, null, 0, true);
+  if (ok === null) return null;
   return { buckets, partial };
 }
 
 /**
- * A cached view of scanDataRoot. The first call waits for one bounded scan; later calls return the cached snapshot at once and start at most ONE
- * background refresh when it is older than ttlMs. A failed scan never throws and never reads as 0.
+ * A cached view of scanDataRoot. The first call waits at most `firstResponseMs` for the single in-flight scan and otherwise answers `pending`;
+ * later calls return the cached snapshot at once and start at most ONE background refresh when it is older than ttlMs. A failed or stalled scan
+ * never throws, never reads as 0 and is never replaced by a second concurrent scan.
  */
-export function createDataUsage({ root, ttlMs = 10 * 60 * 1000, now = Date.now, scan = scanDataRoot, scanOptions = {} } = {}) {
+export function createDataUsage({ root, ttlMs = 10 * 60 * 1000, firstResponseMs = 2000, now = Date.now, scan = scanDataRoot, scanOptions = {} } = {}) {
   let snapshot = null;      // { at, result }
   let inflight = null;
 
@@ -86,13 +91,21 @@ export function createDataUsage({ root, ttlMs = 10 * 60 * 1000, now = Date.now, 
     if (!snap || !snap.result) return { status: 'unavailable', scannedAt: snap ? new Date(snap.at).toISOString() : null, stale, partial: false, buckets: null };
     return { status: snap.result.partial ? 'partial' : 'ok', scannedAt: new Date(snap.at).toISOString(), stale, partial: snap.result.partial, buckets: snap.result.buckets };
   };
+  const pending = { status: 'pending', scannedAt: null, stale: false, partial: false, buckets: null };
 
   return {
     async get() {
-      if (!snapshot) return shape(await refresh(), false);
-      const stale = now() - snapshot.at > ttlMs;
-      if (stale) refresh();                                             // background; the cached answer is returned immediately
-      return shape(snapshot, stale);
+      if (snapshot) {
+        const stale = now() - snapshot.at > ttlMs;
+        if (stale) refresh();                                         // background; the cached answer is returned immediately
+        return shape(snapshot, stale);
+      }
+      const task = refresh();
+      let timer;
+      const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(null), firstResponseMs); });
+      const outcome = await Promise.race([task, timeout]);
+      clearTimeout(timer);
+      return outcome ? shape(outcome, false) : pending;
     },
   };
 }

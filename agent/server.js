@@ -2330,7 +2330,7 @@ const ivCollector = new IvHistoryCollector({
       } catch { /* a slot whose backend cannot be read simply adds no held names */ }
     }
     const lists = ['catalyst', 'default', 'mean-reversion'].flatMap(id => parseStartList(getAgentById(id)?.customSystemPrompt));
-    return ['SPY', 'QQQ', 'IWM', ...held, ...lists];
+    return { head: ['SPY', 'QQQ', 'IWM', ...held], tail: lists };   // the tail rotates by session date (orderUniverse)
   },
 });
 app.get('/api/iv-history', createIvHistoryHandler(ivStore));

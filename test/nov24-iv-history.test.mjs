@@ -557,3 +557,76 @@ test('C3: running clears after success, a failed calendar read and an outside-wi
   assert.equal((await c2.tick()).status, 'outside_window');
   assert.equal(c2.running, false);
 });
+
+// Nov 25 H2 (Hermes broad plan R2): the universe tail rotates by the New York session date AFTER a stable head and BEFORE the unchanged cap and budget.
+test('H2 orderUniverse: a plain array keeps its order; { head, tail } keeps a deduped head first and rotates only the tail; the cap is applied last', async () => {
+  const { orderUniverse, sessionDayNumber } = await import('../agent/iv-history.js');
+  assert.deepEqual(orderUniverse(['b', 'a', 'B'], '2026-11-24', 30), ['B', 'A'], 'an array is only normalised, deduped and capped');
+  const source = { head: ['SPY', 'QQQ', 'IWM', 'dis', 'SPY'], tail: ['AAPL', 'DIS', 'MSFT', 'NVDA', 'AMZN', 'META'] };
+  const day1 = orderUniverse(source, '2026-11-24', 30), day2 = orderUniverse(source, '2026-11-25', 30);
+  assert.deepEqual(day1.slice(0, 4), ['SPY', 'QQQ', 'IWM', 'DIS'], 'the head is stable, deduped and first');
+  assert.deepEqual(day2.slice(0, 4), ['SPY', 'QQQ', 'IWM', 'DIS']);
+  assert.deepEqual([...day1].sort(), [...day2].sort(), 'the eligible union is unchanged');
+  assert.equal(new Set(day1).size, day1.length, 'each name once (DIS is in the head, not repeated in the tail)');
+  assert.notDeepEqual(day1.slice(4), day2.slice(4), 'the tail order moves with the date');
+  assert.deepEqual(orderUniverse(source, '2026-11-24', 30), day1, 'the same date and input give the same order (restart safe)');
+  assert.equal(orderUniverse(source, '2026-11-24', 6).length, 6, 'the cap applies after rotation');
+  // A name beyond the cap on one date is reached on another.
+  const reached = new Set(); for (let d = 0; d < 6; d++) for (const s of orderUniverse(source, '2026-11-' + String(20 + d), 6)) reached.add(s);
+  assert.ok(['AAPL', 'MSFT', 'NVDA', 'AMZN', 'META'].every(s => reached.has(s)), 'every tail name is eventually inside the cap');
+  assert.deepEqual(orderUniverse({ head: ['SPY'], tail: [] }, '2026-11-24', 30), ['SPY']);
+  assert.deepEqual(orderUniverse({ head: ['SPY'], tail: ['AAA'] }, '2026-11-25', 30), ['SPY', 'AAA']);
+  assert.deepEqual(orderUniverse({ head: [], tail: [] }, '2026-11-24', 30), []);
+  assert.equal(sessionDayNumber('2026-11-24') + 1, sessionDayNumber('2026-11-25'));
+  assert.equal(sessionDayNumber('not a date'), 0);
+});
+
+test('H2 simulation over 12 trading weeks (holidays, a one-day-a-week gap): every tail name keeps being attempted, and the observed spread is reported honestly', async () => {
+  const { orderUniverse } = await import('../agent/iv-history.js');
+  const tail = Array.from({ length: 28 }, (_, i) => 'T' + String(i).padStart(2, '0'));
+  const head = ['SPY', 'QQQ', 'IWM', 'H1', 'H2'];
+  const attemptedSlots = 22;                                        // the day's budget reaches about this many names of the ordered list
+  const sessions = [];
+  for (let d = Date.UTC(2026, 10, 24); sessions.length < 60; d += 86400000) {
+    const day = new Date(d), dow = day.getUTCDay();
+    const iso = day.toISOString().slice(0, 10);
+    if (dow === 0 || dow === 6 || ['2026-11-26', '2026-12-25', '2027-01-01'].includes(iso)) continue;
+    sessions.push(iso);
+  }
+  const counts = Object.fromEntries(tail.map(s => [s, 0]));
+  for (const date of sessions) for (const s of orderUniverse({ head, tail }, date, 30).slice(0, attemptedSlots)) if (counts[s] !== undefined) counts[s] += 1;
+  const values = Object.values(counts);
+  const min = Math.min(...values), max = Math.max(...values);
+  const expected = sessions.length * (attemptedSlots - head.length) / tail.length;           // about 38 of 60
+  assert.ok(min > 0, 'no tail name is starved');
+  assert.ok(min >= expected * 0.5, `the least-attempted name is reached on at least half of its fair share (min ${min}, max ${max}, fair ${expected.toFixed(1)})`);
+  assert.ok(max <= expected * 1.6, `no tail name is attempted far more than its share (max ${max})`);
+  // Without rotation the last names would never be reached: the fixed order starves them completely.
+  const fixed = Object.fromEntries(tail.map(s => [s, 0]));
+  for (const date of sessions) for (const s of [...head, ...tail].slice(0, attemptedSlots)) if (fixed[s] !== undefined) fixed[s] += 1;
+  assert.equal(Math.min(...Object.values(fixed)), 0);
+});
+
+test('H2 collector: the order follows the session date, the budget and dedupe semantics are untouched, and a restart on the same date keeps the same order and never duplicates a row', async t => {
+  const calendarFor = (date, now) => ({ clock: { timestamp: iso(now), is_open: true }, sessions: [{ date, open: '09:30', close: '16:00' }] });
+  const quoteOrder = h => h.calls.filter(c => c.path.startsWith('/api/v1/market/quote/')).map(c => c.path.split('/').pop());
+  const universe = { head: ['AAA'], tail: ['BBB', 'CCC', 'DDD', 'EEE'] };
+  const run = async (dateTime, date) => {
+    const h = harness({ now: Date.parse(dateTime), universe, calendar: calendarFor(date, Date.parse(dateTime)) });
+    const { store, make, collector } = await collectorFor(t, h);
+    assert.equal((await collector.tick()).status, 'captured');
+    return { h, store, make, collector };
+  };
+  const a = await run('2026-11-23T20:46:00Z', '2026-11-23');
+  const b = await run('2026-11-24T20:46:00Z', '2026-11-24');
+  const orderA = quoteOrder(a.h), orderB = quoteOrder(b.h);
+  assert.equal(orderA[0], 'AAA'); assert.equal(orderB[0], 'AAA');
+  assert.deepEqual([...orderA].sort(), [...orderB].sort());
+  assert.notDeepEqual(orderA, orderB, 'the tail order moves from one session to the next');
+  // restart on the same date: the stored rows dedupe, nothing is captured twice, and no new provider work is done for finished symbols
+  const callsBefore = a.h.dataCalls().length;
+  const restarted = await a.make().tick();
+  assert.ok(['captured', 'done_today'].includes(restarted.status), 'a fresh process has no in-memory memory of the day');
+  assert.equal(a.h.dataCalls().length, callsBefore, 'finished symbols cost no provider work');
+  for (const symbol of ['AAA', 'BBB', 'CCC', 'DDD', 'EEE']) assert.equal((await a.store.read({ symbol, days: 5, nowMs: a.h.clock.t })).filter(r => r.sessionDate === '2026-11-23').length, 1, symbol);
+});

@@ -265,6 +265,30 @@ class Stop extends Error { constructor(reason) { super(reason); this.reason = re
  *   store, now(), sleep(ms), log(msg)
  * The calendar is read through open().get as well. Reads only; no order, permission or heartbeat path is ever used.
  */
+/** Whole days since 1970-01-01 of a YYYY-MM-DD session date (pure; the same New York session date the collector already holds). */
+export function sessionDayNumber(sessionDate) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(sessionDate));
+  if (!m) return 0;
+  return Math.floor(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86400000);
+}
+
+/**
+ * The symbols to capture, in capture order, before the budget applies. A plain array keeps its order (no rotation). An object
+ * { head, tail } keeps a stable head (index ETFs and held names, deduped, first) and ROTATES the tail by the session day number, so a name
+ * that the day's budget cannot reach today is reached on other sessions. The eligible union is unchanged; only the post-cap subset moves.
+ * Rotation is by calendar day number, not a guaranteed schedule (see the simulation test for the observed coverage).
+ */
+export function orderUniverse(source, sessionDate, cap) {
+  const norm = list => (Array.isArray(list) ? list : []).map(s => String(s).toUpperCase()).filter(Boolean);
+  if (Array.isArray(source)) return [...new Set(norm(source))].slice(0, cap);
+  const head = [...new Set(norm(source?.head))];
+  const seen = new Set(head);
+  const tail = [];
+  for (const symbol of norm(source?.tail)) if (!seen.has(symbol)) { seen.add(symbol); tail.push(symbol); }
+  const offset = tail.length ? sessionDayNumber(sessionDate) % tail.length : 0;
+  return [...head, ...tail.slice(offset), ...tail.slice(0, offset)].slice(0, cap);
+}
+
 export class IvHistoryCollector {
   constructor(deps, cfg = IV_CAPTURE) {
     this.deps = deps;
@@ -314,7 +338,7 @@ export class IvHistoryCollector {
     // If the provider-attempt counter cannot be read the day cannot be bounded: collect nothing rather than assume zero.
     if (budget.start === null) return { status: 'attempts_unreadable', attempted: 0, finished: false };
     budget.last = budget.start;
-    const list = [...new Set((await universe()).map(s => String(s).toUpperCase()))].slice(0, cfg.universeCap);
+    const list = orderUniverse(await universe(), sessionDate, cfg.universeCap);
     let attempted = 0, skipped = 0, stored = 0, stopReason = null, unsettled = false;
     for (const symbol of list) {
       if (done.has(symbol)) continue;

@@ -224,3 +224,94 @@ func TestNonVIXSymbolWithoutHistoryIsNotTreatedAsFailed(t *testing.T) {
 		t.Fatalf("existing behaviour for other symbols changed: %+v %v", q, err)
 	}
 }
+
+// B01: a malformed or non-positive ^VIX row must never appear in the history, let alone as a completed close.
+func TestVIXDropsInvalidRowsBesideValidOnes(t *testing.T) {
+	marketTime := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	// eleven valid completed sessions: the least Barometer needs
+	dates := []string{"2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19", "2026-11-20", "2026-11-23", "2026-11-24"}
+	closes := []string{"17.1", "17.2", "17.3", "17.4", "17.5", "17.6", "17.7", "17.8", "17.9", "18.1", "18.2"}
+	stamp := func(date string) string {
+		day, _ := time.Parse("2006-01-02", date)
+		return fmtInt(day.Add(14*time.Hour + 30*time.Minute).Unix())
+	}
+	good := stamp("2026-11-25")
+	for name, bad := range map[string]struct{ ts, close string }{
+		"zero close":           {good, "0"},
+		"negative close":       {good, "-2.5"},
+		"close rounds to zero": {good, "0.004"},
+		"huge close":           {good, "1e300"},
+		"string close":         {good, `"not-a-number"`},
+		"numeric string close": {good, `"19.5"`},
+		"boolean close":        {good, "true"},
+		"object close":         {good, "{}"},
+		"null close":           {good, "null"},
+		"string timestamp":     {`"not-a-number"`, "17"},
+		"null timestamp":       {"null", "17"},
+		"zero timestamp":       {"0", "17"},
+		"negative timestamp":   {"-86400", "17"},
+		"tiny timestamp":       {"17", "17"},
+		"millisecond stamp":    {good + "000", "17"},
+		"fractional timestamp": {good + ".5", "17"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stamps := make([]string, 0, 12)
+			values := make([]string, 0, 12)
+			for i, date := range dates {
+				stamps, values = append(stamps, stamp(date)), append(values, closes[i])
+				if i == 5 { // the bad row sits among the valid ones
+					stamps, values = append(stamps, bad.ts), append(values, bad.close)
+				}
+			}
+			body := `{"chart":{"result":[{"meta":{"regularMarketPrice":18.2,"regularMarketTime":` + fmtInt(marketTime.Unix()) +
+				`,"exchangeTimezoneName":"America/Chicago"},"timestamp":[` + strings.Join(stamps, ",") +
+				`],"indicators":{"quote":[{"close":[` + strings.Join(values, ",") + `]}]}}],"error":null}}`
+			s, _ := newVIXFixture(marketTime, body)
+			q, err := s.fetchYFQuote("^VIX", "VIX")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(q.History) != len(dates) {
+				t.Fatalf("history must hold only the %d valid rows, got %d: %+v", len(dates), len(q.History), q.History)
+			}
+			for i, bar := range q.History {
+				if bar.Date != dates[i] || bar.Close <= 0 || bar.Complete == nil || !*bar.Complete {
+					t.Fatalf("row %d = %+v, want a complete positive close dated %s", i, bar, dates[i])
+				}
+			}
+		})
+	}
+}
+
+func TestVIXWithOnlyInvalidRowsIsUnavailable(t *testing.T) {
+	marketTime := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	for name, closes := range map[string]string{
+		"all zero or negative": `0,-1`,
+		"all wrong type":       `"a",true`,
+		"all round to zero":    `0.001,0.009`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, transport := newVIXFixture(marketTime, yahooBody(marketTime, []string{"2026-11-24", "2026-11-25"}, `18.5,19.5`))
+			transport.bodies["^VIX"] = yahooBody(marketTime, []string{"2026-11-24", "2026-11-25"}, closes)
+			briefing, err := s.GetYFinanceBriefing()
+			if err != nil || len(briefing.Volatility) != 0 || !reflect.DeepEqual(briefing.Unavailable, []string{"^VIX"}) {
+				t.Fatalf("volatility=%+v unavailable=%v err=%v", briefing.Volatility, briefing.Unavailable, err)
+			}
+		})
+	}
+}
+
+// The new validation is for ^VIX only: other symbols keep their previous output for the same rows.
+func TestNonVIXHistoryIsNotFiltered(t *testing.T) {
+	marketTime := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	s, _ := newVIXFixture(marketTime, yahooBody(marketTime, []string{"2026-11-23", "2026-11-24", "2026-11-25"}, `0,-2.5,"x"`))
+	q, err := s.fetchYFQuote("SPY", "S&P 500")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(q.History)
+	want := `[{"date":"2026-11-23","close":0},{"date":"2026-11-24","close":-2.5},{"date":"2026-11-25","close":0}]`
+	if string(raw) != want {
+		t.Fatalf("history = %s, want %s", raw, want)
+	}
+}

@@ -398,6 +398,23 @@ func yfDailyBarComplete(date string, now time.Time, newYork *time.Location) bool
 	return !local.Before(time.Date(local.Year(), local.Month(), local.Day(), 16, 15, 0, 0, newYork))
 }
 
+// yfVIXBar turns one raw ^VIX observation into a history entry, or rejects it. The timestamp must be a whole number of
+// seconds from 2000 onwards and before 2100 (this refuses text, zero and millisecond values), and the close must be a
+// number that is still above zero after the two-decimal rounding. Nothing is defaulted: a bad row is left out.
+func yfVIXBar(rawTime, rawClose interface{}, zone *time.Location) (YFBar, bool) {
+	const minStamp, maxStamp = 946684800, 4102444800 // 2000-01-01 and 2100-01-01 UTC
+	stamp, stampOK := rawTime.(float64)
+	closeValue, closeOK := rawClose.(float64)
+	if !stampOK || !closeOK || stamp < minStamp || stamp >= maxStamp || stamp != float64(int64(stamp)) || closeValue <= 0 || closeValue >= 1e6 {
+		return YFBar{}, false
+	}
+	rounded := float64(int(closeValue*100)) / 100
+	if rounded <= 0 {
+		return YFBar{}, false
+	}
+	return YFBar{Date: time.Unix(int64(stamp), 0).In(zone).Format("2006-01-02"), Close: rounded}, true
+}
+
 // Yahoo Finance symbol groups
 var yfSymbols = map[string]map[string]string{
 	"indexes": {
@@ -535,6 +552,12 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 				closes, _ := q["close"].([]interface{})
 				for i, ts := range timestamps {
 					if i < len(closes) && closes[i] != nil {
+						if symbol == yfVIXSymbol {
+							if bar, ok := yfVIXBar(ts, closes[i], zone); ok {
+								history = append(history, bar)
+							}
+							continue
+						}
 						tsFloat, _ := ts.(float64)
 						closeFloat, _ := closes[i].(float64)
 						t := time.Unix(int64(tsFloat), 0)
@@ -553,13 +576,11 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 		if nyErr != nil {
 			newYork = nil
 		}
-		usable := false
 		for i := range history {
 			complete := yfDailyBarComplete(history[i].Date, requestedAt, newYork)
 			history[i].Complete = &complete
-			usable = usable || history[i].Close > 0
 		}
-		if !usable {
+		if len(history) == 0 {
 			return nil, fmt.Errorf("no usable history for %s", symbol)
 		}
 	}

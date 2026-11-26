@@ -210,3 +210,24 @@ func TestResponsesReportTheFeedThatServedTheBars(t *testing.T) {
 		t.Fatalf("iex response = %v", bars)
 	}
 }
+
+type windowBars struct {
+	*featureBars
+	start, end time.Time
+}
+
+func (w *windowBars) GetHistoricalBars(ctx context.Context, symbol string, start, end time.Time, timeframe string) ([]*interfaces.Bar, error) {
+	w.start, w.end = start, end
+	return w.featureBars.GetHistoricalBars(ctx, symbol, start, end, timeframe)
+}
+
+func TestDailyFeaturesRequestsEnoughHistoryForSMA200(t *testing.T) {
+	data := &windowBars{featureBars: &featureBars{recordingBars: &recordingBars{}}}
+	recorder, _ := getJSON(t, NewOrderController(nil, data, nil).HandleGetDailyFeatures, "/x?symbols=SPY", nil)
+	if recorder.Code != 200 {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := data.end.Sub(data.start); got != 420*24*time.Hour {
+		t.Fatalf("requested window = %v, want 420 days", got)
+	}
+}

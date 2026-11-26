@@ -18,7 +18,7 @@ const (
 	maxEarningsSymbols = 30
 	maxEarningsDays    = 30
 	featureConcurrency = 6
-	featureLookback    = 100 * 24 * time.Hour // ~70 trading sessions
+	featureLookback    = 420 * 24 * time.Hour // calendar days: ~285 trading sessions, so the 200 completed bars of sma200 are covered with margin
 )
 
 var symbolPattern = regexp.MustCompile(`^[A-Z][A-Z0-9.\-]{0,5}$`)

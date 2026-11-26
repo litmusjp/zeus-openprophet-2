@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -201,5 +202,71 @@ func TestBrokenGroupBlocksNewSpreadEntriesButNotSingleLegTrading(t *testing.T) {
 	// Once the group is resolved (no longer returned), spread entries resume automatically.
 	if _, err := spreadPolicy("bull_call_debit,long_call,long_put").ValidateOptionsOrder(bullCallOpen(), spreadSnapshot()); err != nil {
 		t.Fatalf("spread entries must resume once nothing is broken: %v", err)
+	}
+}
+
+// One leg disappears with no stock change and no resolver order: a single pass records the surviving leg as detached and
+// closes the group although that leg is still held, and the real ledger then stops listing the group.
+func TestReconcileOneLegGoneWithNoStockClosesTheGroupInOnePass(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		held           *interfaces.Position
+		survivor, gone string
+	}{
+		{"short leg gone, long leg still held", optPos(callLow, 2), callLow, callHigh},
+		{"long leg gone, short leg still held", optPos(callHigh, -2), callHigh, callLow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			intact := []*interfaces.Position{optPos(callLow, 2), optPos(callHigh, -2)}
+			store := &memGroupStore{states: []database.OptionGroupState{callSpreadState(2)}}
+			report, err := ReconcileOptionGroups(store, intact)
+			if err != nil || len(report.Findings) != 0 || len(store.saved) != 0 {
+				t.Fatalf("the group must start intact: report=%+v saved=%v err=%v", report, store.saved, err)
+			}
+			report, err = ReconcileOptionGroups(store, []*interfaces.Position{tc.held})
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := store.saved["gc"]
+			if saved == nil || saved.Status != "closed" || saved.ResolverClientID != "" {
+				t.Fatalf("saved group = %+v", saved)
+			}
+			if !strings.Contains(saved.DetachedLegsJSON, tc.survivor) || strings.Contains(saved.DetachedLegsJSON, tc.gone) {
+				t.Fatalf("only the surviving leg may be detached, got %s", saved.DetachedLegsJSON)
+			}
+			if len(report.ClosedWithoutStock) != 1 || report.ClosedWithoutStock[0] != "gc" || len(report.NewlyBroken) != 1 ||
+				len(report.NeedsResolver) != 0 || len(report.Unresolved) != 0 || len(report.Waiting) != 0 {
+				t.Fatalf("report = %+v", report)
+			}
+
+			// The same event against the real ledger.
+			storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "one-leg.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer storage.Close()
+			group := callSpreadState(2).Group
+			group.EntryClientOrderID, group.EntryUnits = "gc-entry", 2
+			if err := storage.SaveOptionGroup(group); err != nil {
+				t.Fatal(err)
+			}
+			if err := storage.SaveOrder(&interfaces.Order{ClientOrderID: "gc-entry", Symbol: callLow, Underlying: "AAPL", AssetClass: "us_option", Qty: 2, FilledQty: 2, Side: "buy", Type: "limit", TimeInForce: "day", Status: "filled"}); err != nil {
+				t.Fatal(err)
+			}
+			if states, err := storage.OptionGroupStates(); err != nil || len(states) != 1 || states[0].OpenUnits != 2 {
+				t.Fatalf("before: states=%+v err=%v", states, err)
+			}
+			report, err = ReconcileOptionGroups(storage, []*interfaces.Position{tc.held})
+			if err != nil || len(report.ClosedWithoutStock) != 1 {
+				t.Fatalf("real ledger: report=%+v err=%v", report, err)
+			}
+			closed, err := storage.GetOptionGroup("gc")
+			if err != nil || closed.Status != "closed" || !strings.Contains(closed.DetachedLegsJSON, tc.survivor) || strings.Contains(closed.DetachedLegsJSON, tc.gone) {
+				t.Fatalf("real ledger: group=%+v err=%v", closed, err)
+			}
+			if states, err := storage.OptionGroupStates(); err != nil || len(states) != 0 {
+				t.Fatalf("a closed group must no longer be returned: states=%+v err=%v", states, err)
+			}
+		})
 	}
 }

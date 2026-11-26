@@ -1,7 +1,10 @@
 package services
 
 import (
+	"encoding/json"
 	"math"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,5 +153,96 @@ func TestCompletedDailyBarsDropsFormingBar(t *testing.T) {
 	}
 	if got := CompletedDailyBars(bars, time.Date(2026, 11, 3, 16, 5, 0, 0, loc), loc); len(got) != 2 {
 		t.Fatalf("after close should keep both, got %d", len(got))
+	}
+}
+
+const sma200Note = "fewer than 200 completed bars: sma200 and last_close_vs_sma200_pct are omitted"
+
+func countNote(notes []string, want string) int {
+	n := 0
+	for _, note := range notes {
+		if note == want {
+			n++
+		}
+	}
+	return n
+}
+
+func TestComputeDailyFeaturesSMA200(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	// closes are 100.5+i. 200 bars: mean = 100.5+99.5 = 200, last 299.5. 250 bars: mean of i=50..249 = 250, last 349.5.
+	for _, tc := range []struct {
+		count     int
+		sma, dist float64
+	}{{200, 200, 49.75}, {250, 250, 39.8}} {
+		got := ComputeDailyFeatures("TEST", syntheticBars(loc, tc.count), loc)
+		if got.SMA200 == nil || got.CloseVsSMA200Pct == nil || *got.SMA200 != tc.sma || *got.CloseVsSMA200Pct != tc.dist {
+			t.Fatalf("%d bars: sma200=%v distance=%v", tc.count, got.SMA200, got.CloseVsSMA200Pct)
+		}
+		if countNote(got.Notes, sma200Note) != 0 {
+			t.Fatalf("%d bars must not carry the short-history note: %v", tc.count, got.Notes)
+		}
+		if got.CompleteBars != tc.count || len(got.Recent) != 5 {
+			t.Fatalf("%d bars: complete=%d recent=%d", tc.count, got.CompleteBars, len(got.Recent))
+		}
+		raw, _ := json.Marshal(got)
+		if !strings.Contains(string(raw), `"sma200":`) || !strings.Contains(string(raw), `"last_close_vs_sma200_pct":`) {
+			t.Fatalf("JSON names missing: %s", raw)
+		}
+	}
+	// four-decimal rounding: mean = (199*100 + 103.5)/200 = 100.0175; distance = 3.48189... -> 3.4819
+	got := ComputeDailyFeatures("R", flatBars(loc, 200, interfaces.Bar{Open: 103, High: 105, Low: 102, Close: 103.5, Volume: 2000}), loc)
+	if got.SMA200 == nil || *got.SMA200 != 100.0175 || *got.CloseVsSMA200Pct != 3.4819 {
+		t.Fatalf("rounded = %v / %v", got.SMA200, got.CloseVsSMA200Pct)
+	}
+}
+
+func TestComputeDailyFeaturesSMA200OmittedBelow200Bars(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	for _, count := range []int{1, 24, 30, 199} {
+		got := ComputeDailyFeatures("TEST", syntheticBars(loc, count), loc)
+		if got.SMA200 != nil || got.CloseVsSMA200Pct != nil {
+			t.Fatalf("%d bars must omit sma200: %v / %v", count, got.SMA200, got.CloseVsSMA200Pct)
+		}
+		if countNote(got.Notes, sma200Note) != 1 {
+			t.Fatalf("%d bars need exactly one note: %v", count, got.Notes)
+		}
+		raw, _ := json.Marshal(got)
+		if strings.Contains(string(raw), `"sma200":`) || strings.Contains(string(raw), `"last_close_vs_sma200_pct":`) {
+			t.Fatalf("%d bars: keys must be absent: %s", count, raw)
+		}
+	}
+}
+
+func TestComputeDailyFeaturesExistingFieldsIgnoreOlderHistory(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	long := syntheticBars(loc, 290)
+	// Make the older history wildly different: any leak into a shorter window would show.
+	for _, bar := range long[:220] {
+		bar.Open, bar.High, bar.Low, bar.Close, bar.Volume = 9000, 9999, 1, 9000, 99999999
+	}
+	facts := func(bars []*interfaces.Bar) map[string]any {
+		raw, _ := json.Marshal(ComputeDailyFeatures("TEST", bars, loc))
+		out := map[string]any{}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"complete_bars", "sma200", "last_close_vs_sma200_pct", "notes"} {
+			delete(out, key)
+		}
+		return out
+	}
+	short, full := facts(long[len(long)-70:]), facts(long)
+	if !reflect.DeepEqual(short, full) {
+		t.Fatalf("existing fields changed with older history:\n70 bars: %v\n290 bars: %v", short, full)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -14,6 +15,7 @@ import (
 // Inspired by github.com/calesthio/Crucix — all sources are free, no API key required
 type EconomicFeedsService struct {
 	httpClient *http.Client
+	clock      func() time.Time // nil means time.Now; replaced in tests
 }
 
 type FeedAvailabilityError struct {
@@ -364,6 +366,8 @@ type YFQuote struct {
 type YFBar struct {
 	Date  string  `json:"date"`
 	Close float64 `json:"close"`
+	// Complete is set only on ^VIX entries; nil (omitted from JSON) for every other symbol.
+	Complete *bool `json:"complete,omitempty"`
 }
 
 // YFBriefing is the combined Yahoo Finance market snapshot
@@ -375,6 +379,23 @@ type YFBriefing struct {
 	Commodities []YFQuote `json:"commodities"`
 	Crypto      []YFQuote `json:"crypto"`
 	Volatility  []YFQuote `json:"volatility"`
+	Unavailable []string  `json:"unavailable,omitempty"` // symbols whose fetch failed or was unusable
+}
+
+// yfVIXSymbol alone gets a longer daily history, with a completeness flag on each entry.
+const yfVIXSymbol = "^VIX"
+
+// yfDailyBarComplete says whether a daily history entry (YYYY-MM-DD) is final at now, in New York: earlier dates are,
+// today is from 16:15, later dates are not. Without the New York zone nothing is marked complete.
+func yfDailyBarComplete(date string, now time.Time, newYork *time.Location) bool {
+	if newYork == nil {
+		return false
+	}
+	local := now.In(newYork)
+	if today := local.Format("2006-01-02"); date != today {
+		return date < today
+	}
+	return !local.Before(time.Date(local.Year(), local.Month(), local.Day(), 16, 15, 0, 0, newYork))
 }
 
 // Yahoo Finance symbol groups
@@ -417,6 +438,7 @@ func (s *EconomicFeedsService) GetYFinanceBriefing() (*YFBriefing, error) {
 		for symbol, name := range symbols {
 			quote, err := s.fetchYFQuote(symbol, name)
 			if err != nil {
+				briefing.Unavailable = append(briefing.Unavailable, symbol)
 				continue
 			}
 			switch group {
@@ -433,12 +455,23 @@ func (s *EconomicFeedsService) GetYFinanceBriefing() (*YFBriefing, error) {
 			}
 		}
 	}
+	sort.Strings(briefing.Unavailable)
 
 	return briefing, nil
 }
 
 func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, error) {
-	apiURL := fmt.Sprintf("https://query1.finance.yahoo.com/v8/finance/chart/%s?range=5d&interval=1d&includePrePost=false", url.PathEscape(symbol))
+	historyRange := "5d"
+	if symbol == yfVIXSymbol {
+		historyRange = "3mo"
+	}
+	// Read the clock before the request, so a reply fetched before 16:15 is never marked complete after it.
+	clock := s.clock
+	if clock == nil {
+		clock = time.Now
+	}
+	requestedAt := clock()
+	apiURL := fmt.Sprintf("https://query1.finance.yahoo.com/v8/finance/chart/%s?range=%s&interval=1d&includePrePost=false", url.PathEscape(symbol), historyRange)
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -491,7 +524,7 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 		marketDate = marketTime.In(zone).Format("2006-01-02")
 	}
 
-	// Build 5-day history
+	// Build daily history (5 days; about 3 months for ^VIX)
 	var history []YFBar
 	if timestamps, ok := result["timestamp"].([]interface{}); ok {
 		indicators, _ := result["indicators"].(map[string]interface{})
@@ -512,6 +545,22 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 					}
 				}
 			}
+		}
+	}
+
+	if symbol == yfVIXSymbol {
+		newYork, nyErr := time.LoadLocation("America/New_York")
+		if nyErr != nil {
+			newYork = nil
+		}
+		usable := false
+		for i := range history {
+			complete := yfDailyBarComplete(history[i].Date, requestedAt, newYork)
+			history[i].Complete = &complete
+			usable = usable || history[i].Close > 0
+		}
+		if !usable {
+			return nil, fmt.Errorf("no usable history for %s", symbol)
 		}
 	}
 

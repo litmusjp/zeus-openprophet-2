@@ -250,7 +250,7 @@ export function renderTradingGuidance(guidance = DEFAULT_TRADING_GUIDANCE, optio
   }
   lines.push(
     family === 'catalyst' ? CATALYST_CONTRACT(g)
-      : family === 'long-vol' ? DIRECTIONAL_CONTRACT(g)
+      : family === 'long-vol' || family === 'unknown' ? DIRECTIONAL_CONTRACT(g)
         : family === 'prophet' ? PROPHET_CONTRACT(g)
           : CALLS_ONLY_CONTRACT(g),
   );

@@ -30,6 +30,8 @@ type DailyFeatures struct {
 	SMA20            *float64       `json:"sma20,omitempty"`
 	SMA20Slope5Pct   *float64       `json:"sma20_slope_5_sessions_pct,omitempty"`
 	CloseVsSMA20Pct  *float64       `json:"last_close_vs_sma20_pct,omitempty"`
+	SMA200           *float64       `json:"sma200,omitempty"`
+	CloseVsSMA200Pct *float64       `json:"last_close_vs_sma200_pct,omitempty"`
 	High10Prior      *float64       `json:"high_prior_10_sessions,omitempty"`
 	Low10Prior       *float64       `json:"low_prior_10_sessions,omitempty"`
 	High20Prior      *float64       `json:"high_prior_20_sessions,omitempty"`
@@ -114,6 +116,11 @@ func ComputeDailyFeatures(symbol string, completed []*interfaces.Bar, loc *time.
 			}
 		}
 	}
+	if n >= 200 {
+		sma := meanClose(completed[n-200:])
+		out.SMA200 = roundedPtr(sma)
+		out.CloseVsSMA200Pct = roundedPtr((last.Close/sma - 1) * 100)
+	}
 	if n >= 11 {
 		high, low := highLow(completed[n-11 : n-1])
 		out.High10Prior, out.Low10Prior = roundedPtr(high), roundedPtr(low)
@@ -143,6 +150,9 @@ func ComputeDailyFeatures(symbol string, completed []*interfaces.Bar, loc *time.
 	}
 	if n < 25 {
 		out.Notes = append(out.Notes, "fewer than 25 completed bars: longer-window fields are omitted, not estimated")
+	}
+	if n < 200 {
+		out.Notes = append(out.Notes, "fewer than 200 completed bars: sma200 and last_close_vs_sma200_pct are omitted")
 	}
 	start := n - 5
 	if start < 0 {

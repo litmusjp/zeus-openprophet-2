@@ -84,6 +84,16 @@ test('every other family preview is the previous release plus only the approved 
   for (const id of OTHERS) {
     let expected = fs.readFileSync(new URL(`./fixtures/nov20-preview-${id}.txt`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
     for (const e of DEC01.guidance) if (e.applies.includes(`guidance:${id}`)) { assert.equal(count(expected, e.old), 1, `${id} ${e.id}`); expected = expected.replace(e.old, () => e.new); }
+    // A custom (unknown) strategy now gets the approved call-or-put contract line in place of the calls-only one: swap exactly
+    // that line, taken from the pinned long-volatility preview, and still require the whole preview to match byte for byte.
+    if (id === 'unknown-x') {
+      const contractLine = text => { const found = text.split('\n').filter(l => l.startsWith('- Contract choice:')); assert.equal(found.length, 1); return found[0]; };
+      const directional = contractLine(fs.readFileSync(new URL('./fixtures/nov20-preview-long-premium-volatility.txt', import.meta.url), 'utf8').replaceAll('\r\n', '\n'));
+      const callsOnly = contractLine(expected);
+      assert.match(callsOnly, /^- Contract choice: buy calls with delta/);
+      assert.match(directional, /^- Contract choice: buy a call for a bullish thesis or a put for a bearish thesis\./);
+      expected = expected.replace(callsOnly, () => directional);
+    }
     assert.equal(render(id), expected, id);
   }
 });

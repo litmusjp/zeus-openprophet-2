@@ -41,7 +41,9 @@ test('strict validation rejects bad saves; stored bad values fall back to defaul
 
 test('rendered guidance states the values, keeps AlphaDesk mandatory, and respects switches', () => {
   const text = renderTradingGuidance();
-  assert.match(text, /delta about 0.4 to 0.7, expiring 21 to 60 calendar days/);
+  // no strategy id = a custom strategy, which gets the call-or-put contract line
+  assert.match(text, /delta magnitude of about 0.4 to 0.7 \(a put's delta is negative, so compare its absolute value\), expiring 21 to 60 calendar days/);
+  assert.doesNotMatch(text, /buy calls with delta/);
   assert.match(text, /more than 4% above the broken level/);
   assert.match(text, /SPY meets any one of: \(a\) its last completed close is no more than 0.5% below its 20-day average; \(b\) its latest price now .* is above that 20-day average; \(c\) the 5-session change of that average is -0.15% or higher/);
   assert.match(text, /"Sector supportive" \(single stocks only\) means the same test applied to the stock's sector ETF.*SMH semiconductors/);

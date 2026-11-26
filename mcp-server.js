@@ -872,7 +872,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_market_snapshot',
-        description: 'Get broad market snapshot from Yahoo Finance: indexes (SPY, QQQ, DIA, IWM), bonds, commodities (Gold, Oil), crypto (BTC, ETH), VIX. Includes 5-day history. No API key required.',
+        description: 'Get broad market snapshot from Yahoo Finance: indexes (SPY, QQQ, DIA, IWM), bonds, commodities (Gold, Oil), crypto (BTC, ETH), VIX. Includes 5-day history, except VIX, which has about 3 months of daily history with a complete flag on each entry. No API key required.',
         inputSchema: { type: 'object', properties: {} },
       },
       {
@@ -1221,7 +1221,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_daily_features',
-        description: 'Arithmetic facts about COMPLETED daily bars for up to 25 symbols in one call: last and prior-session OHLCV, SMA20 and its 5-session slope, last close vs SMA20, prior 10/20-session high and low (excluding the last bar), prior 20-session average volume and the last-volume ratio, and the last five completed bars. It also returns ready-made signed distances so you do not compute them by hand: low_vs_low_prior_20_sessions_pct (last low vs the prior 20-session low; negative means it undercut), close_vs_high_prior_10_sessions_pct and close_vs_high_prior_20_sessions_pct (last close vs those prior highs; positive means above), and the flags undercut_prior_session_low and close_above_open (strictly greater). A field is omitted when its history is missing. The session still forming is excluded. Facts only, not signals. Each symbol states its feed (sip = consolidated, preferred; iex = IEX-only, whose highs, lows and volume can differ). A symbol that fails carries its own error without failing the batch.',
+        description: 'Arithmetic facts about COMPLETED daily bars for up to 25 symbols in one call: last and prior-session OHLCV, SMA20 and its 5-session slope, last close vs SMA20, SMA200 and last close vs SMA200 (sma200 and last_close_vs_sma200_pct, from the last 200 completed bars), prior 10/20-session high and low (excluding the last bar), prior 20-session average volume and the last-volume ratio, and the last five completed bars. It also returns ready-made signed distances so you do not compute them by hand: low_vs_low_prior_20_sessions_pct (last low vs the prior 20-session low; negative means it undercut), close_vs_high_prior_10_sessions_pct and close_vs_high_prior_20_sessions_pct (last close vs those prior highs; positive means above), and the flags undercut_prior_session_low and close_above_open (strictly greater). A field is omitted when its history is missing. The session still forming is excluded. Facts only, not signals. Each symbol states its feed (sip = consolidated, preferred; iex = IEX-only, whose highs, lows and volume can differ). A symbol that fails carries its own error without failing the batch.',
         inputSchema: {
           type: 'object',
           properties: {

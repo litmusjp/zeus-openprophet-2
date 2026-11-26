@@ -122,3 +122,39 @@ test('the system prompt gives catalyst strategies the intraday operating rule, a
     assert.doesNotMatch(daily, /Catalyst setups are intraday/, strategyId);
   }
 });
+
+const contractLines = text => text.split('\n').filter(line => line.startsWith('- Contract choice:'));
+
+test('a custom (unknown) strategy gets the directional contract line, not the calls-only one', () => {
+  const directional = contractLines(renderTradingGuidance(DEFAULT_TRADING_GUIDANCE, { strategyId: 'long-premium-volatility' }));
+  assert.equal(directional.length, 1);
+  assert.match(directional[0], /^- Contract choice: buy a call for a bullish thesis or a put for a bearish thesis\./);
+  for (const strategyId of ['some-custom-strategy', undefined, '']) {
+    const text = renderTradingGuidance(DEFAULT_TRADING_GUIDANCE, { strategyId });
+    assert.deepEqual(contractLines(text), directional, String(strategyId));
+    assert.doesNotMatch(text, /buy calls with delta/, String(strategyId));
+    assert.doesNotMatch(text, /and type call\./, String(strategyId));
+  }
+});
+
+test('every known strategy keeps its own contract line', () => {
+  const callsOnly = /^- Contract choice: buy calls with delta about 0\.4 to 0\.7, .* with that expiration and type call\. /;
+  const expected = {
+    'etf-mean-reversion': callsOnly,
+    'equity-momentum': callsOnly,
+    'capital-preservation': callsOnly,
+    'long-premium-volatility': /^- Contract choice: buy a call for a bullish thesis or a put for a bearish thesis\./,
+    'catalyst-news': /^- Contract choice: buy a call for a qualified bullish reaction or a put for a qualified bearish one/,
+  };
+  for (const [strategyId, pattern] of Object.entries(expected)) {
+    const lines = contractLines(renderTradingGuidance(DEFAULT_TRADING_GUIDANCE, { strategyId }));
+    assert.equal(lines.length, 1, strategyId);
+    assert.match(lines[0], pattern, strategyId);
+  }
+  const prophet = contractLines(renderTradingGuidance(DEFAULT_TRADING_GUIDANCE, { strategyId: 'default' }));
+  assert.equal(prophet.length, 1);
+  assert.doesNotMatch(prophet[0], /buy a call for a bullish thesis|buy calls with delta/);
+  for (const strategyId of ['macro-rotation', 'long-horizon-trend']) {
+    assert.deepEqual(contractLines(renderTradingGuidance(DEFAULT_TRADING_GUIDANCE, { strategyId })), [], strategyId);
+  }
+});

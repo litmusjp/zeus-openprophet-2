@@ -37,7 +37,8 @@ test('1c long gap: every options agent gets the rule once, with the setting valu
     assert.match(p, /open no new single-leg option once minutes_to_close is 120 or less/, id);
     assert.match(p, /stays within 10% of current account equity/, id);
     assert.match(p, /Debit verticals are exempt from this rule but not from any other limit\. A position above this limit is never sold because of it, and this rule never delays an exit\./, id);
-    assert.match(p, /the one exception is the long-gap test in Risk Discipline, which compares next_open with session_close_utc/, id);
+    assert.match(p, /the one exception is the long-gap test in Risk Discipline, which compares broker_clock.next_open with session_close_utc/, id);
+    assert.match(p, /during the regular session compare broker_clock.next_open with session_close_utc, both from prophet_get_datetime/, id);
     assert.match(await build(id, { tradingGuidance: { ...DEFAULT_TRADING_GUIDANCE, longGapSingleLegCapPct: 8 } }), /stays within 8% of current account equity/, id);
   }
   for (const id of SHARES) {
@@ -135,5 +136,5 @@ test('Dec 1 manifest provenance: ids, anchors, scopes, and a sha256 tripwire', (
   for (const e of m.guidance) for (const k of e.applies) assert.match(k, /^guidance:/);
   assert.equal(new Set(m.prompts.map(e => e.id)).size, 15);
   const sha = crypto.createHash('sha256').update(Buffer.from(raw, 'latin1')).digest('hex');
-  assert.equal(sha, 'b22ea8b1c376f1188f58ebf35d6702d96893c104f82c7e5029d5adccbe69e552', 'tripwire: a reviewed change to the manifest must update this in the same commit');
+  assert.equal(sha, '613b37295ed387bf6330eaf82acf5af44b0afcd4df4326aca751638151f137ed', 'tripwire: a reviewed change to the manifest must update this in the same commit');
 });

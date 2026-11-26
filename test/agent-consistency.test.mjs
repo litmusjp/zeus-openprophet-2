@@ -43,6 +43,11 @@ function applyPlan(base, edits) {
   return out;
 }
 const after = applyPlan(fx, plan);
+// Dec 1 strategy review: Prophet's swing-only breakout-retest text (the config edit planned by planDec01Edits), applied on top. The
+// rendered config below is after01; `after` stays the Nov 22 result so the Nov 22 plan tests keep proving what they proved.
+const { planDec01Edits, PROPHET_DEC01_IDENTITY, PROPHET_DEC01_UNIVERSE_BLOCK, PROPHET_DEC01_BASE_RULES, PROPHET_DEC01_PROMPT, PROPHET_DEC01_RULES } = await import('../agent/dec01-targets.js');
+const dec01Plan = planDec01Edits(clone(after));
+const after01 = applyPlan(after, { ...dec01Plan, slotClears: {}, permissions: {} });
 
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'openprophet-agent-consistency-'));
 const configPath = path.join(tempDir, 'agent-config.json');
@@ -54,9 +59,9 @@ await fs.writeFile(configPath, JSON.stringify({
   accounts: SLOT_IDS.map((sid, i) => ({ id: `acc${i + 1}`, name: `L${i + 1}`, paper: true })),
   activeAccountId: 'acc1',
   activeSandboxId: SLOT_IDS[0],
-  agents: after.agents,
-  strategies: after.strategies,
-  sandboxes: Object.fromEntries(SLOT_IDS.map((sid, i) => [sid, { id: sid, name: `L${i + 1}`, accountId: `acc${i + 1}`, agent: after.slots[sid].agent, permissions: after.perms[sid] }])),
+  agents: after01.agents,
+  strategies: after01.strategies,
+  sandboxes: Object.fromEntries(SLOT_IDS.map((sid, i) => [sid, { id: sid, name: `L${i + 1}`, accountId: `acc${i + 1}`, agent: after01.slots[sid].agent, permissions: after01.perms[sid] }])),
 }, null, 2));
 const store = await import('../agent/config-store.js?agent-consistency');
 const nodeFsSync = await import('node:fs');
@@ -125,6 +130,9 @@ const NOV25 = JSON.parse(await fs.readFile(new URL('../nov25/delta.json', FX), '
 const BASE25 = JSON.parse(await fs.readFile(new URL('../nov25/baseline-05cfd92.json', FX), 'utf8'));
 // Nov 26: the allowed delta on top of the Nov 25 chain (fixtures/nov26/delta.json). Current render = BASE25 + NOV25 delta + NOV26 delta.
 const NOV26 = JSON.parse(await fs.readFile(new URL('../nov26/delta.json', FX), 'utf8'));
+// Dec 1 (strategy review): the allowed delta on top of the Nov 26 chain (fixtures/dec01/delta.json). Each entry names the renders it applies
+// to (L1:<agent> for the 8 agents on L1, live:<slot> for the three live slots). Current render = BASE25 + NOV25 + NOV26 + DEC01.
+const DEC01 = JSON.parse(await fs.readFile(new URL('../dec01/delta.json', FX), 'utf8'));
 const count25 = (text, part) => text.split(part).length - 1;
 const forward25 = (text, entries) => { for (const e of entries) { assert.equal(count25(text, e.old), 1, e.old.slice(0, 70)); text = text.replace(e.old, () => e.new); } return text; };
 const expected25 = base => {
@@ -148,8 +156,18 @@ const revert26 = text => {
   }
   return text;
 };
+const expected01 = (base, key) => {
+  let text = expected26(base);
+  for (const e of DEC01.prompts) if (e.applies.includes(key)) { assert.equal(count25(text, e.old), 1, `${key}: ${e.old.slice(0, 70)}`); text = text.replace(e.old, () => e.new); }
+  return text;
+};
+const revert01 = (text, key) => {
+  assert.ok(typeof key === 'string' && key.includes(':'), 'revert01 needs the render key');
+  for (const e of [...DEC01.prompts].reverse()) if (e.applies.includes(key)) { assert.equal(count25(text, e.new), 1, `${key}: ${e.new.slice(0, 70)}`); text = text.replace(e.new, () => e.old); }
+  return text;
+};
 // revert25 takes a CURRENT render all the way back to the 05cfd92 baseline (Nov 26 delta first, then the Nov 25 delta)
-const revert25 = text => revertNov25(revert26(text));
+const revert25 = (text, key) => revertNov25(revert26(revert01(text, key)));
 const revertNov25 = text => {
   for (const e of NOV25.shared) { assert.equal(count25(text, e.new), 1, e.new.slice(0, 70)); text = text.replace(e.new, () => e.old); }
   const catalyst = count25(text, NOV25.catalyst[0].new) === 1;
@@ -165,8 +183,8 @@ test('Herald on L1 renders byte-identical to the live preview, apart from the ne
   const expected = withB2(withB1(goldenL1.replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups')));
   assert.notEqual(expected, goldenL1);
   const actualNow = await promptFor('sbx_723be98b');
-  assert.equal(actualNow, expected26(BASE25['live:sbx_723be98b']), 'baseline 05cfd92 plus only the approved Nov 25 and Nov 26 deltas');
-  const actual = revert25(actualNow);
+  assert.equal(actualNow, expected01(BASE25['live:sbx_723be98b'], 'live:sbx_723be98b'), 'baseline 05cfd92 plus only the approved Nov 25, Nov 26 and Dec 1 deltas');
+  const actual = revert25(actualNow, 'live:sbx_723be98b');
   assert.equal(actual, expected);
 });
 
@@ -177,28 +195,38 @@ test('Pendulum on L2 renders byte-identical to the live preview, apart from the 
   // The third allowed difference: the corrupted dash in the ETF rules is fixed (config edit C6).
   const expected = goldenL2.replace(old, l1Paragraph).replace(/^(\*\*Options\*\*: .*)$/m, '$1, prophet_get_option_groups').split('â€“').join('-');
   const actualNow = await promptFor('sbx_956ff9e4');
-  assert.equal(actualNow, expected26(BASE25['live:sbx_956ff9e4']), 'baseline 05cfd92 plus only the shared Nov 25 and Nov 26 clauses');
-  const actual = stripB1(revert25(actualNow));
+  assert.equal(actualNow, expected01(BASE25['live:sbx_956ff9e4'], 'live:sbx_956ff9e4'), 'baseline 05cfd92 plus only the shared Nov 25, Nov 26 and Dec 1 clauses');
+  const actual = stripB1(revert25(actualNow, 'live:sbx_956ff9e4'));
   assert.equal(actual, expected);
 });
 
-test('Prophet on L3 gets its restored identity, list and B2 rules, and the shared workflow between identity and list', async () => {
+test('Prophet on L3 gets its Dec 1 identity, list and swing-only rules, and the shared workflow between identity and list', async () => {
   const prompt = await promptFor('sbx_0d35471e');
-  assert.equal(prompt, expected26(BASE25['live:sbx_0d35471e']), 'baseline 05cfd92 plus only the shared Nov 25 and Nov 26 clauses');
-  assert.ok(prompt.startsWith(PROPHET_IDENTITY));
-  assert.ok(prompt.includes(PROPHET_UNIVERSE_BLOCK));
-  for (const line of PROPHET_B2_RULES.split('\n')) assert.ok(prompt.includes(line), line.slice(0, 60));
+  assert.equal(prompt, expected01(BASE25['live:sbx_0d35471e'], 'live:sbx_0d35471e'), 'baseline 05cfd92 plus only the shared Nov 25, Nov 26 and Dec 1 clauses');
+  assert.ok(prompt.startsWith(PROPHET_DEC01_IDENTITY));
+  assert.ok(prompt.includes(PROPHET_DEC01_UNIVERSE_BLOCK));
+  for (const line of PROPHET_DEC01_BASE_RULES.split('\n')) assert.ok(prompt.includes(line), line.slice(0, 60));
   assert.equal(prompt.split('### MARKET-OPEN ALPHADESK WORKFLOW').length - 1, 1);
-  assert.ok(prompt.indexOf(PROPHET_IDENTITY) < prompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW'));
+  assert.ok(prompt.indexOf(PROPHET_DEC01_IDENTITY) < prompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW'));
   assert.ok(prompt.indexOf('### MARKET-OPEN ALPHADESK WORKFLOW') < prompt.indexOf('### SCAN UNIVERSE'));
   assert.match(prompt, /Debit vertical mechanics \(your permissions allow: bull call debit and bear put debit\)/);
   assert.match(prompt, /Scan coverage: your SCAN UNIVERSE is a start list, not a limit/);
 });
 
+// Generator hook (env-guarded, never runs in CI): dumps the Nov 26 expectation and the current render for every gated key, so the
+// Dec 1 delta manifest can be produced by an explicit line diff and then reviewed. It changes nothing.
+if (process.env.DEC01_DUMP) test('DEC01 dump', async () => {
+  const out = {};
+  for (const sid of SLOT_IDS) out[`live:${sid}`] = { before: expected26(BASE25[`live:${sid}`]), after: await promptFor(sid) };
+  for (const agentId of AGENT_IDS) { await switchTo('sbx_723be98b', agentId); out[`L1:${agentId}`] = { before: expected26(BASE25[`L1:${agentId}`]), after: await promptFor('sbx_723be98b') }; }
+  await switchTo('sbx_723be98b', 'catalyst');
+  await fs.writeFile(process.env.DEC01_DUMP, JSON.stringify(out));
+});
+
 // ── 8 agents x 3 slots ──────────────────────────────────────────────────────────────────────────────────────────────
 const AGENT_IDS = after.agents.map(a => a.id);
 const FAMILY_CHECKS = {
-  default: p => assert.match(p, /Label each position a scalp or a swing at entry/),
+  default: p => { assert.match(p, /- Breakout level: for a call, the highest high of the 20 completed sessions before the breakout bar/); assert.doesNotMatch(p, /scalp/i); },
   conservative: p => { assert.match(p, /"Near support" means/); assert.doesNotMatch(p, /"Extended" means/); assert.doesNotMatch(p, /\(Used by breakout strategies/); },
   momentum: p => assert.match(p, /"Extended" means/),
   'mean-reversion': p => { assert.match(p, /"Near support" means/); assert.match(p, /"Market supportive" means/); },
@@ -221,7 +249,7 @@ for (const slot of SLOT_IDS) {
       await store.updateSandboxAgentOverrides(slot, { strategyId: 'capital-preservation', heartbeatOverrides: { midday: 999 } });
       await switchTo(slot, agentId);
 
-      const agent = after.agents.find(a => a.id === agentId);
+      const agent = after01.agents.find(a => a.id === agentId);
       const resolved = store.getResolvedAgentForSandbox(slot);
       assert.equal(resolved.id, agentId);
       assert.equal(resolved.strategyId, agent.strategyId, 'runs its own strategy, not the previous agent\'s');
@@ -243,7 +271,7 @@ for (const slot of SLOT_IDS) {
       const startLine = agent.customSystemPrompt.split('\n').find(line => line.startsWith('Start '));
       assert.ok(startLine, `${agentId} has a start list`);
       assert.ok(prompt.includes(startLine), 'its own start list');
-      const strategy = after.strategies.find(s => s.id === agent.strategyId);
+      const strategy = after01.strategies.find(s => s.id === agent.strategyId);
       assert.ok(prompt.includes(strategy.customRules.trim().split('\n')[0]), 'its own strategy rules');
       FAMILY_CHECKS[agentId](prompt);
 
@@ -259,7 +287,7 @@ for (const slot of SLOT_IDS) {
       }
       const menu = menuOf(prompt);
       assert.ok(menu.includes('prophet_get_option_groups'), 'every menu lists the group status tool');
-      assert.equal(menu.includes('prophet_get_options_quote'), agentId === 'catalyst' && fit.length > 0, 'the focused menu follows Herald only');
+      assert.equal(menu.split('prophet_get_options_quote').length - 1, 1, 'Dec 1: every menu lists the held-contract quote tool once');
       if (agentId !== 'macro-rotation' && agentId !== 'trend-follower') assert.match(prompt, /(Scan|Catalyst) coverage: /);
     });
   }
@@ -380,9 +408,15 @@ test('an open group gets the closing recipe when the slot does not list a vertic
   assert.match(await make(noVertical, async () => { throw new Error('backend unavailable'); }), /SPREAD GROUPS UNREADABLE this beat: before you manage or close any multi-leg position, call `prophet_get_option_groups`/);
 });
 
-test('every Nov 21 line of Prophet\'s start list and rules is still in the rendered prompt', async () => {
+test('every Nov 21 line of Prophet\'s start list and rules is still in the rendered prompt, except the lines Dec 1 replaced', async () => {
   const prompt = await promptFor('sbx_0d35471e');
-  for (const line of [...prophetNov21.slice(13, 19), ...prophetNov21.slice(23, 30)]) assert.ok(prompt.includes(line), line.slice(0, 70));
+  const lines = [...prophetNov21.slice(13, 19), ...prophetNov21.slice(23, 30)];
+  const replaced = lines.filter(line => !PROPHET_DEC01_PROMPT.includes(line) && !PROPHET_DEC01_RULES.includes(line));
+  // Dec 1 replaces the universe line that named scalps and the weekly trend, and the six rules lines that named scalps, fixed the delta and
+  // expiry, or were unmeasurable; the three-session exit and the rest of the start list are kept word for word.
+  assert.equal(replaced.length, 7, replaced.join(' | '));
+  assert.ok(lines.some(line => line.startsWith('- Exit a swing if no completed daily close') && prompt.includes(line)));
+  for (const line of lines) assert.equal(prompt.includes(line), !replaced.includes(line), line.slice(0, 70));
 });
 
 
@@ -395,7 +429,7 @@ test('Nov 25: all 8 agents render as the 05cfd92 baseline plus only the approved
   const live = {};
   const perAgent = {};
   for (const agentId of AGENT_IDS) { await switchTo('sbx_723be98b', agentId); perAgent[agentId] = await promptFor('sbx_723be98b'); }
-  for (const agentId of AGENT_IDS) assert.equal(perAgent[agentId], expected26(BASE25[`L1:${agentId}`]), agentId);
+  for (const agentId of AGENT_IDS) assert.equal(perAgent[agentId], expected01(BASE25[`L1:${agentId}`], `L1:${agentId}`), agentId);
   // Family follows the strategy, not the slot: only the catalyst agent renders the catalyst owners, on any slot.
   const withOwners = AGENT_IDS.filter(id => perAgent[id].includes(NOV25.catalyst[0].new));
   assert.deepEqual(withOwners, ['catalyst']);
@@ -416,7 +450,7 @@ test('Nov 25: the discovery owner keeps its non-scheduling clauses and the neigh
   const baseline = BASE25['L1:catalyst'];
   const current = await (async () => { await switchTo('sbx_723be98b', 'catalyst'); return promptFor('sbx_723be98b'); })();
   // Everything outside the five catalyst replacements and the shared clause is byte-identical to the baseline.
-  assert.equal(revert25(current), baseline);
+  assert.equal(revert25(current, 'L1:catalyst'), baseline);
   for (const part of [
     'Verify that the item is a real published company event from a reliable source and note its publication time',
     'anchor the event at the earliest publication time you have for it',
@@ -468,7 +502,7 @@ test('Nov 25: C4 clarifies the range-based trail (call below, put above, strict)
   // The target allocation, once-only and spent-target rules and the J2 close-time rule are untouched.
   for (const part of ['This target exit happens once per position', 'When the cumulative filled quantity already equals the allocation, the target is spent', 'After the first target exit, a later touch of the target never closes the remainder'])
     assert.ok(target.includes(part), part);
-  assert.equal(revert25(text), BASE25['L1:catalyst']);
+  assert.equal(revert25(text, 'L1:catalyst'), BASE25['L1:catalyst']);
   // A debit-vertical slot keeps the spread mechanics next to the same directional underlying predicate.
   assert.match(text, /Debit vertical mechanics \(your permissions allow: bull call debit and bear put debit\)/);
 });
@@ -620,8 +654,8 @@ test('Nov 26: all 8 prompts carry the shared carry-forward sentence once; only t
   for (const agentId of AGENT_IDS) {
     const text = perAgent[agentId];
     assert.equal(count25(text, NOV26.shared[0].new), 1, agentId);
-    assert.equal(text, expected26(BASE25[`L1:${agentId}`]), agentId);
-    assert.equal(revert25(text), BASE25[`L1:${agentId}`], agentId);
+    assert.equal(text, expected01(BASE25[`L1:${agentId}`], `L1:${agentId}`), agentId);
+    assert.equal(revert25(text, `L1:${agentId}`), BASE25[`L1:${agentId}`], agentId);
   }
   assert.deepEqual(AGENT_IDS.filter(id => perAgent[id].includes('- Exit evidence:')), ['catalyst']);
   assert.deepEqual(AGENT_IDS.filter(id => perAgent[id].includes('event_published_at')), ['catalyst']);

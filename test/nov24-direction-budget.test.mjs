@@ -71,7 +71,7 @@ test('B2: the rendered rule states the accounting contract (held, reserved, cand
 
 test('B2 and the live sizing and AlphaDesk text stay in place (nothing replaced)', async () => {
   const prompt = await render('catalyst-news');
-  assert.match(prompt, /Size each new entry at no less than 5% of current account equity/);
+  assert.match(prompt, /Size each new entry at no less than 3% of current account equity/);
   assert.match(prompt, /AlphaDesk-guarded openings are limited to 10 contracts per order/);
   assert.ok(prompt.indexOf('For every candidate that you rejected') < prompt.indexOf('Direction budget (new openings only'));
 });

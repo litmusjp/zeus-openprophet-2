@@ -4,7 +4,7 @@
 // harness.js) prevents the two copies from drifting apart or from the real tool set.
 export const TOOL_CATALOG = {
   'Trading': ['get_account', 'get_positions', 'get_orders', 'place_buy_order', 'place_sell_order', 'place_managed_position', 'get_managed_positions', 'close_managed_position', 'cancel_order', 'withdraw_planned_intent'],
-  'Options': ['get_options_assessment_policy', 'assess_options_trade', 'place_options_order', 'get_options_positions', 'get_options_position', 'get_option_expirations', 'get_options_chain', 'get_option_groups'],
+  'Options': ['get_options_assessment_policy', 'assess_options_trade', 'place_options_order', 'get_options_positions', 'get_options_position', 'get_option_expirations', 'get_options_chain', 'get_options_quote', 'get_option_groups'],
   'Market Data': ['get_quote', 'get_latest_bar', 'get_historical_bars', 'get_daily_features', 'get_earnings_dates', 'get_market_snapshot', 'analyze_stocks'],
   'News': ['get_alpaca_news', 'get_news', 'search_news', 'get_market_news', 'get_quick_market_intelligence', 'get_cleaned_news', 'get_marketwatch_topstories', 'get_marketwatch_realtime'],
   'Intelligence': ['aggregate_and_summarize_news', 'list_news_summaries', 'get_news_summary'],
@@ -28,8 +28,8 @@ export const HERALD_TOOL_CATALOG = Object.fromEntries(
 );
 // Herald alone also gets the read-only range and confirmation arithmetic helper (Guardian and Prophet menus are unchanged).
 HERALD_TOOL_CATALOG['Market Data'].splice(HERALD_TOOL_CATALOG['Market Data'].indexOf('get_historical_bars') + 1, 0, 'get_range_confirmation');
-// Herald alone also gets the read-only exact-contract quote for a contract it holds (a due exit when the chain does not return it).
-HERALD_TOOL_CATALOG['Options'].splice(HERALD_TOOL_CATALOG['Options'].indexOf('get_options_chain') + 1, 0, 'get_options_quote');
+// Dec 1: every menu lists the read-only exact-contract quote for a held contract (only Herald's did before). Herald's derived
+// menu inherits it at the same place, so Herald's menu text is unchanged.
 
 // Render a catalog as the `**Category**: tool, tool` block used in prompts.
 export function renderToolMenu(options = {}) {

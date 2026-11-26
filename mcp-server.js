@@ -947,7 +947,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             action: {
               type: 'string',
-              description: 'The action taken (BUY, SELL, HOLD, PASS)',
+              description: 'Free-text action label, for example BUY, SELL, HOLD, WATCHLIST, RANGE_RECORDED, ADOPT, REJECT or NO_SETUP. PASS is reserved for a genuine AlphaDesk receipt and is not a log action.',
             },
             symbol: {
               type: 'string',

@@ -16,9 +16,9 @@ const STAGE_A_PHRASES = [
   'a different reading of the same bars is not a reason to cancel',
   'the range belongs to that session and its window',
   'When a recorded range is available to you',
-  'a candidate or one you hold',
-  'it reports not found for a contract you do not hold',
 ];
+// Dec 1: the option-quotes line (with 'a candidate or one you hold' and 'it reports not found for a contract you do not hold') is shared by
+// every options family now, so it is checked in A4 instead of here.
 
 test('Stage A: each new phrase appears exactly once in Herald and never in another family', () => {
   for (const phrase of STAGE_A_PHRASES) {
@@ -73,11 +73,11 @@ test('A4: option prices come from the chain for a candidate or a held contract; 
   assert.match(line, /gives exposure and a mark, not an executable quote/);
   assert.match(line, /prophet_get_quote is for stocks and ETFs and fails on an option symbol/);
   assert.doesNotMatch(line, /\b\d+ ?(seconds|minutes)\b/); // no second numeric freshness cap
-  for (const other of OTHERS) assert.doesNotMatch(render(other), /- Option quotes:/, other);
+  for (const other of OTHERS) assert.deepEqual(lineOf(render(other), '- Option quotes:'), [line], `${other}: the same single line (Dec 1)`);
 });
 
 test('prompt hygiene: the added Stage A text has no dates, clock times, prices or symbols', () => {
-  const lines = catalyst.split('\n').filter(l => STAGE_A_PHRASES.some(p => l.includes(p)));
+  const lines = catalyst.split('\n').filter(l => [...STAGE_A_PHRASES, '- Option quotes:'].some(p => l.includes(p)));
   assert.ok(lines.length >= 4);
   for (const line of lines) {
     assert.doesNotMatch(line, /\b20\d\d\b|\b\d{1,2}:\d{2}\b|\$\d|\b[A-Z]{2,5}\d{6}[CP]\d{8}\b/, line.slice(0, 80));

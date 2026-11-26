@@ -15,8 +15,8 @@ test('Herald on L1 no longer carries the legacy quantity-one constraint', async 
   assert.doesNotMatch(prompt, /quantity 1/);
   assert.match(prompt, /Select an exact eligible single-leg proposal within available account capacity and existing controls\./);
   assert.match(prompt, /side='buy', the exact proposed quantity, and proposed positive limit premium once/);
-  // the shared 5% minimum sizing rule is the one that now applies
-  assert.match(prompt, /no less than 5% of current account equity/);
+  // the shared minimum sizing rule is the one that now applies (3% by default since Dec 1)
+  assert.match(prompt, /no less than 3% of current account equity/);
 });
 
 test('the shared workflow replaces a saved legacy copy on every slot and for every options agent', async () => {

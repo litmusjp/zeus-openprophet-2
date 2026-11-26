@@ -19,8 +19,8 @@ const NEW_PHRASES = [
   'The bar must have completed after the broker-confirmed entry fill of that exact contract',
   'A placed target order reserves that allocation but is not a confirmed fill',
   '- Close-time exit:',
-  '- Option quotes:',
 ];
+// Dec 1: '- Option quotes:' moved to every options family (checked in stage-a-guidance A4 and nov20-mcp-e2e D3).
 
 test('each new instruction appears exactly once, in the catalyst family only', () => {
   for (const phrase of NEW_PHRASES) {

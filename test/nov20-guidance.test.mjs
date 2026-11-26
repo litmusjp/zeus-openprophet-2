@@ -79,9 +79,11 @@ test('C3: Herald-only conditional at the shared pricing owner, no cancel-every-b
   assert.match(herald, /reconcile the held quantity and every other working exit, then reprice only the remaining unreserved quantity/);
 });
 
-test('every other family preview is byte-identical to the previous release', () => {
+test('every other family preview is the previous release plus only the approved Dec 1 guidance delta', () => {
+  const DEC01 = JSON.parse(fs.readFileSync(new URL('./fixtures/dec01/delta.json', import.meta.url), 'utf8'));
   for (const id of OTHERS) {
-    const before = fs.readFileSync(new URL(`./fixtures/nov20-preview-${id}.txt`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
-    assert.equal(render(id), before, id);
+    let expected = fs.readFileSync(new URL(`./fixtures/nov20-preview-${id}.txt`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+    for (const e of DEC01.guidance) if (e.applies.includes(`guidance:${id}`)) { assert.equal(count(expected, e.old), 1, `${id} ${e.id}`); expected = expected.replace(e.old, () => e.new); }
+    assert.equal(render(id), expected, id);
   }
 });

@@ -108,9 +108,9 @@ test('the no-own-veto sentence is in the cost discipline line of every strategy 
   }
 });
 
-test('Prophet and Vega scan on every beat, daily-bar strategies keep the early-end rule, catalyst is unchanged', async () => {
+test('Vega scans on every beat, daily-bar strategies (Prophet included since Dec 1) keep the early-end rule, catalyst is unchanged', async () => {
   const build = strategyId => buildSystemPrompt({ id: 'a', name: 'A', strategyId, customStrategyRules: 'rules' }, {});
-  for (const id of ['default', 'long-premium-volatility']) {
+  for (const id of ['long-premium-volatility']) {
     const p = await build(id);
     assert.match(p, /work through your strategy universe in batches/, id);
     assert.match(p, /incomplete research is never a reason to stop scanning/, id);
@@ -118,7 +118,7 @@ test('Prophet and Vega scan on every beat, daily-bar strategies keep the early-e
     assert.doesNotMatch(p, /completed 5-minute bars \(complete=true only\) for intraday entries/, id);
     assert.doesNotMatch(p, /reconcile, record the outcome and end the beat/, id);
   }
-  for (const id of ['etf-mean-reversion', 'equity-momentum']) {
+  for (const id of ['etf-mean-reversion', 'equity-momentum', 'default']) {
     const p = await build(id);
     assert.match(p, /reconcile, record the outcome and end the beat/, id);
     assert.doesNotMatch(p, /work through your strategy universe in batches/, id);

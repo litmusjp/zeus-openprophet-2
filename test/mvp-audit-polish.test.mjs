@@ -50,7 +50,7 @@ test('shared instructions leave exits with assigned strategy and make assessment
   assert.match(prompt, /Do not assume or add a strategy bar timeframe/);
   assert.match(prompt, /complete=false.*still forming and is not a completed daily bar/);
   assert.match(prompt, /next-session candidates as research only, not orders/);
-  assert.match(prompt, /no less than 5% of current account equity in option premium/);
+  assert.match(prompt, /no less than 3% of current account equity in option premium/);
   assert.match(prompt, /never above the max-position limit/);
   assert.match(prompt, /Account limits, not AlphaDesk, govern size/);
   assert.match(prompt, /action "WATCHLIST"/);

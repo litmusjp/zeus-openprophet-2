@@ -57,24 +57,28 @@ test('Vega gets calls and puts, no breakout, market-trend or sector gate, and no
   assert.doesNotMatch(text, /only (buy )?calls|calls only/i);
 });
 
-test('Prophet follows its live rules (mainly calls, scalp or swing) and its expiries are limited to the AlphaDesk window', () => {
+test('Prophet follows its Dec 1 rules (mainly calls, swings only, numeric breakout-retest) and its expiries are limited to the AlphaDesk window', () => {
   const open = guidance('default');
   assert.match(open, /buy mainly calls; buy a put only for a clearly bearish setup, never as a hedge/);
-  assert.match(open, /Label each position a scalp or a swing at entry/);
+  assert.doesNotMatch(open, /scalp/i);
   assert.match(open, /expires 1 to 180 calendar days out/);
-  assert.match(open, /scalp \(exit in the same session\): 2 to 10 calendar days to expiry \(OP2 blocks same-day expiry\); swing: 21 to 60 calendar days to expiry/);
-  assert.match(open, /a breakout aligned with the higher timeframe, a completed-bar retest that holds, momentum resuming/);
+  assert.match(open, /Your swing expiry window: 21 to 60 calendar days to expiry\./);
+  assert.match(open, /- Trend \(the stand-in for the higher timeframe\): for a call, the last completed daily close is above its 20-day average and the 5-session change of that average is 0% or higher/);
+  assert.match(open, /- Breakout level: for a call, the highest high of the 20 completed sessions before the breakout bar/);
+  assert.match(open, /so they equal the breakout level only when the latest bar is the breakout bar/);
+  assert.match(open, /\(\(low \/ level - 1\) x 100 from -0\.5 to 2\)/);
+  assert.match(open, /that close is no more than 4% beyond the breakout level/);
+  assert.match(guidance('default', { extendedPct: 3 }), /that close is no more than 3% beyond the breakout level/, 'the extension limit follows the setting');
   assert.match(open, /Market-wide discovery \(optional\)/);
   assert.doesNotMatch(open, /Market supportive|Sector supportive|Initial post-news range/);
   assert.doesNotMatch(open, /under 10% of mid|50 to 120|2 to 5 calendar/);
 
   const narrow = guidance('default', { assessmentDteMin: 14, assessmentDteMax: 45 });
-  assert.match(narrow, /scalp: not available, because no expiry that OP2 allows is inside the AlphaDesk window; swing: 21 to 45 calendar days to expiry/);
+  assert.match(narrow, /Your swing expiry window: 21 to 45 calendar days to expiry\./);
   assert.match(narrow, /expires 14 to 45 calendar days out/);
 
   const below = guidance('default', { assessmentDteMin: 3, assessmentDteMax: 15 });
-  assert.match(below, /scalp \(exit in the same session\): 3 to 10 calendar days to expiry/);
-  assert.match(below, /swing: the usual 21 to 60 days does not overlap the AlphaDesk window, so swings are limited to 3 to 15 calendar days to expiry/);
+  assert.match(below, /Your swing expiry window: the usual 21 to 60 days does not overlap the AlphaDesk window, so expiries are limited to 3 to 15 calendar days\./);
 });
 
 test('every family gets the spread cap, pricing and AlphaDesk-record lines; a stricter strategy rule wins', () => {
@@ -144,7 +148,7 @@ test('Vega on L2 and Prophet on L3 are scoped: legacy MVP override stripped and 
     assert.doesNotMatch(prompt, /TEMPORARY_ALPHA_MVP_OVERRIDE|forced entry text/, a.name);
     assert.doesNotMatch(prompt, /quantity 1/, a.name);
     assert.match(prompt, /the exact proposed quantity/, a.name);
-    assert.match(prompt, /no less than 5% of current account equity/, a.name);
+    assert.match(prompt, /no less than 3% of current account equity/, a.name);
     assert.match(prompt, /Option cost discipline/, a.name);
   }
 });

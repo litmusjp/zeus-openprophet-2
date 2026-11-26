@@ -114,7 +114,7 @@ test('openings above 10 contracts get a specific local error; closes and 10-cont
 test('the sizing rule, the UNAVAILABLE re-assessment and news paging reach the prompts', async () => {
   for (const id of ['catalyst-news', 'long-premium-volatility', 'default', 'equity-momentum', 'etf-mean-reversion']) {
     const text = guidance(id);
-    assert.match(text, /you may on a later heartbeat run one read-only assess_options_strategy for the same still-qualified, locally valid proposal/, id);
+    assert.match(text, /you may on a later heartbeat run one read-only prophet_assess_options_strategy \(its only permitted use\) for the same still-qualified, locally valid proposal/, id);
     assert.match(text, /A local validation error \(for example a quantity above 10\) is not transient: fix the proposal instead/, id);
     assert.match(text, /Never change price, quantity or direction merely to obtain a PASS/, id);
     const prompt = await buildSystemPrompt({ id: 'a', name: 'A', strategyId: id, customStrategyRules: 'rules' }, {});

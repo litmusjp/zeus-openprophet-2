@@ -11,12 +11,13 @@ import { buildSystemPrompt } from '../agent/harness.js';
 
 test('defaults are the approved values', () => {
   assert.deepEqual({ ...DEFAULT_TRADING_GUIDANCE }, {
-    contractDeltaMin: 0.40, contractDeltaMax: 0.70, expiryMinDays: 21, expiryMaxDays: 60, minEntryPct: 5,
+    contractDeltaMin: 0.40, contractDeltaMax: 0.70, expiryMinDays: 21, expiryMaxDays: 60, minEntryPct: 3,
     extendedPct: 4, marketSymbol: 'SPY', marketTolerancePct: 0.5, marketSlopeMinPct: -0.15,
     nearSupportPct: 2.5, avgSlopeMinPct: -0.30, extraSymbolsPerScan: 25,
     catalystRangeMinutes: 30, catalystMaxGapPct: 12,
     maxOptionSpreadPct: 10, catalystStopRangeFraction: 0.5, catalystTargetRangeMultiple: 1,
     assessmentDteMin: 1, assessmentDteMax: 180,
+    longGapSingleLegCapPct: 10,
   });
   assert.ok(!('dailyAlphaDeskCheck' in DEFAULT_TRADING_GUIDANCE), 'the daily AlphaDesk check setting is retired');
 });
@@ -30,7 +31,9 @@ test('strict validation rejects bad saves; stored bad values fall back to defaul
   assert.throws(() => normalizeTradingGuidance({ marketTolerancePct: 9 }, { strict: true }), /marketTolerancePct/);
   assert.throws(() => normalizeTradingGuidance({ marketSlopeMinPct: -9 }, { strict: true }), /marketSlopeMinPct/);
   assert.equal(normalizeTradingGuidance({ marketTolerancePct: 0 }, { strict: true }).marketTolerancePct, 0, 'zero tolerance is a valid strict setting');
-  assert.equal(normalizeTradingGuidance({ minEntryPct: 999 }).minEntryPct, 5);
+  assert.equal(normalizeTradingGuidance({ minEntryPct: 999 }).minEntryPct, 3);
+  assert.throws(() => normalizeTradingGuidance({ longGapSingleLegCapPct: 0 }, { strict: true }), /longGapSingleLegCapPct/);
+  assert.equal(normalizeTradingGuidance({ longGapSingleLegCapPct: 99 }).longGapSingleLegCapPct, 10, 'a bad stored cap falls back to the default');
   assert.equal(normalizeTradingGuidance({ marketTolerancePct: 99 }).marketTolerancePct, 0.5, 'a bad stored value falls back to the default');
   assert.ok(!('dailyAlphaDeskCheck' in normalizeTradingGuidance({ dailyAlphaDeskCheck: true })), 'a stored retired key is ignored');
   assert.equal(normalizeTradingGuidance({ extendedPct: '4.5', marketSymbol: 'qqq' }, { strict: true }).marketSymbol, 'QQQ');

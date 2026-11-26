@@ -128,7 +128,8 @@ test('the cents, requote, stale-order and uncertain-intent lines reach every fam
   for (const id of ['catalyst-news', 'long-premium-volatility', 'default', 'equity-momentum', 'etf-mean-reversion', 'capital-preservation']) {
     const text = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: id });
     assert.match(text, /Limit prices are whole cents: the order and assessment tools round a buy down and a sell up to the cent, and the receipt shows the price used/, id);
-    assert.match(text, /submit at once \(aim for under 90 seconds\); OP2 rejects quote evidence older than 2 minutes and that check still decides\. Write your logs after the order call/, id);
+    assert.match(text, /Write first any decision log that your rules require before an order \(the entry invalidation and, where your rules ask for them, the stop, the target, the size basis or the direction budget\)\. Then re-read the exact contract quote immediately before the guarded order and submit at once \(aim for under 90 seconds\); OP2 rejects quote evidence older than 2 minutes and that check still decides\. Write every other log after the order call/, id);
+    assert.doesNotMatch(text, /Write your logs after the order call/, id);
     assert.match(text, /Review an unfilled opening order at the second heartbeat after submission/, id);
     assert.match(text, /Copy order IDs exactly from the latest get_orders result; never retype them\. Before any replacement, confirm the cancel is terminal and read its cumulative filled quantity; a replacement covers only the verified remaining quantity, never more\./, id);
     assert.match(text, /do not submit a duplicate exit; record the block with prophet_log_decision and continue at the next heartbeat\. The second-heartbeat review above applies to opening orders only\./, id);

@@ -55,7 +55,7 @@ test('D3 (-): a contract that is not held is refused (an error answer, no price)
   });
 });
 
-test('D3: the tool is registered once, read-only and only on the Herald menu', async () => {
+test('D3: the tool is registered once, read-only and on every menu (Dec 1; it was Herald-only before)', async () => {
   const source = await fs.readFile(new URL('../mcp-server.js', import.meta.url), 'utf8');
   assert.equal(source.split("name: 'get_options_quote'").length - 1, 1);
   assert.equal(source.split("case 'get_options_quote':").length - 1, 1);
@@ -63,22 +63,25 @@ test('D3: the tool is registered once, read-only and only on the Herald menu', a
   assert.match(handler, /callTradingBot\(`\/options\/quote\//);
   assert.doesNotMatch(handler, /'POST'|'DELETE'|'PUT'|place_|cancel_|\/orders|\/options\/order|assessment/);
   assert.ok(HERALD_TOOL_CATALOG.Options.includes('get_options_quote'));
-  assert.ok(!TOOL_CATALOG.Options.includes('get_options_quote'));
-  assert.match(renderPrefixedToolMenu({ scope: 'herald' }), /prophet_get_options_quote/);
-  assert.doesNotMatch(renderPrefixedToolMenu(), /get_options_quote/);
+  assert.ok(TOOL_CATALOG.Options.includes('get_options_quote'));
+  assert.deepEqual(HERALD_TOOL_CATALOG.Options.slice(-3), ['get_options_chain', 'get_options_quote', 'get_option_groups'], 'Herald keeps its place for the tool');
+  assert.equal(renderPrefixedToolMenu({ scope: 'herald' }).split('prophet_get_options_quote').length - 1, 1);
+  assert.equal(renderPrefixedToolMenu().split('prophet_get_options_quote').length - 1, 1);
   const main = await fs.readFile(new URL('../cmd/bot/main.go', import.meta.url), 'utf8');
   assert.equal(main.split('/options/quote/:symbol').length - 1, 1);
   assert.match(main, /api\.GET\("\/options\/quote\/:symbol", orderController\.GetOptionsQuote\)/);
 });
 
-test('D3: the Herald guidance names the exact-contract quote once, as a quote and never a mark; no other family mentions it', () => {
+test('D3: every options family names the exact-contract quote once, as a quote and never a mark (Dec 1; Herald-only before)', () => {
   const herald = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: 'catalyst-news' });
   assert.equal(herald.split('prophet_get_options_quote').length - 1, 1);
   assert.match(herald, /held contracts only, read-only/);
   assert.match(herald, /It is a quote, never a mark, and if it also has no fresh quote the existing no-quote rules apply/);
   assert.match(herald, /If there is no fresh quote, record DATA_BLOCK/); // the default stays
   for (const id of ['equity-momentum', 'etf-mean-reversion', 'long-premium-volatility', 'default', 'capital-preservation', 'unknown-x']) {
-    assert.doesNotMatch(renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: id }), /get_options_quote/, id);
+    const text = renderTradingGuidance({ ...DEFAULT_TRADING_GUIDANCE }, { strategyId: id });
+    assert.equal(text.split('prophet_get_options_quote').length - 1, 1, id);
+    assert.match(text, /It is a quote, never a mark, and if it also has no fresh quote the existing no-quote rules apply/, id);
   }
 });
 

@@ -59,6 +59,10 @@ import { createManagedGateProxy, registerManagedGateProxy, createManagedQualityP
 import { createManagedReviewPolicyReader } from './managed-policy-client.js';
 import { fitDriftWarning, hasStartListBlock, isOptionsAgent, strategyOptionFit } from './agent-consistency.js';
 import { runGuardedSwitch } from './switch-guard.js';
+import { slotGate } from './slot-gate.js';
+import { recoverPendingTransitions } from './slot-transition.js';
+import { acquireSlotOrRefuse, createTransition, finishCommittedRuntime, registerSlotProfileRoutes, slotWriterGuard, successBody, BUSY_TURN_MESSAGE } from './slot-review.js';
+import { profileDriftItems, profileDriftWarning, profileOfStrategy } from './slot-profile.js';
 import { savePluginAndApplyRuntime } from './plugin-runtime-apply.js';
 import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
 import { affectedSandboxesForAgentModelChange, hasBusyAffectedSandbox, chatgptStatus, createChatGPTAuthFlow, createChatGPTModelCheck, disconnectChatGPT, nativeOpenCodeEnv, stripOperatorSecrets, isChatGPTModelVerified, recordChatGPTModelCheck, getVerifiedChatGPTModels } from './chatgpt-oauth.js';
@@ -176,6 +180,21 @@ function protectChatGPTModelChange(req, res, next) {
   const routeAgentModel = req.path.endsWith('/activate') && req.path.includes('/agents/') ? getAgentById(req.params.id)?.model : '';
   if (!String(req.body?.model || assignedModel || routeAgentModel || '').startsWith('openai/')) return next();
   operatorAuthMiddleware(req, res, () => sameOriginStateChange(req, res, next));
+}
+
+// Operator-only for every model provider (switch-profile plan 3.6): an agent change, a profile re-apply and a strategy save that carries a
+// slotProfile all need operator authorization plus a same-origin request, not merely the agent API token.
+const operatorOnly = (req, res, next) => operatorAuthMiddleware(req, res, () => sameOriginStateChange(req, res, next));
+
+function requireOperatorForAgentChange(req, res, next) {
+  const target = req.body?.activeAgentId;
+  if (target === undefined || target === getSandbox(req.params.id)?.agent?.activeAgentId) return next();
+  operatorOnly(req, res, next);
+}
+
+function requireOperatorForSlotProfile(req, res, next) {
+  if (req.body && typeof req.body === 'object' && Object.prototype.hasOwnProperty.call(req.body, 'slotProfile')) return operatorOnly(req, res, next);
+  next();
 }
 
 function validateAlphaDeskUrl(raw) {
@@ -427,6 +446,8 @@ secretsStore.initSecrets({ split: EXECUTION_START_ENABLED || process.env.OPENPRO
 secretsStore.applyProviderEnv();
 try { await loadConfig(); } catch (error) { if (error?.code === 'CONFIG_UNRECOVERABLE') { console.error('FATAL: ' + error.message); process.exit(1); } throw error; }
 await loadTradingGuidance();
+// An interrupted agent switch or profile re-apply is resolved to a coherent old or new pair before any slot can start.
+await recoverPendingTransitions({ getSandbox, listSandboxIds: () => getSandboxes().map(sandbox => sandbox.id) });
 const initialActiveAccount = getActiveAccount();
 if (EXECUTION_START_ENABLED && initialActiveAccount?.id) {
   const migration = await migrateLegacyDataForSandbox(getActiveSandbox()?.id || `sbx_${initialActiveAccount.id}`, initialActiveAccount.id);
@@ -801,11 +822,29 @@ app.get('/api/events', (req, res) => {
 });
 
 // ── Agent Control ──────────────────────────────────────────────────
+// A slot whose settings were saved but whose runtime did not restart gets that restart now; the beats stay refused until it succeeds.
+async function restartSlotBackend(sandboxId) {
+  const targetSandbox = getSandbox(sandboxId);
+  if (!targetSandbox) return;
+  if (isActiveSandbox(sandboxId)) await startGoBackend(getAccountById(targetSandbox.accountId));
+  else await orchestrator.startGoBackend(sandboxId);
+}
+
+async function prepareSlotStart(sandboxId) {
+  const block = slotGate.beatBlock(sandboxId);
+  if (block?.hard) throw Object.assign(new Error(`Start refused: ${block.reason}`), { status: 409 });
+  if (slotGate.notReady(sandboxId)) {
+    await restartSlotBackend(sandboxId);
+    slotGate.clearNotReady(sandboxId);
+  }
+}
+
 app.post('/api/agent/start', async (req, res) => {
   try {
+    await prepareSlotStart(harness.sandboxId);
     await harness.start();
     res.json({ ok: true, status: 'started' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
 app.post('/api/agent/stop', async (req, res) => {
@@ -1244,6 +1283,7 @@ app.get('/api/sandboxes/:id/state', (req, res) => {
 
 app.post('/api/sandboxes/:id/start', async (req, res) => {
   try {
+    await prepareSlotStart(req.params.id);
     if (isActiveSandbox(req.params.id)) {
       // Keep the legacy active harness aligned when the first account was added after startup
       // or when an active account changed without a successful rebind.
@@ -1257,7 +1297,7 @@ app.post('/api/sandboxes/:id/start', async (req, res) => {
       await orchestrator.startSandbox(req.params.id);
     }
     res.json({ ok: true, status: 'started', sandboxId: req.params.id });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
 });
 
 app.post('/api/sandboxes/:id/stop', async (req, res) => {
@@ -1440,9 +1480,10 @@ async function restartBackendAfterAgentSwitch(sandboxId) {
   else await orchestrator.startGoBackend(sandboxId);
 }
 
-app.put('/api/sandboxes/:id/agent', protectChatGPTModelChange, async (req, res) => {
+app.put('/api/sandboxes/:id/agent', protectChatGPTModelChange, requireOperatorForAgentChange, async (req, res) => {
+  let ticket = null;
   try {
-    const { activeAgentId, model, overrides = {} } = req.body || {};
+    const { activeAgentId, model, overrides = {}, reviewToken } = req.body || {};
     const selectedAgent = activeAgentId ? getAgentById(activeAgentId) : null;
     const nextModel = model ?? (activeAgentId ? selectedAgent?.model : '');
     if (typeof nextModel === 'string' && nextModel.startsWith('openai/')) {
@@ -1450,22 +1491,52 @@ app.put('/api/sandboxes/:id/agent', protectChatGPTModelChange, async (req, res) 
       if (!status.connected) return res.status(409).json({ error: 'Connect ChatGPT subscription first' });
       if (!await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: nextModel, connectionId: status.connectionId })) return res.status(409).json({ error: 'Verify this ChatGPT model for the current connection first' });
     }
+    // The slot's transition gate is taken BEFORE the busy check and the exposure read, and held until the runtime is refreshed.
+    const agentChanges = activeAgentId !== undefined && getSandbox(req.params.id)?.agent?.activeAgentId !== activeAgentId;
+    ticket = acquireSlotOrRefuse(req.params.id, agentChanges ? 'switch' : 'write');
     const targetRuntime = getHarnessForSandbox(req.params.id);
-    if ((model !== undefined || activeAgentId !== undefined) && targetRuntime && (targetRuntime._beating || targetRuntime._proc)) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its model or assignment' });
+    if ((model !== undefined || activeAgentId !== undefined) && targetRuntime && (targetRuntime._beating || targetRuntime._proc)) return res.status(409).json({ error: BUSY_TURN_MESSAGE });
     const updates = {};
     if (activeAgentId !== undefined) updates.activeAgentId = activeAgentId;
     if (model !== undefined) updates.model = model;
     if (Object.keys(overrides).length) updates.overrides = overrides;
+    // An agent change is reviewed: the token must match the state the operator saw (409 + a fresh preview otherwise, nothing saved).
+    const transition = agentChanges ? createTransition({ kind: 'switch', sandboxId: req.params.id, activeAgentId, strategyId: overrides?.strategyId, reviewToken, opId: ticket.opId }) : null;
+    if (transition) transition.verify();
     // The guard refuses (409, nothing saved) a switch that would turn options off while the slot still holds option exposure.
-    const sandbox = await runGuardedSwitch({ sandboxId: req.params.id, activeAgentId, overrides, previewPatch: previewSwitchPermissionPatch, readExposure: () => readSlotOptionExposure(req.params.id), save: () => updateSandboxAgentSelection(req.params.id, updates) });
-    await restartBackendAfterAgentSwitch(req.params.id);
-    await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
+    const sandbox = await runGuardedSwitch({ sandboxId: req.params.id, activeAgentId, overrides, previewPatch: previewSwitchPermissionPatch, readExposure: () => readSlotOptionExposure(req.params.id), save: () => updateSandboxAgentSelection(req.params.id, updates, transition) });
+    if (transition) {
+      const failure = await finishCommittedRuntime(req.params.id, [() => restartBackendAfterAgentSwitch(req.params.id), () => refreshHarnessConfigForSandbox(req.params.id, { resetSession: true })]);
+      if (failure) { broadcast('config', safeConfig()); return res.status(failure.status).json(failure.body); }
+    } else {
+      await restartBackendAfterAgentSwitch(req.params.id);
+      await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
+    }
     broadcast('config', safeConfig());
-    res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
-  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+    res.json({ ...(transition ? successBody(transition) : { ok: true }), sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
+  } catch (err) { res.status(err.status || 400).json(err.body || { error: err.message }); } finally { ticket?.release(); }
 });
 
-app.put('/api/sandboxes/:id/agent/overrides', async (req, res) => {
+registerSlotProfileRoutes(app, {
+  operatorAuth: operatorAuthMiddleware,
+  sameOrigin: sameOriginStateChange,
+  isBusy: sandboxId => { const runtime = getHarnessForSandbox(sandboxId); return Boolean(runtime && (runtime._beating || runtime._proc)); },
+  // Exposure for the preview comes from a backend that is already running; nothing is created or started to answer it.
+  readExposureExisting: async sandboxId => {
+    const client = runningGoClientForSandbox(sandboxId);
+    if (!client) return null;
+    const [positions, orders, groups] = await Promise.all([
+      client.get('/api/v1/options/positions', { timeout: 8000 }),
+      client.get('/api/v1/orders?status=all', { timeout: 8000 }),
+      client.get('/api/v1/options/groups', { timeout: 4000 }),
+    ]);
+    return { positions: positions.data, orders: orders.data?.orders, ordersComplete: orders.data?.complete === true, groups: groups.data };
+  },
+  refresh: sandboxId => refreshHarnessConfigForSandbox(sandboxId, { resetSession: true }),
+  afterChange: () => broadcast('config', safeConfig()),
+});
+
+app.put('/api/sandboxes/:id/agent/overrides', slotWriterGuard(req => req.params.id), async (req, res) => {
   try {
     const sandbox = await updateSandboxAgentOverrides(req.params.id, req.body || {});
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
@@ -1483,7 +1554,7 @@ registerPrecisionResolutionRoute(app, {
   operatorToken: () => process.env.TRADING_BOT_OPERATOR_TOKEN || '',
 });
 
-app.put('/api/sandboxes/:id/strategy-rules', async (req, res) => {
+app.put('/api/sandboxes/:id/strategy-rules', slotWriterGuard(req => req.params.id), async (req, res) => {
   try {
     if (typeof req.body?.rules !== 'string') {
       return res.status(400).json({ error: 'rules is required' });
@@ -1573,7 +1644,11 @@ app.get('/api/agent/prompt-preview', async (req, res) => {
     if (optionsAgent && !hasStartListBlock(prompt)) warnings.push(`${agentConfig.name || agentConfig.id} is an options agent without a start list (add a SCAN UNIVERSE or CATALYST UNIVERSE block to its definition)`);
     const driftWarning = fitDriftWarning(strategyOptionFit(getStrategyById(agentConfig.strategyId), agentConfig.strategyId), getPermissionsForSandbox(sandboxId) || {}, agentConfig.name || agentConfig.id);
     if (driftWarning) warnings.push(driftWarning);
-    res.json({ prompt, agentId: agentConfig.id, agentName: agentConfig.name, sandboxId, warnings });
+    // The effective strategy's slot profile against what the slot holds now (a profile is only applied by a switch or an explicit re-apply).
+    const driftItems = profileDriftItems(profileOfStrategy(getStrategyById(agentConfig.strategyId)), { slotGuidance: getTradingGuidanceForSandbox(sandboxId), slotHeartbeat: getSandbox(sandboxId)?.heartbeat || {} });
+    const profileWarning = profileDriftWarning(driftItems, agentConfig.name || agentConfig.id);
+    if (profileWarning) warnings.push(profileWarning);
+    res.json({ prompt, agentId: agentConfig.id, agentName: agentConfig.name, sandboxId, warnings, profileDrift: driftItems.length ? { differs: true, items: driftItems } : null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1758,24 +1833,38 @@ app.delete('/api/agents/:id', async (req, res) => {
     await refreshAllHarnessConfigs({ resetSession: true });
     broadcast('config', safeConfig());
     res.json({ ok: true });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
 });
 
-app.post('/api/agents/:id/activate', protectChatGPTModelChange, async (req, res) => {
+// The same shared operation as the sandbox PUT, for every provider. The slot is resolved ONCE here and used through save, restart and
+// refresh, so an account activation during a slow request cannot retarget the write.
+app.post('/api/agents/:id/activate', protectChatGPTModelChange, operatorOnly, async (req, res) => {
+  let ticket = null;
   try {
     const agent = getAgentById(req.params.id);
     if (String(agent?.model || '').startsWith('openai/')) {
       const status = await chatgptStatus({ dataDir: path.join(PROJECT_ROOT, 'data') });
       if (!status.connected || !await isChatGPTModelVerified({ dataDir: path.join(PROJECT_ROOT, 'data'), model: agent.model, connectionId: status.connectionId })) return res.status(409).json({ error: 'Connect ChatGPT and verify this model for the current connection first' });
-      if (harness._beating || harness._proc) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its assignment' });
     }
-    const activeSandboxId = getActiveSandbox()?.id;
-    await runGuardedSwitch({ sandboxId: activeSandboxId, activeAgentId: req.params.id, overrides: {}, previewPatch: previewSwitchPermissionPatch, readExposure: () => readSlotOptionExposure(activeSandboxId), save: () => setActiveAgent(req.params.id) });
-    await restartBackendAfterAgentSwitch(getActiveSandbox()?.id);
-    await refreshHarnessConfigForSandbox(getActiveSandbox()?.id, { resetSession: true });
+    const activeSandboxId = req.body?.sandboxId ? String(req.body.sandboxId) : getActiveSandbox()?.id;
+    if (!activeSandboxId || !getSandbox(activeSandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
+    const agentChanges = getSandbox(activeSandboxId).agent.activeAgentId !== req.params.id;
+    ticket = acquireSlotOrRefuse(activeSandboxId, agentChanges ? 'switch' : 'write');
+    const targetRuntime = getHarnessForSandbox(activeSandboxId);
+    if (targetRuntime && (targetRuntime._beating || targetRuntime._proc)) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its assignment' });
+    const transition = agentChanges ? createTransition({ kind: 'switch', sandboxId: activeSandboxId, activeAgentId: req.params.id, reviewToken: req.body?.reviewToken, opId: ticket.opId }) : null;
+    if (transition) transition.verify();
+    await runGuardedSwitch({ sandboxId: activeSandboxId, activeAgentId: req.params.id, overrides: {}, previewPatch: previewSwitchPermissionPatch, readExposure: () => readSlotOptionExposure(activeSandboxId), save: () => setActiveAgent(req.params.id, { sandboxId: activeSandboxId, transition }) });
+    if (transition) {
+      const failure = await finishCommittedRuntime(activeSandboxId, [() => restartBackendAfterAgentSwitch(activeSandboxId), () => refreshHarnessConfigForSandbox(activeSandboxId, { resetSession: true })]);
+      if (failure) { broadcast('config', safeConfig()); return res.status(failure.status).json(failure.body); }
+    } else {
+      await restartBackendAfterAgentSwitch(activeSandboxId);
+      await refreshHarnessConfigForSandbox(activeSandboxId, { resetSession: true });
+    }
     broadcast('config', safeConfig());
-    res.json({ ok: true });
-  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+    res.json(transition ? successBody(transition) : { ok: true });
+  } catch (err) { res.status(err.status || 400).json(err.body || { error: err.message }); } finally { ticket?.release(); }
 });
 
 // Strategies
@@ -1784,7 +1873,7 @@ app.get('/api/strategies', (req, res) => {
   res.json({ strategies: config.strategies });
 });
 
-app.post('/api/strategies', async (req, res) => {
+app.post('/api/strategies', requireOperatorForSlotProfile, async (req, res) => {
   try {
     const strategy = await addStrategy(req.body);
     broadcast('config', safeConfig());
@@ -1792,7 +1881,7 @@ app.post('/api/strategies', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-app.put('/api/strategies/:id', async (req, res) => {
+app.put('/api/strategies/:id', requireOperatorForSlotProfile, async (req, res) => {
   try {
     const strategy = await updateStrategy(req.params.id, req.body);
     await refreshAllHarnessConfigs({ resetSession: true });
@@ -1920,7 +2009,7 @@ app.get('/api/heartbeat', (req, res) => {
   res.json(config.heartbeat || {});
 });
 
-app.put('/api/heartbeat', async (req, res) => {
+app.put('/api/heartbeat', slotWriterGuard(req => req.body?.sandboxId || getActiveSandbox()?.id), async (req, res) => {
   try {
     const { sandboxId, expectedCurrentHeartbeat, ...heartbeatBody } = req.body || {};
     const targetSandboxId = sandboxId || getActiveSandbox()?.id;
@@ -1951,7 +2040,7 @@ app.get('/api/heartbeat/profiles', (req, res) => {
   res.json({ profiles: getHeartbeatProfiles() });
 });
 
-app.post('/api/heartbeat/apply-profile', async (req, res) => {
+app.post('/api/heartbeat/apply-profile', slotWriterGuard(req => req.body?.sandboxId || getActiveSandbox()?.id), async (req, res) => {
   try {
     const { sandboxId, profile } = req.body || {};
     const targetSandbox = sandboxId || getActiveSandbox()?.id;
@@ -1990,7 +2079,7 @@ app.get('/api/permissions', (req, res) => {
   res.json(getPermissions());
 });
 
-app.put('/api/permissions', operatorAuthMiddleware, async (req, res) => {
+app.put('/api/permissions', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId), async (req, res) => {
   try {
     const { sandboxId, ...permBody } = req.body || {};
     if (sandboxId) {
@@ -2040,7 +2129,7 @@ app.get('/api/option-spread-cap/sync', async (req, res) => {
   } catch (err) { res.status(503).json({ state: 'unknown', error: 'cap state unavailable' }); }
 });
 
-app.put('/api/trading-guidance', operatorAuthMiddleware, async (req, res) => {
+app.put('/api/trading-guidance', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId), async (req, res) => {
   try {
     const { sandboxId, ...patch } = req.body || {};
     if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
@@ -2139,7 +2228,7 @@ app.get('/api/market-session', async (req, res) => {
   } catch { res.status(503).json({ error:'market_session_unavailable' }); }
 });
 
-app.put('/api/heartbeat/market-mode', operatorAuthMiddleware, async (req, res) => {
+app.put('/api/heartbeat/market-mode', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId), async (req, res) => {
   try {
     const { sandboxId, mode, intervals, expectedCurrentHeartbeat } = req.body || {};
     if (!sandboxId || !getSandbox(sandboxId)) throw new Error('Selected sandbox is required');
@@ -2560,6 +2649,9 @@ app.get('/api/health', async (req, res) => {
     port: isActiveSandbox(sandbox.id) ? Number(TRADING_BOT_PORT) : orchestrator.getSandboxRuntime(sandbox.id)?.port || null,
     goReady: isActiveSandbox(sandbox.id) ? goReady : (orchestrator.getSandboxRuntime(sandbox.id)?.goReady || false),
     goPid: isActiveSandbox(sandbox.id) ? (goProc?.pid || null) : (orchestrator.getSandboxRuntime(sandbox.id)?.goProc?.pid || null),
+    // Operator-visible recovery state of the slot's settings transitions (null when none).
+    transitionBlocked: slotGate.blocked(sandbox.id),
+    transitionNotReady: slotGate.notReady(sandbox.id),
     state: isActiveSandbox(sandbox.id) ? harness.state.toJSON() : (orchestrator.getSandboxRuntime(sandbox.id)?.harness.state.toJSON() || null),
   }));
   res.status(botHealthy ? 200 : 503).json({

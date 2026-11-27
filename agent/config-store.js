@@ -11,6 +11,9 @@ import * as secrets from './secrets-store.js';
 import * as configSecrets from './config-secrets.js';
 import { permissionPatchForFit, strategyOptionFit, validateOptionFitInput } from './agent-consistency.js';
 import { classifyReadError, safeCode, sha256Hex, publishAtomic, preserveEvidence } from './durable-file.js';
+import { getTradingGuidanceForSandbox, getSavedGuidanceEntry } from './trading-guidance.js';
+import { canonicalizeSlotProfile } from './slot-profile.js';
+import { executeTransition } from './slot-transition.js';
 
 // The last agent switch per sandbox, read once by the route that triggered it (to restart the slot's backend when the
 // switch changed permissions). In memory only.
@@ -1286,19 +1289,20 @@ export async function updateAgent(id, updates) {
 
 export async function removeAgent(id) {
   if (id === 'default') throw new Error('Cannot remove default agent');
-  _config.agents = _config.agents.filter(a => a.id !== id);
-  for (const sandbox of getSandboxes()) {
-    if (sandbox.agent.activeAgentId === id) {
-      _config.sandboxes[sandbox.id].agent.activeAgentId = 'default';
-    }
+  // An assigned agent is never removed from under a slot: that would swap the slot to `default` without the switch checks. Switch it first.
+  const assigned = getSandboxes().filter(sandbox => sandbox.agent.activeAgentId === id);
+  if (assigned.length) {
+    throw Object.assign(new Error(`Agent is assigned to ${assigned.map(sandbox => sandbox.name || sandbox.id).join(', ')}; switch the slot first`), { status: 409 });
   }
+  _config.agents = _config.agents.filter(a => a.id !== id);
   syncLegacyAliases(_config);
   await saveConfig();
 }
 
-export async function setActiveAgent(id) {
+// `options.sandboxId` pins the slot the caller resolved at entry (a later account activation must not retarget the write).
+export async function setActiveAgent(id, options = {}) {
   if (!_config.agents.find(a => a.id === id)) throw new Error('Agent not found');
-  await updateSandboxAgentSelection(_config.activeSandboxId, { activeAgentId: id });
+  return updateSandboxAgentSelection(options.sandboxId || _config.activeSandboxId, { activeAgentId: id }, options.transition || null);
 }
 
 export function getActiveAgent() {
@@ -1401,7 +1405,53 @@ export function previewSwitchPermissionPatch(sandboxId, activeAgentId, overrides
   return permissionPatchForFit(strategyOptionFit(getStrategyById(effectiveStrategyId), effectiveStrategyId), sandbox.permissions || {});
 }
 
-export async function updateSandboxAgentSelection(sandboxId, updates) {
+/** The strategy id a switch of `sandboxId` to `activeAgentId` would run (an explicit strategy choice, else the agent's own). Read-only. */
+export function effectiveStrategyIdForSwitch(sandboxId, activeAgentId, strategyChoice) {
+  const newAgent = _config.agents.find(a => a.id === activeAgentId);
+  if (!newAgent) throw new Error('Agent not found');
+  const selection = normalizeStrategySelection(strategyChoice);
+  return selection.action === 'set' ? selection.id : (newAgent.strategyId ?? null);
+}
+
+/**
+ * Applies a reviewed transition (switch or profile re-apply): `transition.plan()` re-verifies the review and returns what to write;
+ * the staged sandbox, the guidance entry and the pending record go through executeTransition (see slot-transition.js). Config memory
+ * is only changed inside executeTransition, after the pending record exists.
+ */
+async function commitPlannedTransition({ sandboxId, sandbox, staged, transition, permissionPatch, kind }) {
+  const plan = transition.plan();
+  const opId = transition.opId;
+  const guidanceBefore = getSavedGuidanceEntry(sandboxId);
+  const guidance = plan.guidance ? { before: guidanceBefore, after: { ...plan.guidance.merged, updatedAt: new Date().toISOString(), transitionOpId: opId } } : null;
+  const heartbeat = plan.heartbeat ? { ...(staged.heartbeat || sandbox.heartbeat), ...plan.heartbeat.patch } : (staged.heartbeat || sandbox.heartbeat);
+  const nextSandbox = { ...staged, heartbeat, lastTransitionOpId: opId };
+  const summary = {
+    before: { agent: { activeAgentId: sandbox.agent.activeAgentId, model: sandbox.agent.model }, permissions: { ...(sandbox.permissions || {}) }, heartbeat: { ...(sandbox.heartbeat || {}) }, tradingGuidance: getTradingGuidanceForSandbox(sandboxId) },
+    after: { agent: { activeAgentId: nextSandbox.agent.activeAgentId, model: nextSandbox.agent.model }, permissions: { ...(nextSandbox.permissions || {}) }, heartbeat: { ...heartbeat }, tradingGuidance: plan.guidance ? plan.guidance.merged : getTradingGuidanceForSandbox(sandboxId) },
+  };
+  const isActive = () => _config.activeSandboxId === sandboxId;
+  await executeTransition({
+    sandboxId, opId, kind, summary, guidance,
+    applyConfig: () => { _config.sandboxes[sandboxId] = nextSandbox; if (isActive()) syncLegacyAliases(_config); },
+    revertConfig: () => { _config.sandboxes[sandboxId] = sandbox; if (isActive()) syncLegacyAliases(_config); },
+    save: saveConfig,
+  });
+  if (kind === 'switch') {
+    lastAgentSwitch.set(sandboxId, { from: sandbox.agent.activeAgentId, to: nextSandbox.agent.activeAgentId, permissionPatch, before: summary.before, after: summary.after });
+    console.log(`agent switch: ${sandboxId} ${sandbox.agent.activeAgentId} -> ${nextSandbox.agent.activeAgentId}; permissions ${permissionPatch ? JSON.stringify(permissionPatch) : 'unchanged'}; profile ${plan.guidance || plan.heartbeat ? 'applied' : 'none'}`);
+  }
+  return { sandbox: _config.sandboxes[sandboxId], plan, summary };
+}
+
+/** Profile-only re-apply: guidance and heartbeat for the CURRENT agent's effective strategy. Never touches permissions or the agent. */
+export async function applySlotProfileToSandbox(sandboxId, transition) {
+  const sandbox = getSandbox(sandboxId);
+  if (!sandbox) throw new Error('Sandbox not found');
+  const staged = mergeSandbox({ ...sandbox, updatedAt: new Date().toISOString() }, _config);
+  return commitPlannedTransition({ sandboxId, sandbox, staged, transition, permissionPatch: null, kind: 'reapply' });
+}
+
+export async function updateSandboxAgentSelection(sandboxId, updates, transition = null) {
   const sandbox = getSandbox(sandboxId);
   if (!sandbox) throw new Error('Sandbox not found');
   const nextActiveAgentId = updates.activeAgentId ?? sandbox.agent.activeAgentId;
@@ -1448,7 +1498,7 @@ export async function updateSandboxAgentSelection(sandboxId, updates) {
     if (permissionPatch) validatePermissionsPatch(permissionPatch);
   }
 
-  _config.sandboxes[sandboxId] = mergeSandbox({
+  const nextSandbox = mergeSandbox({
     ...sandbox,
     agent: {
       ...sandbox.agent,
@@ -1460,6 +1510,12 @@ export async function updateSandboxAgentSelection(sandboxId, updates) {
     permissions: permissionPatch ? { ...(sandbox.permissions || {}), ...permissionPatch } : sandbox.permissions,
     updatedAt: new Date().toISOString(),
   }, _config);
+  if (transition) {
+    if (!agentChanged) throw new Error('A reviewed transition is only for an agent change');
+    const { sandbox: saved } = await commitPlannedTransition({ sandboxId, sandbox, staged: nextSandbox, transition, permissionPatch, kind: 'switch' });
+    return saved;
+  }
+  _config.sandboxes[sandboxId] = nextSandbox;
   if (agentChanged) {
     lastAgentSwitch.set(sandboxId, { from: sandbox.agent.activeAgentId, to: nextActiveAgentId, permissionPatch });
     console.log(`agent switch: ${sandboxId} ${sandbox.agent.activeAgentId} -> ${nextActiveAgentId}; permissions ${permissionPatch ? JSON.stringify(permissionPatch) : 'unchanged'}`);
@@ -1478,6 +1534,7 @@ export async function updateSandboxStrategyRules(sandboxId, rules) {
 
 export async function addStrategy(strategy) {
   const optionStructures = validateOptionFitInput(strategy.optionStructures);
+  const slotProfile = strategy.slotProfile === undefined ? null : canonicalizeSlotProfile(strategy.slotProfile);
   const id = crypto.randomUUID().slice(0, 8);
   const newStrategy = {
     id,
@@ -1486,6 +1543,7 @@ export async function addStrategy(strategy) {
     rulesFile: null,
     customRules: strategy.customRules || '',
     ...(optionStructures === undefined ? {} : { optionStructures }),
+    ...(slotProfile ? { slotProfile } : {}),
     createdAt: new Date().toISOString(),
   };
   _config.strategies.push(newStrategy);
@@ -1497,7 +1555,16 @@ export async function updateStrategy(id, updates) {
   const idx = _config.strategies.findIndex(s => s.id === id);
   if (idx === -1) throw new Error('Strategy not found');
   if (updates && updates.optionStructures !== undefined) updates = { ...updates, optionStructures: validateOptionFitInput(updates.optionStructures) };
+  // A profile is validated (strict partial schema) before anything is saved; null or an empty profile removes it. Saving a strategy never rewrites a slot.
+  let removeProfile = false;
+  if (updates && updates.slotProfile !== undefined) {
+    const { slotProfile: rawProfile, ...rest } = updates;
+    const canonical = canonicalizeSlotProfile(rawProfile);
+    removeProfile = canonical === null;
+    updates = canonical === null ? rest : { ...rest, slotProfile: canonical };
+  }
   _config.strategies[idx] = { ..._config.strategies[idx], ...updates, updatedAt: new Date().toISOString() };
+  if (removeProfile) delete _config.strategies[idx].slotProfile;
   await saveConfig();
   return _config.strategies[idx];
 }

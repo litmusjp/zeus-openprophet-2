@@ -868,6 +868,7 @@
             <button class="btn primary sm" onclick="openNewAgentModal()">New Agent</button>
           </div>
           <p style="font-size:12px;color:var(--ink-muted);margin-bottom:12px">An agent is a personality — its name, description, and model define how it thinks. Assign a strategy to give it rules to follow.</p>
+          <div class="slot-drift-box"></div>
           <div id="agents-list"></div>
         </div>
         
@@ -1090,6 +1091,7 @@
         <div class="section" style="margin-top:24px">
           <div class="section-title">Final Instructions Preview</div>
           <p style="font-size:13px;color:var(--ink-muted);margin-bottom:8px">The complete instructions sent to the AI. Built from three layers: <strong>Agent Identity</strong> (personality) + <strong>Strategy Rules</strong> (your constraints) + <strong>System Instructions</strong> (tools &amp; heartbeat, auto-generated)</p>
+          <div class="slot-drift-box"></div>
           <div id="prompt-preview" style="background:var(--code-bg);border:1px solid var(--rule);padding:12px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;line-height:1.6;max-height:300px;overflow-y:auto;white-space:pre-wrap;color:var(--ink-light)">Loading...</div>
         </div>
 
@@ -3395,12 +3397,264 @@ async function clearAgentPrompt(agentId) {
   renderAll();
 }
 
-async function assignAgentToSandbox(agentId, sandboxId) {
-  await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ activeAgentId: agentId }),
+// ── Slot transitions (switch / re-apply): preview, confirm, send with reviewToken ──
+// One shared flow for every place that changes a slot's agent or re-applies strategy settings.
+// Never retries automatically: a stale (409 + preview) response re-opens the dialog for a fresh confirmation.
+function _slotFmt(val) {
+  if (val === null || val === undefined || val === '') return '(none)';
+  if (Array.isArray(val)) return val.length ? val.map(_slotFmt).join(', ') : '(none)';
+  if (typeof val === 'object') return JSON.stringify(val);
+  return String(val);
+}
+function _slotDiffRows(before, after) {
+  const isObj = x => x && typeof x === 'object' && !Array.isArray(x);
+  if (!isObj(before) || !isObj(after)) return [{ key: '', before, after }];
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]))
+    .map(k => ({ key: k, before: before[k], after: after[k] }));
+}
+function _slotRowsHtml(title, rows) {
+  if (!rows.length) return '';
+  return '<div style="margin:10px 0 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink-muted)">' + esc(title) + '</div>'
+    + rows.map(r => '<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;padding:2px 0">' + (r.key ? esc(r.key) + ': ' : '') + esc(_slotFmt(r.before)) + ' &rarr; ' + esc(_slotFmt(r.after)) + '</div>').join('');
+}
+function _slotListHtml(items, color) {
+  return items.map(t => '<div style="font-size:12px;color:' + color + ';padding:3px 0">' + esc(t) + '</div>').join('');
+}
+function _slotAgentName(id) { return ((config?.agents || []).find(a => a.id === id)?.name) || id || '--'; }
+function _slotOverlay(html) {
+  let overlay = document.getElementById('slot-transition-overlay');
+  if (overlay) overlay.remove();
+  overlay = document.createElement('div');
+  overlay.id = 'slot-transition-overlay';
+  overlay.className = 'modal-overlay visible';
+  overlay.style.zIndex = '1200';
+  overlay.innerHTML = '<div class="modal" style="max-height:88vh;overflow-y:auto">' + html + '</div>';
+  document.body.appendChild(overlay);
+  return overlay;
+}
+function _slotClose() { document.getElementById('slot-transition-overlay')?.remove(); }
+
+// Resolves true when the operator confirms, false on cancel.
+function showSlotTransitionModal(preview, notice) {
+  const p = preview || {};
+  const ch = p.changes || {};
+  const errors = (p.errors || []).map(String);
+  const warnings = (p.warnings || []).map(String);
+  if (p.hasProfile === false) warnings.unshift('This agent\'s strategy has no slot profile. The slot keeps its current Trading Guidance and heartbeat, and the agent is not guaranteed ready until these are checked.');
+  const reapply = p.kind === 'reapply';
+  let body = '<h3>' + (reapply ? 'Apply strategy settings to this slot' : 'Switch slot agent') + '</h3>'
+    + '<div style="font-size:12px;color:var(--ink-muted);margin-bottom:6px">Slot ' + esc(p.sandboxId || '') + ': '
+    + (reapply ? 'agent ' + esc(_slotAgentName(p.currentAgentId)) : esc(_slotAgentName(p.currentAgentId)) + ' &rarr; ' + esc(_slotAgentName(p.targetAgentId))) + '</div>';
+  if (notice) body += '<div style="padding:8px 10px;background:rgba(200,120,0,0.1);border:1px solid var(--warning);font-size:12px;margin-bottom:8px">' + esc(notice) + '</div>';
+  if (errors.length) body += '<div style="margin:8px 0;padding:8px 10px;border:1px solid var(--error)"><div style="font-size:11px;font-weight:700;color:var(--error)">Cannot continue</div>' + _slotListHtml(errors, 'var(--error)') + '</div>';
+  const permRows = ch.permissions ? _slotDiffRows(ch.permissions.before, ch.permissions.after) : [];
+  const guideRows = Array.isArray(ch.tradingGuidance) ? ch.tradingGuidance : [];
+  const hbRows = ch.heartbeat ? _slotDiffRows(ch.heartbeat.before, ch.heartbeat.after) : [];
+  body += _slotRowsHtml('Permissions', permRows) + _slotRowsHtml('Trading guidance', guideRows) + _slotRowsHtml('Heartbeat', hbRows);
+  if (!permRows.length && !guideRows.length && !hbRows.length) body += '<div style="font-size:12px;color:var(--ink-muted);margin:8px 0">No permission, guidance or heartbeat values change.</div>';
+  if (warnings.length) body += '<div style="margin:10px 0 4px;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--warning)">Warnings</div>' + _slotListHtml(warnings, 'var(--warning)');
+  if (p.exposure === 'unavailable') body += '<div style="font-size:12px;color:var(--ink-muted);margin-top:8px">Open-position exposure could not be read now; it is checked again when you confirm.</div>';
+  else if (p.exposure && typeof p.exposure === 'object') body += '<div style="font-size:12px;color:var(--ink-muted);margin-top:8px">Exposure: ' + esc(JSON.stringify(p.exposure).slice(0, 300)) + '</div>';
+  body += '<div class="modal-actions"><button class="btn" id="slot-tx-cancel">Cancel</button><button class="btn primary" id="slot-tx-confirm"' + (errors.length || !p.reviewToken ? ' disabled' : '') + '>' + (reapply ? 'Apply' : 'Switch agent') + '</button></div>';
+  const overlay = _slotOverlay(body);
+  return new Promise(resolve => {
+    overlay.querySelector('#slot-tx-cancel').onclick = () => { _slotClose(); resolve(false); };
+    overlay.querySelector('#slot-tx-confirm').onclick = () => { _slotClose(); resolve(true); };
   });
+}
+
+function showSlotResultModal(title, message, level, extra) {
+  const color = level === 'error' ? 'var(--error)' : level === 'warn' ? 'var(--warning)' : 'var(--success)';
+  const body = '<h3 style="color:' + color + '">' + esc(title) + '</h3>'
+    + (message ? '<div style="font-size:13px;margin-bottom:8px">' + esc(message) + '</div>' : '')
+    + _slotListHtml((extra || []).map(String), 'var(--warning)')
+    + '<div class="modal-actions"><button class="btn primary" id="slot-tx-ok">OK</button></div>';
+  const overlay = _slotOverlay(body);
+  return new Promise(resolve => { overlay.querySelector('#slot-tx-ok').onclick = () => { _slotClose(); resolve(); }; });
+}
+
+// opts: { sandboxId, kind: 'switch'|'reapply', activeAgentId?, strategyId?, send: async reviewToken => Response }
+// Returns { status: 'ok'|'cancelled'|'rejected'|'busy'|'not-ready'|'blocked', data, message }.
+async function runSlotTransition(opts) {
+  const { sandboxId, kind, activeAgentId, strategyId, send } = opts;
+  const qs = new URLSearchParams({ kind });
+  if (activeAgentId) qs.set('activeAgentId', activeAgentId);
+  if (strategyId) qs.set('strategyId', strategyId);
+  let preview = null;
+  try {
+    const pr = await fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent/switch-preview?' + qs.toString());
+    const pd = await pr.json().catch(() => ({}));
+    if (!pr.ok) throw new Error(pd.error || 'Preview failed (HTTP ' + pr.status + ')');
+    preview = pd;
+  } catch (e) {
+    const message = 'Could not load the change preview. Nothing was saved. ' + e.message;
+    await showSlotResultModal('Rejected: nothing saved', message, 'error');
+    return { status: 'rejected', message };
+  }
+  let notice = '';
+  for (;;) {
+    if (!(await showSlotTransitionModal(preview, notice))) return { status: 'cancelled', message: 'Cancelled' };
+    let r, d;
+    try {
+      r = await send(preview.reviewToken);
+      d = await r.json().catch(() => ({}));
+    } catch (e) {
+      const message = 'Request failed: ' + e.message + '. Check the slot state before trying again.';
+      await showSlotResultModal('Request failed', message, 'error');
+      return { status: 'rejected', message };
+    }
+    if (r.ok && d.ok !== false) {
+      if (d.warnings && d.warnings.length) await showSlotResultModal(kind === 'reapply' ? 'Settings applied' : 'Agent switched', '', 'ok', d.warnings);
+      return { status: 'ok', data: d };
+    }
+    if (r.status === 409 && d.preview) {
+      preview = d.preview;
+      notice = d.error || 'The slot changed since you reviewed it. Review the new changes and confirm again.';
+      continue; // re-show with the fresh preview; the operator must confirm again
+    }
+    if (r.status === 409) {
+      const message = d.error || 'Slot settings transition in progress';
+      await showSlotResultModal('Slot busy: nothing saved', message, 'warn');
+      return { status: 'busy', message };
+    }
+    if (d.committed === true && d.ready === false) {
+      const message = 'Settings saved; the agent has not restarted. ' + (d.error || '');
+      await showSlotResultModal('Settings saved; the agent has not restarted', d.error || 'The slot stays held until a restart succeeds or you stop it. Nothing is retried automatically.', 'warn');
+      return { status: 'not-ready', data: d, message };
+    }
+    if (d.committed === false && d.guidanceRestored === false) {
+      const message = 'Slot blocked: recovery needed. ' + (d.error || '');
+      await showSlotResultModal('Slot blocked: recovery needed', (d.error || '') + ' The slot will not run until this is resolved. Nothing is retried automatically.', 'error');
+      return { status: 'blocked', data: d, message };
+    }
+    const message = d.error || 'Request failed (HTTP ' + r.status + ')';
+    await showSlotResultModal('Rejected: nothing saved', message, 'error');
+    return { status: 'rejected', data: d, message };
+  }
+}
+
+function switchSlotAgent(sandboxId, agentId, extraBody) {
+  return runSlotTransition({
+    sandboxId, kind: 'switch', activeAgentId: agentId,
+    send: reviewToken => fetch('/api/sandboxes/' + encodeURIComponent(sandboxId) + '/agent', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...(extraBody || {}), activeAgentId: agentId, reviewToken }),
+    }),
+  });
+}
+
+async function applyStrategySettingsToSlot(sandboxId) {
+  const sid = sandboxId || getEffectiveSandboxId();
+  if (!sid || sid === '_manager') return;
+  const res = await runSlotTransition({
+    sandboxId: sid, kind: 'reapply',
+    send: reviewToken => fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/agent/apply-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reviewToken }),
+    }),
+  });
+  if (res.status !== 'cancelled') await refreshSelectedSandboxConfig();
+}
+
+// Drift warnings from prompt-preview (shown on the Agents page and above the instructions preview).
+function renderSlotDrift(warnings, sid) {
+  const list = (warnings || []).map(String);
+  const canApply = list.some(w => /profile|slot settings|strategy settings/i.test(w));
+  const html = list.length
+    ? '<div style="padding:10px 14px;background:rgba(200,120,0,0.08);border:1px solid var(--warning);border-radius:6px;margin-bottom:14px">'
+      + '<div style="font-size:11px;font-weight:700;color:var(--warning);margin-bottom:4px">Slot warnings</div>'
+      + _slotListHtml(list, 'var(--ink)')
+      + (canApply && sid ? '<button class="btn sm" style="margin-top:8px" onclick="applyStrategySettingsToSlot()">Apply strategy settings to this slot</button>' : '')
+      + '</div>'
+    : '';
+  document.querySelectorAll('.slot-drift-box').forEach(el => { el.innerHTML = html; });
+}
+
+// Banner for any slot the server has blocked after a failed settings transition.
+function renderSlotBlockedBanner(sandboxes) {
+  const blocked = (sandboxes || []).filter(s => s && s.transitionBlocked);
+  let el = document.getElementById('slot-blocked-banner');
+  if (!blocked.length) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'slot-blocked-banner';
+    el.style.cssText = 'position:sticky;top:0;z-index:900;padding:8px 14px;background:var(--error);color:#fff;font-size:12px;font-weight:600';
+    document.body.insertBefore(el, document.body.firstChild);
+  }
+  el.innerHTML = blocked.map(s => {
+    const acct = (config?.accounts || []).find(a => 'sbx_' + a.id === s.sandboxId);
+    return '<div>Slot blocked: recovery needed (' + esc(acct?.name || s.sandboxId) + '): ' + esc(s.transitionBlocked.reason || 'reason not given') + '</div>';
+  }).join('');
+}
+
+// ── Strategy editor: Slot settings (profile) ──
+// [key, label, min, max, step] -- ranges mirror the Trading Guidance card.
+const _SLOT_PROFILE_GUIDANCE = [
+  ['contractDeltaMin', 'Delta from', 0.05, 0.95, 0.05], ['contractDeltaMax', 'Delta to', 0.05, 0.95, 0.05],
+  ['expiryMinDays', 'Expiry from (days)', 1, 365, 1], ['expiryMaxDays', 'Expiry to (days)', 1, 365, 1],
+  ['minEntryPct', 'Minimum new-entry size (%)', 0.5, 25, 0.5], ['extendedPct', '"Extended" above level (%)', 0.5, 25, 0.5],
+  ['marketSymbol', 'Market benchmark symbol', null, null, null], ['marketTolerancePct', 'Market tolerance (%)', 0, 5, 0.1],
+  ['marketSlopeMinPct', 'Market average 5-session change at least (%)', -5, 5, 0.05], ['nearSupportPct', '"Near support" within (%)', 0.1, 10, 0.1],
+  ['avgSlopeMinPct', '"Flat or rising" 5-session change at least (%)', -5, 5, 0.05], ['extraSymbolsPerScan', 'Extra symbols per scan', 0, 100, 1],
+  ['catalystRangeMinutes', 'Catalyst range (minutes)', 5, 120, 5], ['catalystMaxGapPct', 'Catalyst max gap (%)', 1, 25, 0.5],
+];
+const _SLOT_PROFILE_HEARTBEAT = [['market_open', 'Market open (seconds)'], ['midday', 'Midday (seconds)'], ['market_close', 'Market close (seconds)']];
+
+function slotProfileEditorHtml(profile) {
+  const g = (profile && profile.tradingGuidance) || {};
+  const h = (profile && profile.heartbeat) || {};
+  const field = (id, label, val, attrs, hint) => '<div class="form-group"><label>' + esc(label) + '</label><input ' + attrs + ' id="' + id + '" value="' + esc(val === undefined || val === null ? '' : val) + '">' + (hint ? '<div class="form-hint">' + esc(hint) + '</div>' : '') + '</div>';
+  return '<details id="f-sp-details" style="margin:12px 0"' + (profile ? ' open' : '') + '>'
+    + '<summary style="cursor:pointer;font-size:12px;font-weight:700">Slot settings (applied when an agent using this strategy is switched in)</summary>'
+    + '<div class="form-hint" style="margin:8px 0">Leave a field blank to leave that setting alone. 0 is kept as 0. Nothing here is applied until a slot is switched or re-applied.</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">'
+    + _SLOT_PROFILE_GUIDANCE.map(([key, label, min, max, step]) => key === 'marketSymbol'
+        ? field('f-sp-' + key, label, g[key], 'type="text" maxlength="6"', 'Uppercase ticker, e.g. SPY')
+        : field('f-sp-' + key, label, g[key], 'type="number" min="' + min + '" max="' + max + '" step="' + step + '"', 'Range ' + min + ' to ' + max)).join('')
+    + _SLOT_PROFILE_HEARTBEAT.map(([key, label]) => field('f-sp-hb-' + key, label, h[key], 'type="number" min="30" max="14400" step="1"', 'Range 30 to 14400. Setting any interval also turns on market-aware mode with locked intervals.')).join('')
+    + '</div>'
+    + '<button class="btn sm danger" type="button" style="margin-top:8px" onclick="clearSlotProfileEditor()">Remove profile</button>'
+    + '<span class="form-hint" id="f-sp-removed" style="margin-left:8px"></span>'
+    + '</details>';
+}
+let _slotProfileRemoved = false;
+function clearSlotProfileEditor() {
+  document.querySelectorAll('#f-sp-details input').forEach(i => { i.value = ''; });
+  _slotProfileRemoved = true;
+  const note = document.getElementById('f-sp-removed');
+  if (note) note.textContent = 'Profile will be removed when you save.';
+}
+// Returns { include: bool, value: object|null } or { error } -- blank omits the key, 0 stays 0.
+function collectSlotProfile(hadProfile) {
+  const guidance = {}, heartbeat = {};
+  for (const [key] of _SLOT_PROFILE_GUIDANCE) {
+    const raw = String(document.getElementById('f-sp-' + key)?.value ?? '').trim();
+    if (raw === '') continue;
+    if (key === 'marketSymbol') { guidance[key] = raw.toUpperCase(); continue; }
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return { error: 'Slot settings: ' + key + ' must be a number' };
+    guidance[key] = n;
+  }
+  for (const [key] of _SLOT_PROFILE_HEARTBEAT) {
+    const raw = String(document.getElementById('f-sp-hb-' + key)?.value ?? '').trim();
+    if (raw === '') continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return { error: 'Slot settings: heartbeat ' + key + ' must be a number' };
+    heartbeat[key] = n;
+  }
+  const profile = {};
+  if (Object.keys(guidance).length) profile.tradingGuidance = guidance;
+  if (Object.keys(heartbeat).length) profile.heartbeat = heartbeat;
+  if (Object.keys(profile).length) return { include: true, value: profile };
+  return hadProfile || _slotProfileRemoved ? { include: true, value: null } : { include: false };
+}
+
+async function assignAgentToSandbox(agentId, sandboxId) {
+  const res = await switchSlotAgent(sandboxId, agentId);
+  if (res.status === 'cancelled') return;
   await refreshSelectedSandboxConfig();
   renderAll();
 }
@@ -3509,14 +3763,11 @@ function renderModels() {
 async function activateAgent(id) {
   const sid = getEffectiveSandboxId();
   if (sid) {
-    await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/agent', {
-      method:'PUT',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ activeAgentId: id }),
-    });
-    await refreshSelectedSandboxConfig();
+    const res = await switchSlotAgent(sid, id);
+    if (res.status !== 'cancelled') await refreshSelectedSandboxConfig();
   } else {
-    await fetch('/api/agents/'+id+'/activate',{method:'POST'});
+    // No slot to preview against: the legacy route cannot be reviewed, so it is refused rather than sent unreviewed.
+    await showSlotResultModal('Rejected: nothing saved', 'No slot is selected, so the change cannot be previewed. Select a slot and try again.', 'error');
   }
 }
 async function deleteAgent(id) { if(confirm('Delete this agent?')) await fetch('/api/agents/'+id,{method:'DELETE'}); }
@@ -3551,7 +3802,8 @@ function showModal(type, data) {
   }
   else if(type === 'strategy-create' || type === 'strategy-edit') {
     const s = data || { name:'', description:'', customRules:'' };
-    modal.innerHTML = '<h3>' + (data?'Edit':'Create') + ' Strategy</h3><div class="form-group"><label>Name</label><input type="text" id="f-st-name" value="'+esc(s.name)+'"></div><div class="form-group"><label>Description</label><input type="text" id="f-st-desc" value="'+esc(s.description)+'"></div><div class="form-group"><label>Trading Rules</label><textarea id="f-st-rules" rows="16" placeholder="## Position Sizing\n- Max 15% per position\n...">'+(s.customRules||'')+'</textarea><div class="form-hint">Markdown format. These rules are injected into the agent\'s system prompt.</div></div><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitStrategy(\''+(data?.id||'')+'\')">' + (data?'Save':'Create') + '</button></div>';
+    _slotProfileRemoved = false;
+    modal.innerHTML = '<h3>' + (data?'Edit':'Create') + ' Strategy</h3><div class="form-group"><label>Name</label><input type="text" id="f-st-name" value="'+esc(s.name)+'"></div><div class="form-group"><label>Description</label><input type="text" id="f-st-desc" value="'+esc(s.description)+'"></div><div class="form-group"><label>Trading Rules</label><textarea id="f-st-rules" rows="16" placeholder="## Position Sizing\n- Max 15% per position\n...">'+(s.customRules||'')+'</textarea><div class="form-hint">Markdown format. These rules are injected into the agent\'s system prompt.</div></div>' + slotProfileEditorHtml(s.slotProfile) + '<div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitStrategy(\''+(data?.id||'')+'\')">' + (data?'Save':'Create') + '</button></div>';
   }
   overlay.classList.add('visible');
 }
@@ -3576,12 +3828,16 @@ async function submitAccount() {
 
 async function submitStrategy(id) {
   const body = { name: v('f-st-name'), description: v('f-st-desc'), customRules: v('f-st-rules') };
+  const hadProfile = !!(id && (config.strategies || []).find(x => x.id === id)?.slotProfile);
+  const profile = collectSlotProfile(hadProfile);
+  if (profile.error) { alert('Error: ' + profile.error); return; }
+  if (profile.include) body.slotProfile = profile.value;
   try {
     const r = id
       ? await fetch('/api/strategies/'+id, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
       : await fetch('/api/strategies', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    const d = await r.json();
-    if (d.error) { alert('Error: ' + d.error); return; }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { alert('Error: ' + (d.error || 'Failed to save strategy (HTTP ' + r.status + ')')); return; }
     closeModal();
   } catch (e) { alert('Error: ' + e.message); }
 }
@@ -3930,14 +4186,9 @@ async function _builderSubmit() {
     const activateEl = document.getElementById('review-activate');
     let activated = false;
     if (_builder.sandboxId && savedId && activateEl && activateEl.checked) {
-      const activationResponse = await fetch('/api/sandboxes/' + encodeURIComponent(_builder.sandboxId) + '/agent', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activeAgentId: savedId }),
-      });
-      let activationResult = {};
-      try { activationResult = await activationResponse.json(); } catch { /* some successful write routes have no JSON body */ }
-      if (!activationResponse.ok || activationResult.error || activationResult.ok === false) {
-        throw new Error(String(activationResult.error || 'Failed to activate agent').slice(0, 180));
+      const activation = await switchSlotAgent(_builder.sandboxId, savedId);
+      if (activation.status !== 'ok') {
+        throw new Error('Agent saved but not activated: ' + String(activation.message || 'cancelled').slice(0, 160));
       }
       activated = true;
     }
@@ -4010,6 +4261,7 @@ async function checkHealth() {
     const healthy = sandboxState ? sandboxState.goReady : d.trading_bot === 'healthy';
     el.textContent = healthy ? 'ok' : 'off';
     el.style.color = healthy ? 'var(--success)' : 'var(--error)';
+    renderSlotBlockedBanner(d.sandboxes);
     renderAccounts();
     renderAgents();
     renderSandboxTabs();
@@ -4705,7 +4957,7 @@ async function renderPromptPreview() {
     const r = await fetch('/api/agent/prompt-preview' + (sid ? '?sandboxId=' + encodeURIComponent(sid) : ''));
     const d = await r.json();
     if (requestId !== promptPreviewRequestId || getEffectiveSandboxId() !== sid || d.sandboxId !== sid) return;
-    if (d.prompt) {
+    renderSlotDrift(d.warnings, sid); if (d.prompt) {
       el.textContent = d.prompt;
     } else {
       el.textContent = 'No prompt available.';
@@ -4739,11 +4991,18 @@ function saveSandboxAgentSelection() {
       activeAgentId: document.getElementById('sandbox-agent-select').value,
       model: document.getElementById('sandbox-model-select').value,
     };
-    await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/agent', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const currentAgentId = (config.sandboxes || {})[sid]?.agent?.activeAgentId || sandboxScoped.agent?.id;
+    if (body.activeAgentId && body.activeAgentId !== currentAgentId) {
+      // Agent change: reviewed switch (the model rides along in the same request).
+      await switchSlotAgent(sid, body.activeAgentId, { model: body.model });
+    } else {
+      const r = await fetch('/api/sandboxes/' + encodeURIComponent(sid) + '/agent', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); log('Sandbox agent save failed: ' + (d.error || 'HTTP ' + r.status), 'error'); }
+    }
     await refreshSelectedSandboxConfig();
   }, 400);
 }

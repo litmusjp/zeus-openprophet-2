@@ -15,6 +15,7 @@ import { applyCloseOnlyText, applyDebitVerticalText, debitVerticalsAllowed, open
 import { ALPHADESK_WORKFLOW_BLOCK, placeWorkflow, stripSavedWorkflow } from './alphadesk-workflow.js';
 import { hasStartListBlock, isOptionsAgent } from './agent-consistency.js';
 import { DEFAULT_TRADING_GUIDANCE, normalizeTradingGuidance, renderTradingGuidance, renderAlphaDeskPolicyFacts, getTradingGuidanceForSandbox, strategyFamilyOf, openingGateMinutesFor } from './trading-guidance.js';
+import { slotGate } from './slot-gate.js';
 import { DEFAULT_AGENT_MODEL, DEFAULT_MAX_TOOL_ROUNDS, BEAT_TIMEOUT_MS, SIGKILL_GRACE_MS, BEAT_BACKOFF, MAX_HEARTBEAT_SECONDS, HEARTBEAT_OVERRIDE_WARMUP_SESSIONS } from './defaults.js';
 import { mergeTradeUpdate, reconcilePendingTrades } from './trade-telemetry.js';
 import { nextMarketReview, marketSession, marketSessionPhase, validateMarketCalendar } from './market-aware-scheduler.js';
@@ -953,6 +954,8 @@ export class AgentHarness {
 
   async start() {
     if (this.state.running) return;
+    const startBlock = slotGate.beatBlock(this.sandboxId);
+    if (startBlock?.hard) throw new Error(`Start refused: ${startBlock.reason}`);
 
     await this.reloadConfig({ resetSession: true, silent: true });
     if (String(this.state.activeModel || '').startsWith('openai/')) {
@@ -1053,6 +1056,8 @@ export class AgentHarness {
   }
 
   async stop() {
+    // Stopping the slot is the operator's answer to "settings saved but the agent has not restarted": the next start is a fresh one.
+    slotGate.clearNotReady(this.sandboxId);
     this.state.running = false;
     this._marketScheduleEpoch += 1;
     if (this._timer) { this.clearTimeoutFn(this._timer); this._timer = null; }
@@ -1137,6 +1142,9 @@ export class AgentHarness {
       }
     }
 
+    const messageBlock = slotGate.beatBlock(this.sandboxId);
+    if (messageBlock) throw new Error(`Message not sent: ${messageBlock.reason}`);
+
     this.state.emit('agent_log', {
       message: `User: ${message}`,
       level: 'info',
@@ -1204,6 +1212,7 @@ export class AgentHarness {
   async _adHocBeat(userMessage) {
     if (!this.state.running) return;
     if (this._beating) return;
+    if (this._deferForSlotGate()) return;
     this._beating = true;
 
     const beatNum = ++this.state.beatCount;
@@ -1438,8 +1447,17 @@ ${userBlock}`;
     }, seconds * 1000);
   }
 
+  // A beat never starts while the slot's settings are being changed (or are not ready): it logs and the scheduler retries at its next tick.
+  _deferForSlotGate() {
+    const gateBlock = slotGate.beatBlock(this.sandboxId);
+    if (!gateBlock) return false;
+    this.state.emit('agent_log', { message: `beat deferred: ${gateBlock.reason}`, level: 'warning' });
+    return true;
+  }
+
   async _beat() {
     if ((this._marketAwareEnabled() && (!this.state.running || this.state.paused)) || this._beating) return;
+    if (this._deferForSlotGate()) return;
     this._beating = true;
 
     const beatNum = ++this.state.beatCount;

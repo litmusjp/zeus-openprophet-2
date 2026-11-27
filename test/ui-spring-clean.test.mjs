@@ -159,6 +159,12 @@ test('Agent Builder activates first, so the operator\'s own permissions are save
       return { ok: true, json: async () => ({}) };
     },
     closeModal() { closes++; },
+    // The shared reviewed-switch helper is covered by switch-profile-ui.test.mjs; here it just reports the slot PUT result.
+    async switchSlotAgent(sandboxId) {
+      const r = await ctx.fetch('/api/sandboxes/' + sandboxId + '/agent', { method: 'PUT' });
+      const d = await r.json().catch(() => ({}));
+      return r.ok && !d.error ? { status: 'ok' } : { status: 'rejected', message: d.error };
+    },
     _builderValidateStep1: () => true, _builderGoStep() {}, _builderClearError() {}, _builderShowError: message => errors.push(message),
     refreshSelectedSandboxConfig: async () => { refreshes++; }, renderAll() {}, showToast() {}, config: {},
   };

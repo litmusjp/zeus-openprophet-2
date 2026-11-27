@@ -74,6 +74,12 @@ function coerce(key, value) {
   return number;
 }
 
+/** Validates and normalises ONE supplied guidance value with the same range table a save uses (throws on a bad value or an unknown key). */
+export function validateGuidanceField(key, value) {
+  if (!TRADING_GUIDANCE_KEYS.includes(key)) throw new Error(`Unknown trading guidance field: ${key}`);
+  return coerce(key, value);
+}
+
 /**
  * Merge `input` over `base` (defaults when omitted) and validate. `strict` throws on bad input
  * (used when a user saves); non-strict drops bad stored values back to the default.
@@ -356,24 +362,56 @@ export function getTradingGuidanceForSandbox(sandboxId) {
   return normalizeTradingGuidance(saved);
 }
 
+// One queue for every write to the shared file. Read, merge, snapshot and publish all run inside it, so writes to different slots
+// can never lose each other (a snapshot taken before the queue would be stale by the time it is published).
+function enqueueWrite(task) {
+  const run = writeChain.catch(() => {}).then(task);
+  writeChain = run;
+  return run;
+}
+
+async function publishSnapshot(snapshot) {
+  await fs.mkdir(dataDir(), { recursive: true });
+  const tmp = `${filePath()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(snapshot, null, 2));
+  await fs.rename(tmp, filePath());
+  store = snapshot;
+}
+
 export async function setTradingGuidanceForSandbox(sandboxId, patch, { beforePersist } = {}) {
   const id = String(sandboxId || '');
   if (!id) throw new Error('sandboxId is required');
   const unknown = Object.keys(patch || {}).filter(key => !TRADING_GUIDANCE_KEYS.includes(key) && !RETIRED_KEYS.includes(key));
   if (unknown.length) throw new Error(`Unknown trading guidance field: ${unknown[0]}`);
-  const next = normalizeTradingGuidance(patch, { strict: true, base: getTradingGuidanceForSandbox(id) });
-  // A save that must also reach a running backend (the entry spread cap) fails as a whole when that fails.
-  if (typeof beforePersist === 'function') await beforePersist(next);
-  const snapshot = { version: 1, sandboxes: { ...store.sandboxes, [id]: { ...next, updatedAt: new Date().toISOString() } } };
-  writeChain = writeChain.catch(() => {}).then(async () => {
-    await fs.mkdir(dataDir(), { recursive: true });
-    const tmp = `${filePath()}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(snapshot, null, 2));
-    await fs.rename(tmp, filePath());
+  return enqueueWrite(async () => {
+    const next = normalizeTradingGuidance(patch, { strict: true, base: getTradingGuidanceForSandbox(id) });
+    // A save that must also reach a running backend (the entry spread cap) fails as a whole when that fails.
+    if (typeof beforePersist === 'function') await beforePersist(next);
+    await publishSnapshot({ version: 1, sandboxes: { ...store.sandboxes, [id]: { ...next, updatedAt: new Date().toISOString() } } });
+    return next;
   });
-  await writeChain;
-  store = snapshot;
-  return next;
+}
+
+/** The raw saved entry of one slot (a copy), or null when the slot has none. Used to capture a slot's state before a transition. */
+export function getSavedGuidanceEntry(sandboxId) {
+  const saved = store.sandboxes[String(sandboxId)];
+  return saved ? JSON.parse(JSON.stringify(saved)) : null;
+}
+
+/**
+ * Replaces (or, with null, removes) ONE slot's saved entry, inside the same queue. With `requireOpId` the replacement only happens
+ * while the slot's current entry still carries that transition id (so a later operator edit is never overwritten). Returns whether it wrote.
+ */
+export function replaceGuidanceEntryForSandbox(sandboxId, entry, { requireOpId } = {}) {
+  const id = String(sandboxId || '');
+  if (!id) return Promise.reject(new Error('sandboxId is required'));
+  return enqueueWrite(async () => {
+    if (requireOpId !== undefined && store.sandboxes[id]?.transitionOpId !== requireOpId) return false;
+    const sandboxes = { ...store.sandboxes };
+    if (entry) sandboxes[id] = { ...entry }; else delete sandboxes[id];
+    await publishSnapshot({ version: 1, sandboxes });
+    return true;
+  });
 }
 
 export function resetTradingGuidanceStoreForTests() { store = { version: 1, sandboxes: {} }; }

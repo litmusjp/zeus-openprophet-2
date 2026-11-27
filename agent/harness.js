@@ -737,6 +737,10 @@ export class AgentHarness {
     this.getCurrentPhaseFn = getCurrentPhaseFn;
     this.systemPrompt = '';
     this._timer = null;
+    this._gateRetryTimer = null;  // the single retry of a beat the slot gate deferred (see _armGateRetry)
+    this._gateRetryMs = 60_000;
+    this._gateRetryWindowMs = 900_000;  // a deferred beat is retried for at most this long, counted from its first deferral
+    this._gateRetryFirstAt = null;
     this._beating = false;
     this._agentConfig = null;
     this._sandboxConfig = null;
@@ -1061,6 +1065,7 @@ export class AgentHarness {
     this.state.running = false;
     this._marketScheduleEpoch += 1;
     if (this._timer) { this.clearTimeoutFn(this._timer); this._timer = null; }
+    this._clearGateRetry();
     this.state.nextReviewAt = null;
     this.state.nextBeatTime = null;
     if (this._beatTimeout) { clearTimeout(this._beatTimeout); this._beatTimeout = null; }
@@ -1213,6 +1218,7 @@ export class AgentHarness {
     if (!this.state.running) return;
     if (this._beating) return;
     if (this._deferForSlotGate()) return;
+    this._clearGateRetry();
     this._beating = true;
 
     const beatNum = ++this.state.beatCount;
@@ -1447,6 +1453,41 @@ ${userBlock}`;
     }, seconds * 1000);
   }
 
+  // A scheduled beat that the slot gate deferred is not lost: ONE retry timer (never two) runs it about a minute later. The deferral itself
+  // performs no model or tool work. The retry is cleared by stop(), by the retry firing, and by any beat that actually starts; it drops itself
+  // when the agent is stopped or paused. A beat that is still gated re-arms the same single timer, but only for _gateRetryWindowMs counted
+  // from the first deferral of the chain; after that the deferred beat is dropped and the normal schedule alone continues.
+  _cancelGateRetryTimer() {
+    if (this._gateRetryTimer) { this.clearTimeoutFn(this._gateRetryTimer); this._gateRetryTimer = null; }
+  }
+
+  _clearGateRetry() { // also ends the chain (a real beat started, stop, or the retry ran)
+    this._cancelGateRetryTimer();
+    this._gateRetryFirstAt = null;
+  }
+
+  _armGateRetry() {
+    if (!this.state.running) return;
+    const now = this.now();
+    if (this._gateRetryFirstAt === null) this._gateRetryFirstAt = now;
+    else if (now - this._gateRetryFirstAt >= this._gateRetryWindowMs) {
+      this._clearGateRetry();
+      this.state.emit('agent_log', { message: 'deferred beat dropped after 15 min; normal schedule continues', level: 'warning' });
+      return;
+    }
+    this._cancelGateRetryTimer();
+    const timer = this.setTimeoutFn(async () => {
+      if (this._gateRetryTimer !== timer) return;
+      this._gateRetryTimer = null;
+      if (!this.state.running || this.state.paused) { this._gateRetryFirstAt = null; return; }
+      await this._beat();
+      // Non-market-aware: restart the normal cadence from this beat (a re-deferred beat re-armed the retry and keeps the normal timer as it is).
+      if (this.state.running && !this._gateRetryTimer && !this._marketAwareEnabled()) this._scheduleNext();
+    }, this._gateRetryMs);
+    timer?.unref?.();
+    this._gateRetryTimer = timer;
+  }
+
   // A beat never starts while the slot's settings are being changed (or are not ready): it logs and the scheduler retries at its next tick.
   _deferForSlotGate() {
     const gateBlock = slotGate.beatBlock(this.sandboxId);
@@ -1457,7 +1498,8 @@ ${userBlock}`;
 
   async _beat() {
     if ((this._marketAwareEnabled() && (!this.state.running || this.state.paused)) || this._beating) return;
-    if (this._deferForSlotGate()) return;
+    if (this._deferForSlotGate()) { this._armGateRetry(); return; }
+    this._clearGateRetry(); // a beat is starting now: no retry is needed
     this._beating = true;
 
     const beatNum = ++this.state.beatCount;

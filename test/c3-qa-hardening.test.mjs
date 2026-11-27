@@ -310,9 +310,13 @@ test('with the real store: a switch to Compass is refused (409, nothing saved) w
 });
 
 test('both agent-switch routes go through runGuardedSwitch (the guard is the only way to save a switch)', async () => {
-  const source = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
-  const sandboxRoute = source.slice(source.indexOf("app.put('/api/sandboxes/:id/agent',"), source.indexOf("app.put('/api/sandboxes/:id/agent/overrides'"));
-  const activateRoute = source.slice(source.indexOf("app.post('/api/agents/:id/activate'"), source.indexOf('// Strategies'));
+  // The two routes are registered by server.js and defined in slot-review.js (registerSandboxAgentRoute / registerAgentActivateRoute).
+  const serverSource = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
+  const source = await fs.readFile(new URL('../agent/slot-review.js', import.meta.url), 'utf8');
+  assert.match(serverSource, /registerSandboxAgentRoute\(app, /);
+  assert.match(serverSource, /registerAgentActivateRoute\(app, /);
+  const sandboxRoute = source.slice(source.indexOf('export function registerSandboxAgentRoute'), source.indexOf('export function registerAgentActivateRoute'));
+  const activateRoute = source.slice(source.indexOf('export function registerAgentActivateRoute'), source.indexOf('export function registerStrategyWriteRoutes'));
   for (const route of [sandboxRoute, activateRoute]) {
     assert.match(route, /runGuardedSwitch\(/);
     assert.match(route, /res\.status\(err\.status \|\| 400\)/);
@@ -321,7 +325,7 @@ test('both agent-switch routes go through runGuardedSwitch (the guard is the onl
   assert.match(activateRoute, /save: \(\) => setActiveAgent\(/);
   assert.equal(sandboxRoute.split('updateSandboxAgentSelection(').length - 1, 1, 'no unguarded save in the sandbox route');
   assert.equal(activateRoute.split('setActiveAgent(').length - 1, 1, 'no unguarded save in the activate route');
-  assert.doesNotMatch(source, /assertSwitchKeepsOptionsManageable/);
+  assert.doesNotMatch(serverSource + source, /assertSwitchKeepsOptionsManageable/);
 });
 
 test('FQ-02: a definition change clears only a slot copy of the OLD strategy; an intentional different slot strategy stays', async () => {

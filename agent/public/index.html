@@ -3560,9 +3560,14 @@ async function applyStrategySettingsToSlot(sandboxId) {
 }
 
 // Drift warnings from prompt-preview (shown on the Agents page and above the instructions preview).
-function renderSlotDrift(warnings, sid) {
-  const list = (warnings || []).map(String);
-  const canApply = list.some(w => /profile|slot settings|strategy settings/i.test(w));
+// `preview` is the prompt-preview response. Apply is offered only when the structured profileDrift is non-null (a profiled strategy that differs
+// from the slot); the no-profile notice comes from profileStatus (the server also lists it in warnings, so it is added only when missing).
+const NO_PROFILE_NOTICE = 'This agent\'s strategy has no slot settings profile. The slot keeps its current Trading Guidance and heartbeat intervals, and the agent is not guaranteed ready until they are checked.';
+function renderSlotDrift(preview, sid) {
+  const p = preview || {};
+  const list = (p.warnings || []).map(String);
+  if (p.profileStatus && p.profileStatus.hasProfile === false && !list.some(w => w.includes('no slot settings profile'))) list.unshift(NO_PROFILE_NOTICE);
+  const canApply = Boolean(p.profileDrift);
   const html = list.length
     ? '<div style="padding:10px 14px;background:rgba(200,120,0,0.08);border:1px solid var(--warning);border-radius:6px;margin-bottom:14px">'
       + '<div style="font-size:11px;font-weight:700;color:var(--warning);margin-bottom:4px">Slot warnings</div>'
@@ -4957,7 +4962,7 @@ async function renderPromptPreview() {
     const r = await fetch('/api/agent/prompt-preview' + (sid ? '?sandboxId=' + encodeURIComponent(sid) : ''));
     const d = await r.json();
     if (requestId !== promptPreviewRequestId || getEffectiveSandboxId() !== sid || d.sandboxId !== sid) return;
-    renderSlotDrift(d.warnings, sid); if (d.prompt) {
+    renderSlotDrift(d, sid); if (d.prompt) {
       el.textContent = d.prompt;
     } else {
       el.textContent = 'No prompt available.';

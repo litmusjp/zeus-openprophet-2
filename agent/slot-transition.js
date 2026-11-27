@@ -133,6 +133,7 @@ export async function executeTransition(t) {
   try {
     t.applyConfig();
     await (typeof faults.saveConfig === 'function' ? faults.saveConfig() : t.save());
+    await fault('afterConfigSave'); // tests only: the save reached disk, then reported an error (an ambiguous publication)
   } catch (error) {
     if (error instanceof CrashSimulation) throw error;
     await compensate(t, record, error);
@@ -153,8 +154,11 @@ async function compensate(t, record, cause) {
     try { await fault('duringCompensation'); await replaceGuidanceEntryForSandbox(sandboxId, t.guidance.before, { requireOpId: opId }); } catch (error) { restored = false; reason = error.message; }
   }
   if (restored) {
-    // Best effort: scrub any copy of the rejected state another slot's save may have written to disk meanwhile.
-    try { await t.save(); } catch { /* the disk keeps whatever it held before; recovery rules still resolve it */ }
+    // The restored pair must be confirmed on disk: this save also scrubs any copy of the rejected state that reached the disk (the staged
+    // config may have been published before the error). When it fails the disk may still hold the staged config, so the record stays.
+    try { await fault('compensationSave'); await t.save(); } catch (error) { restored = false; reason = `the restored settings could not be confirmed on disk: ${error.message}`; }
+  }
+  if (restored) {
     await clearPending(sandboxId, opId).catch(() => {});
     throw new SlotTransitionError(500, { ok: false, committed: false, guidanceRestored: true, before: t.summary.before, after: t.summary.after, error: `The slot settings could not be saved (${cause.message}); the Trading Guidance was restored and nothing was changed` });
   }

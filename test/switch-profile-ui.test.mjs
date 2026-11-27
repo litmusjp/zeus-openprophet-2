@@ -8,6 +8,8 @@ const flow = page.slice(page.indexOf('function _slotFmt'), page.indexOf('// Drif
 const editor = page.slice(page.indexOf('// ── Strategy editor: Slot settings (profile)'), page.indexOf('function slotProfileEditorHtml'))
   + page.slice(page.indexOf('let _slotProfileRemoved'), page.indexOf('async function assignAgentToSandbox'));
 
+const drift = page.slice(page.indexOf('const NO_PROFILE_NOTICE'), page.indexOf('// Banner for any slot the server has blocked'));
+
 const esc = s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 
 function flowContext({ responses, confirms }) {
@@ -102,4 +104,47 @@ test('strategy editor: blank omits, 0 kept, remove sends null, untouched empty s
   assert.deepEqual(JSON.parse(JSON.stringify(ctx.collectSlotProfile(true))), { include: true, value: null });
   values['f-sp-contractDeltaMax'] = 'abc';
   assert.ok(ctx.collectSlotProfile(false).error);
+});
+
+// N03(b)/N02: the Apply button follows the structured profileDrift only; the no-profile notice follows profileStatus.
+function renderDrift(preview, sid = 'sbx_a') {
+  const box = { innerHTML: '' };
+  const ctx = { esc, document: { querySelectorAll: selector => (selector === '.slot-drift-box' ? [box] : []) } };
+  vm.createContext(ctx);
+  new vm.Script(flow).runInContext(ctx);
+  new vm.Script(drift).runInContext(ctx);
+  ctx.renderSlotDrift(preview, sid);
+  return box.innerHTML;
+}
+const APPLY = /applyStrategySettingsToSlot\(\)/;
+const NOTICE = 'Barometer\'s strategy has no slot settings profile: this slot keeps its current settings.';
+
+test('drift box: Apply appears only for a non-null profileDrift, never from warning text', () => {
+  const drifted = renderDrift({ warnings: ['Barometer\'s strategy settings differ from this slot: expiryMinDays is 33 (strategy 90).'], profileStatus: { effectiveStrategyId: 's', hasProfile: true }, profileDrift: { differs: true, items: [{ key: 'expiryMinDays' }] } });
+  assert.match(drifted, APPLY);
+  assert.match(drifted, /strategy settings differ/);
+  // the same wording without structured drift: no button (the old text match would have offered one)
+  assert.doesNotMatch(renderDrift({ warnings: ['Barometer\'s strategy settings differ from this slot: x'], profileStatus: { hasProfile: true }, profileDrift: null }), APPLY);
+  assert.doesNotMatch(renderDrift({ warnings: ['slot settings profile text'], profileDrift: null }), APPLY);
+  assert.doesNotMatch(renderDrift({ warnings: ['x'], profileDrift: { differs: true, items: [] } }, ''), APPLY, 'no slot -> no button');
+});
+
+test('drift box: an unprofiled strategy shows the no-profile notice (once) and no Apply button; escaped', () => {
+  const withServerText = renderDrift({ warnings: [NOTICE], profileStatus: { effectiveStrategyId: 'macro-rotation', hasProfile: false }, profileDrift: null });
+  assert.match(withServerText, /no slot settings profile/);
+  assert.equal((withServerText.match(/no slot settings profile/g) || []).length, 1);
+  assert.doesNotMatch(withServerText, APPLY);
+  // the structured status alone is enough: the UI supplies the notice when the warnings do not carry it
+  const statusOnly = renderDrift({ warnings: [], profileStatus: { effectiveStrategyId: 'macro-rotation', hasProfile: false }, profileDrift: null });
+  assert.equal((statusOnly.match(/no slot settings profile/g) || []).length, 1);
+  assert.doesNotMatch(statusOnly, APPLY);
+  assert.doesNotMatch(renderDrift({ warnings: ['<img src=x>'], profileStatus: { hasProfile: false }, profileDrift: null }), /<img/);
+  // profiled and in line: nothing to show
+  assert.equal(renderDrift({ warnings: [], profileStatus: { hasProfile: true }, profileDrift: null }), '');
+});
+
+test('prompt preview caller hands the whole response to renderSlotDrift (no warning-text argument)', () => {
+  assert.match(page, /renderSlotDrift\(d, sid\)/);
+  assert.doesNotMatch(page, /renderSlotDrift\(d\.warnings/);
+  assert.doesNotMatch(page, /\/profile\|slot settings\|strategy settings\/i\.test/);
 });

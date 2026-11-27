@@ -428,3 +428,61 @@ test('B05 controls: a valid orphan-slot record is still cleared and a valid reco
   assert.deepEqual(left.records.sbx_gone, {});
   assert.equal(result.slots[A].guidance.expiryMinDays, 21);
 });
+
+// ── N01: a compensation whose final save failed is never reported as a restore ──────────────────────────────────────
+test('N01: the switch config save reaches disk and then errors, and the compensating save fails: record kept, slot blocked, blocked body, never "restored"; a fresh process finds a retained record + block', async () => {
+  await reset();
+  faults.afterConfigSave = () => { throw new Error('error after the rename'); }; // the staged config IS on disk when this fires
+  faults.compensationSave = () => { throw new Error('compensating save failed'); };
+  await assert.rejects(routeSwitch(A, 'mean-reversion'), error => {
+    assert.equal(error.status, 500);
+    assert.equal(error.body.ok, false); assert.equal(error.body.committed, false); assert.equal(error.body.guidanceRestored, false);
+    assert.doesNotMatch(error.body.error, /was restored and nothing was changed/);
+    assert.match(error.body.error, /blocked/); assert.match(error.body.error, /compensating save failed/);
+    assert.ok(error.body.before && error.body.after);
+    return true;
+  });
+  assert.match(slotGate.blocked(A).reason, /could not be undone[\s\S]*compensating save failed/, 'operator-visible reason');
+  assert.equal(slotGate.beatBlock(A).hard, true);
+  assert.equal(Object.keys(await readPendingRecords()).join(), A, 'the record stays');
+  assert.equal(slotGate.blocked(B), null);
+  const onDisk = (await diskConfig()).sandboxes[A];
+  assert.equal(onDisk.agent.activeAgentId, 'mean-reversion', 'the staged config really did reach the disk (the ambiguous case)');
+  // a fresh process over the same disk state: either a confirmed coherent pair or a retained record plus a block, never a clean "resolved" over a mixed pair
+  const result = await freshProcess();
+  const retained = Object.keys(JSON.parse(await fs.readFile(pendingPath(), 'utf8')).records);
+  const guidanceNow = result.slots[A].guidance;
+  const coherentNew = result.slots[A].agent === 'mean-reversion' && guidanceNow.expiryMinDays === 90;
+  const coherentOld = result.slots[A].agent === 'default' && guidanceNow.expiryMinDays === 21;
+  if (retained.length === 0) assert.ok(coherentNew || coherentOld, `a cleared record needs a coherent pair: ${JSON.stringify(result.slots[A])}`);
+  else { assert.deepEqual(retained, [A]); assert.ok(result.slots[A].blocked, 'retained record means the slot is blocked'); assert.equal(result.slots[A].beatRefused, true); assert.equal(result.slots[A].startRefused, true); }
+  assert.equal(result.outcome.resolved.includes(A) && !coherentNew && !coherentOld, false, 'never resolved over a mixed pair');
+});
+
+test('N01: the compensating save fails after a plain failed save (nothing published): record kept, slot blocked, blocked body', async () => {
+  await reset();
+  faults.saveConfig = async () => { throw new Error('disk full'); };
+  faults.compensationSave = () => { throw new Error('still full'); };
+  await assert.rejects(routeSwitch(A, 'mean-reversion'), error => error.body.guidanceRestored === false && error.body.committed === false && /still full/.test(error.body.error));
+  assert.ok(slotGate.blocked(A));
+  assert.equal(Object.keys(await readPendingRecords()).join(), A);
+  const result = await freshProcess();
+  assert.deepEqual(result.outcome, { resolved: [A], blocked: [] }, 'the disk still holds the old config, so a restart rolls the guidance back to the old pair');
+  assert.equal(result.slots[A].agent, 'default');
+  assert.equal(result.slots[A].guidance.expiryMinDays, 21);
+});
+
+test('N01 control: publish-then-error followed by a HEALTHY compensating save restores and confirms the old pair (restored body, record cleared, no block); a fresh process agrees', async () => {
+  await reset();
+  const before = memory(A);
+  faults.afterConfigSave = () => { throw new Error('error after the rename'); };
+  await assert.rejects(routeSwitch(A, 'mean-reversion'), error => error.body.guidanceRestored === true && error.body.committed === false && /Trading Guidance was restored/.test(error.body.error));
+  assert.equal(slotGate.blocked(A), null);
+  assert.equal(await read(pendingPath()), null);
+  assert.deepEqual(memory(A), before);
+  assert.equal((await diskConfig()).sandboxes[A].agent.activeAgentId, 'default', 'the compensating save scrubbed the staged config from disk');
+  const result = await freshProcess();
+  assert.deepEqual(result.outcome, { resolved: [], blocked: [] });
+  assert.equal(result.slots[A].agent, 'default');
+  assert.equal(result.slots[A].guidance.expiryMinDays, 21);
+});

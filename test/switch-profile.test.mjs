@@ -25,7 +25,7 @@ const { slotGate } = await import('../agent/slot-gate.js');
 const { faults } = await import('../agent/slot-transition.js');
 const { runGuardedSwitch } = await import('../agent/switch-guard.js');
 const { canonicalizeSlotProfile, profileDriftItems, profileDriftWarning, profileOfStrategy } = await import('../agent/slot-profile.js');
-const { AgentHarness } = await import('../agent/harness.js');
+const { AgentHarness, buildSystemPrompt } = await import('../agent/harness.js');
 const { redactSecrets } = await import('../agent/redaction.js');
 
 const A = 'sbx_a';
@@ -482,24 +482,30 @@ test('legacy activation pins the slot resolved at entry: an account activation d
   assert.equal(store.getConfig().activeAgentId, 'default', 'aliases still follow the active slot only');
 });
 
-test('route wiring (source): both activation routes use the shared operation and operator auth; builder uses the sandbox PUT', async () => {
+test('route wiring (source): the registrations are the production ones, with the guards in front; the shared operation is used by both activation routes', async () => {
   const source = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
-  const put = source.slice(source.indexOf("app.put('/api/sandboxes/:id/agent',"), source.indexOf("app.put('/api/sandboxes/:id/agent/overrides'"));
-  const activate = source.slice(source.indexOf("app.post('/api/agents/:id/activate'"), source.indexOf('// Strategies'));
+  const reviewSource = await fs.readFile(new URL('../agent/slot-review.js', import.meta.url), 'utf8');
+  const guards = await fs.readFile(new URL('../agent/operator-guards.js', import.meta.url), 'utf8');
+  const put = reviewSource.slice(reviewSource.indexOf('export function registerSandboxAgentRoute'), reviewSource.indexOf('export function registerAgentActivateRoute'));
+  const activate = reviewSource.slice(reviewSource.indexOf('export function registerAgentActivateRoute'), reviewSource.indexOf('export function registerStrategyWriteRoutes'));
   for (const route of [put, activate]) {
     assert.match(route, /acquireSlotOrRefuse\(/); assert.match(route, /createTransition\(/); assert.match(route, /transition\.verify\(\)/);
     assert.match(route, /finishCommittedRuntime\(/); assert.match(route, /ticket\?\.release\(\)/);
   }
-  assert.match(put, /protectChatGPTModelChange, requireOperatorForAgentChange,/);
-  assert.match(activate, /protectChatGPTModelChange, operatorOnly,/);
-  assert.match(source, /function requireOperatorForAgentChange[\s\S]*operatorOnly\(req, res, next\)/);
-  assert.match(source, /app\.post\('\/api\/strategies', requireOperatorForSlotProfile,/);
-  assert.match(source, /app\.put\('\/api\/strategies\/:id', requireOperatorForSlotProfile,/);
-  assert.match(source, /Object\.prototype\.hasOwnProperty\.call\(req\.body, 'slotProfile'\)\) return operatorOnly/);
+  assert.match(reviewSource, /app\.put\('\/api\/sandboxes\/:id\/agent', deps\.protectChatGPTModelChange, deps\.requireOperatorForAgentChange,/);
+  assert.match(reviewSource, /app\.post\('\/api\/agents\/:id\/activate', deps\.protectChatGPTModelChange, deps\.operatorOnly,/);
+  assert.match(reviewSource, /app\.post\('\/api\/strategies', deps\.requireOperatorForSlotProfile,/);
+  assert.match(reviewSource, /app\.put\('\/api\/strategies\/:id', deps\.requireOperatorForSlotProfile,/);
+  assert.match(guards, /function requireOperatorForAgentChange[\s\S]*operatorOnly\(req, res, next\)/);
+  assert.match(guards, /Object\.prototype\.hasOwnProperty\.call\(req\.body, 'slotProfile'\)\) return operatorOnly/);
+  assert.match(source, /createSlotGuards\(\{ operatorAuth: operatorAuthMiddleware, getAgentById, getSandbox \}\)/);
+  assert.match(source, /registerSandboxAgentRoute\(app, slotAgentRouteDeps\)/);
+  assert.match(source, /registerAgentActivateRoute\(app, slotAgentRouteDeps\)/);
+  assert.match(source, /registerStrategyWriteRoutes\(app, \{\s+requireOperatorForSlotProfile,/);
+  assert.doesNotMatch(source, /app\.(put|post)\('\/api\/(sandboxes\/:id\/agent|agents\/:id\/activate|strategies(\/:id)?)'/);
   assert.match(source, /registerSlotProfileRoutes\(app,/);
   assert.match(source, /transitionBlocked: slotGate\.blocked\(sandbox\.id\)/);
   assert.match(source, /await recoverPendingTransitions\(/);
-  const reviewSource = await fs.readFile(new URL('../agent/slot-review.js', import.meta.url), 'utf8');
   assert.match(reviewSource, /app\.post\('\/api\/sandboxes\/:id\/agent\/apply-profile', deps\.operatorAuth, deps\.sameOrigin,/);
   for (const writer of ["app.put('/api/sandboxes/:id/agent/overrides', slotWriterGuard", "app.put('/api/sandboxes/:id/strategy-rules', slotWriterGuard", "app.put('/api/heartbeat', slotWriterGuard", "app.put('/api/trading-guidance', operatorAuthMiddleware, slotWriterGuard", "app.put('/api/heartbeat/market-mode', operatorAuthMiddleware, slotWriterGuard", "app.post('/api/heartbeat/apply-profile', slotWriterGuard"]) {
     assert.ok(source.includes(writer), writer);
@@ -515,7 +521,78 @@ test('prompt-preview contract: the drift warning says "strategy settings" and a 
   assert.match(profileDriftWarning(items, 'Barometer'), /^Barometer's strategy settings differ from this slot: expiryMinDays is 33 \(strategy 90\)/);
   assert.equal(profileDriftWarning([], 'x'), null);
   const source = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
-  assert.match(source, /profileDrift: driftItems\.length \? \{ differs: true, items: driftItems \} : null/);
+  assert.match(source, /promptPreviewProfileFields\(sandboxId, agentConfig\)/);
+  assert.match(source, /profileStatus: profileView\.profileStatus, profileDrift: profileView\.profileDrift/);
+});
+
+// ── N02: the no-profile notice for strategy-only changes ────────────────────────────────────────────────────────────
+/** What GET /api/agent/prompt-preview answers for a slot: the same prompt inputs and the same shared profile fields server.js uses. */
+async function promptPreview(sid) {
+  const agentConfig = store.getResolvedAgentForSandbox(sid);
+  const prompt = await buildSystemPrompt(agentConfig, {
+    getStrategyById: store.getStrategyById,
+    heartbeatIntervalsForced: Boolean(store.getSandbox(sid)?.heartbeat?.forceHeartbeatIntervals),
+    tradingGuidance: guidance.getTradingGuidanceForSandbox(sid),
+    allowedStructures: store.getPermissionsForSandbox(sid)?.allowedStructures,
+    allowOptions: store.getPermissionsForSandbox(sid)?.allowOptions,
+  });
+  const view = review.promptPreviewProfileFields(sid, agentConfig);
+  return { prompt, warnings: view.warnings, profileStatus: view.profileStatus, profileDrift: view.profileDrift };
+}
+const NO_PROFILE = /no slot settings profile/;
+const slotBytes = async () => [await read(configPath), await read(guidanceFile()), JSON.stringify({ permissions: store.getSandbox(A).permissions, heartbeat: store.getSandbox(A).heartbeat, guidance: guidance.getTradingGuidanceForSandbox(A) })];
+
+test('N02: profile -> unprofiled by a slot override set/clear and by an agent-definition edit: settings unchanged, structured status + warning present (outside the prompt), profileDrift null', async () => {
+  await reset();
+  await routeSwitch(A, 'mean-reversion');
+  let view = await promptPreview(A);
+  assert.deepEqual(view.profileStatus, { effectiveStrategyId: 'etf-mean-reversion', hasProfile: true });
+  assert.equal(view.profileDrift, null);
+  assert.equal(view.warnings.some(w => NO_PROFILE.test(w)), false, 'a profiled strategy gets no no-profile notice');
+
+  const settingsBefore = await slotBytes();
+  await store.updateSandboxAgentOverrides(A, { strategyId: 'macro-rotation' }); // set an unprofiled strategy for this slot
+  const afterSet = await slotBytes();
+  assert.equal(afterSet[1], settingsBefore[1], 'guidance bytes unchanged'); assert.equal(afterSet[2], settingsBefore[2], 'slot guidance/heartbeat/permissions unchanged');
+  view = await promptPreview(A);
+  assert.deepEqual(view.profileStatus, { effectiveStrategyId: 'macro-rotation', hasProfile: false });
+  assert.equal(view.profileDrift, null);
+  assert.ok(view.warnings.some(w => NO_PROFILE.test(w)), 'no-profile warning present');
+  assert.doesNotMatch(view.prompt, NO_PROFILE, 'the warning is outside the prompt text');
+  assert.equal(view.prompt, (await promptPreview(A)).prompt, 'prompt bytes are stable and carry no injected notice');
+  const settingsAfterPreview = await slotBytes();
+  assert.deepEqual(settingsAfterPreview, afterSet, 'a preview writes nothing');
+
+  await store.updateSandboxAgentOverrides(A, { strategyId: null }); // clear: the agent's own (profiled) strategy applies again
+  view = await promptPreview(A);
+  assert.deepEqual(view.profileStatus, { effectiveStrategyId: 'etf-mean-reversion', hasProfile: true });
+  assert.equal(view.profileDrift, null);
+  assert.equal(view.warnings.some(w => NO_PROFILE.test(w)), false);
+  assert.equal((await slotBytes())[1], settingsBefore[1]);
+
+  await store.updateAgent('mean-reversion', { strategyId: 'macro-rotation' }); // the agent definition now points to an unprofiled strategy
+  const afterEdit = await slotBytes();
+  assert.equal(afterEdit[1], settingsBefore[1], 'guidance bytes unchanged by the definition edit');
+  view = await promptPreview(A);
+  assert.deepEqual(view.profileStatus, { effectiveStrategyId: 'macro-rotation', hasProfile: false });
+  assert.equal(view.profileDrift, null);
+  assert.ok(view.warnings.some(w => NO_PROFILE.test(w)));
+  assert.doesNotMatch(view.prompt, NO_PROFILE);
+  assert.equal(guidance.getTradingGuidanceForSandbox(A).expiryMinDays, 90, 'the slot keeps the settings the profile applied earlier');
+  assert.equal((await slotBytes())[0], afterEdit[0], 'a preview does not rewrite the config');
+  assert.equal((await slotBytes())[2], settingsBefore[2], 'slot settings unchanged after the definition edit');
+});
+
+test('N02 control: a profiled strategy that differs from the slot still reports profileDrift (re-apply available) and no no-profile notice', async () => {
+  await reset();
+  await routeSwitch(A, 'mean-reversion');
+  await guidance.setTradingGuidanceForSandbox(A, { expiryMinDays: 33 });
+  const view = await promptPreview(A);
+  assert.equal(view.profileStatus.hasProfile, true);
+  assert.equal(view.profileDrift.differs, true);
+  assert.deepEqual(view.profileDrift.items.map(item => item.key), ['expiryMinDays']);
+  assert.ok(view.warnings.some(w => /strategy settings differ from this slot/.test(w)));
+  assert.equal(view.warnings.some(w => NO_PROFILE.test(w)), false);
 });
 
 // ── v2 case 1: gate (deterministic pauses) ──────────────────────────────────────────────────────────────────────────
@@ -943,4 +1020,184 @@ test('B04: a fit that changes during the awaited exposure read is caught again b
   assert.equal(await read(guidanceFile()), guidanceBytes);
   assert.equal(await read(pendingFile()), null);
   assert.equal(slotGate.held(A), null);
+});
+
+// ── N03: request-level auth and pinning on the production route registrations ───────────────────────────────────────
+// The real express routes (slot-review.js registrations server.js calls) behind the production middleware (operator-guards.js).
+const { createOperatorAuth, createSlotGuards, sameOriginStateChange } = await import('../agent/operator-guards.js');
+const { createLoginVerifier } = await import('../agent/dashboard-login.js');
+const OPERATOR = { 'x-openprophet-operator-token': 'op-secret-token' };
+const BASIC = { authorization: `Basic ${Buffer.from('op:pw').toString('base64')}` };
+const CROSS_SITE = { 'sec-fetch-site': 'cross-site' };
+const FOREIGN_ORIGIN = { origin: 'http://evil.example' };
+
+function productionRoutes(calls, { chatgptRefusal = async () => null } = {}) {
+  return app => {
+    const operatorAuth = createOperatorAuth({ loginVerifier: createLoginVerifier({ railway: { user: 'op', pass: 'pw' } }) });
+    const guards = createSlotGuards({ operatorAuth, getAgentById: store.getAgentById, getSandbox: store.getSandbox });
+    const routeDeps = {
+      ...guards, chatgptRefusal,
+      getHarness: () => null,
+      readExposure: async id => { calls.exposure.push(id); return FLAT; },
+      restartBackend: async id => { calls.restart.push(id); },
+      refresh: async id => { calls.refresh.push(id); },
+      broadcast: () => { calls.broadcast += 1; },
+    };
+    review.registerSandboxAgentRoute(app, routeDeps);
+    review.registerAgentActivateRoute(app, routeDeps);
+    review.registerStrategyWriteRoutes(app, { requireOperatorForSlotProfile: guards.requireOperatorForSlotProfile, refreshAll: async () => { calls.refresh.push('ALL'); }, broadcast: () => { calls.broadcast += 1; } });
+    review.registerSlotProfileRoutes(app, { operatorAuth, sameOrigin: sameOriginStateChange, isBusy: () => false, readExposureExisting: async () => null, refresh: async id => { calls.refresh.push(id); }, afterChange: () => { calls.broadcast += 1; } });
+  };
+}
+const authCalls = () => ({ exposure: [], restart: [], refresh: [], broadcast: 0 });
+function rawRequest(port, method, route, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port, method, path: route, headers: { 'content-type': 'application/json', ...headers } }, res => {
+      let text = ''; res.on('data', chunk => { text += chunk; }); res.on('end', () => resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null }));
+    });
+    request.on('error', reject);
+    request.end(body === undefined ? undefined : JSON.stringify(body));
+  });
+}
+async function withOperatorToken(fn) {
+  const previous = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = 'op-secret-token';
+  try { return await fn(); } finally { if (previous === undefined) delete process.env.OPERATOR_TOKEN; else process.env.OPERATOR_TOKEN = previous; }
+}
+const tokenFor = (sid, agentId) => review.buildSlotReview({ kind: 'switch', sandboxId: sid, activeAgentId: agentId }).preview.reviewToken;
+
+/** Both kinds of model: an openai/ agent (guarded by the ChatGPT protection) and a non-openai agent (guarded by the agent-change rule). */
+async function twoAgents() {
+  const openai = await store.addAgent({ name: 'OpenAI agent', model: 'openai/gpt-x', strategyId: 'etf-mean-reversion' });
+  const plain = await store.addAgent({ name: 'Plain agent', model: 'anthropic/claude-opus-4-1', strategyId: 'etf-mean-reversion' });
+  return { openai: openai.id, plain: plain.id };
+}
+const DENIALS = [
+  ['no credentials', {}],
+  ['a valid operator token from a cross-site request', { ...OPERATOR, ...CROSS_SITE }],
+  ['valid basic credentials from a foreign origin', { ...BASIC, ...FOREIGN_ORIGIN }],
+];
+const filesNow = async () => [await read(configPath), await read(guidanceFile()), await read(pendingFile())];
+
+test('N03: sandbox agent PUT and legacy activate refuse unauthenticated and cross-site requests for an openai/ and a non-openai agent; nothing runs or changes; the operator is admitted', async () => {
+  await withOperatorToken(async () => {
+    await reset();
+    const agents = await twoAgents();
+    const calls = authCalls();
+    await withServer(productionRoutes(calls), async ({ port }) => {
+      for (const [kind, agentId] of Object.entries(agents)) {
+        for (const [label, route, method] of [
+          ['sandbox PUT', `/api/sandboxes/${A}/agent`, 'PUT'],
+          ['legacy activate', `/api/agents/${agentId}/activate`, 'POST'],
+        ]) {
+          const filesBefore = await filesNow();
+          for (const [why, headers] of DENIALS) {
+            const body = label === 'sandbox PUT' ? { activeAgentId: agentId, reviewToken: tokenFor(A, agentId) } : { sandboxId: A, reviewToken: tokenFor(A, agentId) };
+            const answered = await rawRequest(port, method, route, body, headers);
+            assert.equal(answered.status, 403, `${kind} ${label}: ${why}`);
+            assert.match(answered.body.error, /operator authorization is required|same-origin request required/, `${kind} ${label}: ${why}`);
+          }
+          assert.deepEqual(await filesNow(), filesBefore, `${kind} ${label}: bytes unchanged`);
+          assert.equal(store.getSandbox(A).agent.activeAgentId, 'default');
+          assert.deepEqual(calls, authCalls(), `${kind} ${label}: no exposure read, restart, refresh or broadcast`);
+          assert.equal(slotGate.held(A), null);
+        }
+        // control: the operator (token, or basic login) with a same-origin request goes through the whole operation
+        const sandboxPut = await rawRequest(port, 'PUT', `/api/sandboxes/${A}/agent`, { activeAgentId: agentId, reviewToken: tokenFor(A, agentId) }, kind === 'openai' ? OPERATOR : BASIC);
+        assert.equal(sandboxPut.status, 200, `${kind}: ${JSON.stringify(sandboxPut.body)}`);
+        assert.equal(store.getSandbox(A).agent.activeAgentId, agentId);
+        await routeSwitch(A, 'default'); // back, so the legacy route has an agent change to make
+        const legacy = await rawRequest(port, 'POST', `/api/agents/${agentId}/activate`, { sandboxId: A, reviewToken: tokenFor(A, agentId) }, { ...(kind === 'openai' ? BASIC : OPERATOR), origin: `http://127.0.0.1:${port}` });
+        assert.equal(legacy.status, 200, `${kind}: ${JSON.stringify(legacy.body)}`);
+        assert.equal(store.getSandbox(A).agent.activeAgentId, agentId);
+        assert.ok(calls.restart.includes(A) && calls.refresh.includes(A));
+        await routeSwitch(A, 'default');
+        Object.assign(calls, authCalls());
+      }
+      // unchanged auth otherwise: a non-openai model change that does not change the agent needs no operator header
+      const plainChange = await rawRequest(port, 'PUT', `/api/sandboxes/${A}/agent`, { model: 'anthropic/claude-opus-4-1' });
+      assert.equal(plainChange.status, 200, JSON.stringify(plainChange.body));
+      // an openai model chosen directly is still operator-only
+      assert.equal((await rawRequest(port, 'PUT', `/api/sandboxes/${A}/agent`, { model: 'openai/gpt-x' })).status, 403);
+    });
+  });
+});
+
+test('N03: strategy POST/PUT carrying a slotProfile and apply-profile refuse unauthenticated and cross-site requests; strategies without a slotProfile keep their behaviour; for both an openai/ and a non-openai assigned agent', async () => {
+  await withOperatorToken(async () => {
+    await reset();
+    const agents = await twoAgents();
+    const calls = authCalls();
+    await withServer(productionRoutes(calls), async ({ port }) => {
+      const profile = { tradingGuidance: { extraSymbolsPerScan: 5 } };
+      const strategyId = 'macro-rotation';
+      const strategyCount = store.getConfig().strategies.length;
+      const before = await filesNow();
+      for (const [why, headers] of DENIALS) {
+        assert.equal((await rawRequest(port, 'POST', '/api/strategies', { name: 'S', slotProfile: profile }, headers)).status, 403, `POST ${why}`);
+        assert.equal((await rawRequest(port, 'PUT', `/api/strategies/${strategyId}`, { slotProfile: profile }, headers)).status, 403, `PUT ${why}`);
+        assert.equal((await rawRequest(port, 'PUT', `/api/strategies/${strategyId}`, { slotProfile: null }, headers)).status, 403, `PUT remove ${why}`);
+      }
+      assert.deepEqual(await filesNow(), before, 'no strategy saved');
+      assert.ok(!store.getStrategyById(strategyId).slotProfile);
+      assert.equal(store.getConfig().strategies.length, strategyCount);
+      assert.deepEqual(calls, authCalls());
+      // unchanged: a strategy save without a slotProfile needs no operator header
+      assert.equal((await rawRequest(port, 'PUT', `/api/strategies/${strategyId}`, { description: 'plain edit' })).status, 200);
+      assert.equal(store.getStrategyById(strategyId).description, 'plain edit');
+      // control: the operator may save a profile
+      assert.equal((await rawRequest(port, 'PUT', `/api/strategies/${strategyId}`, { slotProfile: profile }, OPERATOR)).status, 200);
+      assert.deepEqual(store.getStrategyById(strategyId).slotProfile, profile);
+      const created = await rawRequest(port, 'POST', '/api/strategies', { name: 'S', slotProfile: profile }, BASIC);
+      assert.equal(created.status, 200);
+      assert.deepEqual(created.body.strategy.slotProfile, profile);
+      await store.updateStrategy(strategyId, { slotProfile: null });
+
+      // apply-profile with the slot assigned to each kind of agent
+      for (const [kind, agentId] of Object.entries(agents)) {
+        await routeSwitch(A, agentId);
+        await guidance.setTradingGuidanceForSandbox(A, { expiryMinDays: 30 });
+        const filesBefore = await filesNow();
+        const body = () => ({ reviewToken: review.buildSlotReview({ kind: 'reapply', sandboxId: A }).preview.reviewToken });
+        for (const [why, headers] of DENIALS) {
+          const answered = await rawRequest(port, 'POST', `/api/sandboxes/${A}/agent/apply-profile`, body(), headers);
+          assert.equal(answered.status, 403, `${kind} apply-profile: ${why}`);
+        }
+        assert.deepEqual(await filesNow(), filesBefore, `${kind}: bytes unchanged`);
+        assert.equal(guidance.getTradingGuidanceForSandbox(A).expiryMinDays, 30);
+        const ok = await rawRequest(port, 'POST', `/api/sandboxes/${A}/agent/apply-profile`, body(), OPERATOR);
+        assert.equal(ok.status, 200, `${kind}: ${JSON.stringify(ok.body)}`);
+        assert.equal(guidance.getTradingGuidanceForSandbox(A).expiryMinDays, 90);
+        assert.equal(slotGate.held(A), null);
+      }
+    });
+  });
+});
+
+test('N03: the legacy activate route pins the slot BEFORE its first await: an account activation while the provider connection check is delayed does not retarget the write', async () => {
+  await withOperatorToken(async () => {
+    await reset();
+    const agents = await twoAgents();
+    const calls = authCalls();
+    const entered = latch(), pause = latch();
+    const bAgentBefore = clone(store.getSandbox(B).agent);
+    const bGuidanceBefore = clone(guidance.getTradingGuidanceForSandbox(B));
+    await withServer(productionRoutes(calls, { chatgptRefusal: async () => { entered.release(); await pause.promise; return null; } }), async ({ port }) => {
+      const token = tokenFor(A, agents.openai); // what the operator reviewed for the slot that was active when the request started
+      const request = rawRequest(port, 'POST', `/api/agents/${agents.openai}/activate`, { reviewToken: token }, OPERATOR); // no sandboxId: the active slot is used
+      await entered.promise; // the request is parked inside the (delayed) connection check
+      await store.setActiveSandbox(B); // "account activation" while it waits
+      assert.equal(store.getConfig().activeSandboxId, B);
+      pause.release(); // resume
+      const answered = await request;
+      assert.equal(answered.status, 200, JSON.stringify(answered.body));
+    });
+    assert.equal(store.getSandbox(A).agent.activeAgentId, agents.openai, 'the slot active at entry was changed');
+    assert.deepEqual(clone(store.getSandbox(B).agent), bAgentBefore, 'the newly active slot was not touched');
+    assert.deepEqual(guidance.getTradingGuidanceForSandbox(B), bGuidanceBefore);
+    assert.deepEqual(calls.restart, [A]);
+    assert.deepEqual(calls.refresh, [A]);
+    assert.equal(slotGate.held(A), null);
+    assert.equal(slotGate.held(B), null);
+  });
 });

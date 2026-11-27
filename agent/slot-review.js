@@ -1,10 +1,10 @@
 // Preview, review token and the slot-profile routes (switch-profile plan 3.6). The preview is a pure read: it never saves, pushes a cap,
 // creates or starts a backend, or refreshes an execution-capable harness. Execution (switch and re-apply) recomputes the same review
 // inside the transition gate and refuses with 409 plus a fresh preview when the token no longer matches.
-import { getSandbox, getAgentById, getStrategyById, getResolvedAgentForSandbox, previewSwitchPermissionPatch, effectiveStrategyIdForSwitch, applySlotProfileToSandbox } from './config-store.js';
+import { getSandbox, getActiveSandbox, getAgentById, getStrategyById, getResolvedAgentForSandbox, previewSwitchPermissionPatch, effectiveStrategyIdForSwitch, applySlotProfileToSandbox, updateSandboxAgentSelection, setActiveAgent, addStrategy, updateStrategy } from './config-store.js';
 import { getTradingGuidanceForSandbox } from './trading-guidance.js';
-import { optionExposureReason, SWITCH_REFUSAL_PREFIX } from './switch-guard.js';
-import { planProfileApplication, profileOfStrategy, reviewTokenFor } from './slot-profile.js';
+import { optionExposureReason, runGuardedSwitch, SWITCH_REFUSAL_PREFIX } from './switch-guard.js';
+import { planProfileApplication, profileOfStrategy, reviewTokenFor, profileDriftItems, profileDriftWarning, noProfileWarning, profileStatusOf } from './slot-profile.js';
 import { SlotTransitionError } from './slot-transition.js';
 import { slotGate, TRANSITION_BUSY_MESSAGE } from './slot-gate.js';
 import { strategyOptionFit } from './agent-consistency.js';
@@ -70,6 +70,24 @@ export function buildSlotReview({ kind, sandboxId, activeAgentId, strategyId }) 
     reviewToken: reviewTokenFor({ kind, sandboxId, currentAgentId, targetAgentId, effectiveStrategyId, profile, slotGuidance, slotHeartbeat, slotPermissions, permissionPatch, optionFit }),
   };
   return { preview, plan, permissionPatch, profile, agentName };
+}
+
+/**
+ * The profile part of GET /api/agent/prompt-preview for the slot's effective agent: { warnings, profileStatus, profileDrift }. Pure read.
+ * profileDrift is non-null only when the effective strategy HAS a profile that differs from the slot (the only case a re-apply can act on);
+ * profileStatus.hasProfile false adds the no-profile notice (a warning, never part of the prompt text).
+ */
+export function promptPreviewProfileFields(sandboxId, agentConfig) {
+  const strategyId = agentConfig?.strategyId ?? null;
+  const strategy = getStrategyById(strategyId);
+  const name = agentConfig?.name || agentConfig?.id;
+  const profileStatus = profileStatusOf(strategyId, strategy);
+  const items = profileDriftItems(profileOfStrategy(strategy), { slotGuidance: getTradingGuidanceForSandbox(sandboxId), slotHeartbeat: getSandbox(sandboxId)?.heartbeat || {} });
+  const warnings = [];
+  const driftWarning = profileDriftWarning(items, name);
+  if (driftWarning) warnings.push(driftWarning);
+  if (!profileStatus.hasProfile) warnings.push(noProfileWarning(name));
+  return { warnings, profileStatus, profileDrift: items.length ? { differs: true, items } : null };
 }
 
 /** Adds the exposure read to a review's preview, from an EXISTING backend only (`readExposureExisting` returns null when none can answer). */
@@ -236,5 +254,108 @@ export function registerSlotProfileRoutes(app, deps) {
       if (deps.afterChange) deps.afterChange(sandboxId);
       res.json(successBody(transition, { sandboxId, sandbox: redactSecrets(sandbox) }));
     } catch (error) { res.status(error.status || 400).json(error.body || { error: error.message }); } finally { ticket?.release(); }
+  });
+}
+
+/**
+ * PUT /api/sandboxes/:id/agent: the sandbox agent change (guards first, then the shared reviewed operation).
+ * deps: protectChatGPTModelChange, requireOperatorForAgentChange (middleware), chatgptRefusal(model, 'put') -> message|null, getHarness(sandboxId),
+ *       readExposure(sandboxId), restartBackend(sandboxId), refresh(sandboxId), broadcast()
+ */
+export function registerSandboxAgentRoute(app, deps) {
+  app.put('/api/sandboxes/:id/agent', deps.protectChatGPTModelChange, deps.requireOperatorForAgentChange, async (req, res) => {
+    let ticket = null;
+    try {
+      const { activeAgentId, model, overrides = {}, reviewToken } = req.body || {};
+      const selectedAgent = activeAgentId ? getAgentById(activeAgentId) : null;
+      const nextModel = model ?? (activeAgentId ? selectedAgent?.model : '');
+      if (typeof nextModel === 'string' && nextModel.startsWith('openai/')) {
+        const refusal = await deps.chatgptRefusal(nextModel, 'put');
+        if (refusal) return res.status(409).json({ error: refusal });
+      }
+      // The slot's transition gate is taken BEFORE the busy check and the exposure read, and held until the runtime is refreshed.
+      const agentChanges = activeAgentId !== undefined && getSandbox(req.params.id)?.agent?.activeAgentId !== activeAgentId;
+      ticket = acquireSlotOrRefuse(req.params.id, agentChanges ? 'switch' : 'write');
+      const targetRuntime = deps.getHarness(req.params.id);
+      if ((model !== undefined || activeAgentId !== undefined) && targetRuntime && (targetRuntime._beating || targetRuntime._proc)) return res.status(409).json({ error: BUSY_TURN_MESSAGE });
+      const updates = {};
+      if (activeAgentId !== undefined) updates.activeAgentId = activeAgentId;
+      if (model !== undefined) updates.model = model;
+      if (Object.keys(overrides).length) updates.overrides = overrides;
+      // An agent change is reviewed: the token must match the state the operator saw (409 + a fresh preview otherwise, nothing saved).
+      const transition = agentChanges ? createTransition({ kind: 'switch', sandboxId: req.params.id, activeAgentId, strategyId: overrides?.strategyId, reviewToken, opId: ticket.opId }) : null;
+      if (transition) transition.verify();
+      // The guard refuses (409, nothing saved) a switch that would turn options off while the slot still holds option exposure.
+      const sandbox = await runGuardedSwitch({ sandboxId: req.params.id, activeAgentId, overrides, previewPatch: previewSwitchPermissionPatch, readExposure: () => deps.readExposure(req.params.id), save: () => updateSandboxAgentSelection(req.params.id, updates, transition) });
+      if (transition) {
+        const failure = await finishCommittedRuntime(req.params.id, [() => deps.restartBackend(req.params.id), () => deps.refresh(req.params.id)]);
+        if (failure) { deps.broadcast(); return res.status(failure.status).json(failure.body); }
+      } else {
+        await deps.restartBackend(req.params.id);
+        await deps.refresh(req.params.id);
+      }
+      deps.broadcast();
+      res.json({ ...(transition ? successBody(transition) : { ok: true }), sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
+    } catch (err) { res.status(err.status || 400).json(err.body || { error: err.message }); } finally { ticket?.release(); }
+  });
+}
+
+/**
+ * POST /api/agents/:id/activate (legacy): the same shared operation as the sandbox PUT, for every provider. The slot is resolved ONCE,
+ * synchronously, BEFORE the first await (the provider connection check), and used through save, restart and refresh, so an account
+ * activation during a slow check or request cannot retarget the write.
+ * deps: protectChatGPTModelChange, operatorOnly (middleware), chatgptRefusal(model, 'activate') -> message|null, getHarness(sandboxId),
+ *       readExposure(sandboxId), restartBackend(sandboxId), refresh(sandboxId), broadcast()
+ */
+export function registerAgentActivateRoute(app, deps) {
+  app.post('/api/agents/:id/activate', deps.protectChatGPTModelChange, deps.operatorOnly, async (req, res) => {
+    let ticket = null;
+    try {
+      const activeSandboxId = req.body?.sandboxId ? String(req.body.sandboxId) : getActiveSandbox()?.id;
+      const agent = getAgentById(req.params.id);
+      if (String(agent?.model || '').startsWith('openai/')) {
+        const refusal = await deps.chatgptRefusal(agent.model, 'activate');
+        if (refusal) return res.status(409).json({ error: refusal });
+      }
+      if (!activeSandboxId || !getSandbox(activeSandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
+      const agentChanges = getSandbox(activeSandboxId).agent.activeAgentId !== req.params.id;
+      ticket = acquireSlotOrRefuse(activeSandboxId, agentChanges ? 'switch' : 'write');
+      const targetRuntime = deps.getHarness(activeSandboxId);
+      if (targetRuntime && (targetRuntime._beating || targetRuntime._proc)) return res.status(409).json({ error: 'Wait for the active agent turn to finish before changing its assignment' });
+      const transition = agentChanges ? createTransition({ kind: 'switch', sandboxId: activeSandboxId, activeAgentId: req.params.id, reviewToken: req.body?.reviewToken, opId: ticket.opId }) : null;
+      if (transition) transition.verify();
+      await runGuardedSwitch({ sandboxId: activeSandboxId, activeAgentId: req.params.id, overrides: {}, previewPatch: previewSwitchPermissionPatch, readExposure: () => deps.readExposure(activeSandboxId), save: () => setActiveAgent(req.params.id, { sandboxId: activeSandboxId, transition }) });
+      if (transition) {
+        const failure = await finishCommittedRuntime(activeSandboxId, [() => deps.restartBackend(activeSandboxId), () => deps.refresh(activeSandboxId)]);
+        if (failure) { deps.broadcast(); return res.status(failure.status).json(failure.body); }
+      } else {
+        await deps.restartBackend(activeSandboxId);
+        await deps.refresh(activeSandboxId);
+      }
+      deps.broadcast();
+      res.json(transition ? successBody(transition) : { ok: true });
+    } catch (err) { res.status(err.status || 400).json(err.body || { error: err.message }); } finally { ticket?.release(); }
+  });
+}
+
+/**
+ * POST /api/strategies and PUT /api/strategies/:id. A body that carries a slotProfile needs operator auth + same origin; other saves keep their auth.
+ * deps: requireOperatorForSlotProfile (middleware), refreshAll(), broadcast()
+ */
+export function registerStrategyWriteRoutes(app, deps) {
+  app.post('/api/strategies', deps.requireOperatorForSlotProfile, async (req, res) => {
+    try {
+      const strategy = await addStrategy(req.body);
+      deps.broadcast();
+      res.json({ ok: true, strategy });
+    } catch (err) { res.status(400).json({ error: err.message }); }
+  });
+  app.put('/api/strategies/:id', deps.requireOperatorForSlotProfile, async (req, res) => {
+    try {
+      const strategy = await updateStrategy(req.params.id, req.body);
+      await deps.refreshAll();
+      deps.broadcast();
+      res.json({ ok: true, strategy });
+    } catch (err) { res.status(400).json({ error: err.message }); }
   });
 }

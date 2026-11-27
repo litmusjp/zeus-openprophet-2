@@ -151,3 +151,9 @@ export function profileDriftWarning(items, agentName = 'The agent') {
   const list = items.map(item => `${item.key} is ${item.slot} (strategy ${item.profile})`).join(', ');
   return `${agentName}'s strategy settings differ from this slot: ${list}. Re-apply the strategy settings to bring the slot in line, or leave it as it is on purpose`;
 }
+
+/** The persistent no-profile notice for the prompt preview (outside the prompt text): the effective strategy carries no slot settings profile. */
+export const noProfileWarning = name => `${name}'s strategy has no slot settings profile: this slot keeps its current Trading Guidance and heartbeat intervals, and the agent is not guaranteed ready until they are checked.`;
+
+/** Structured profile state of the effective strategy (what the UI branches on instead of matching warning text). */
+export const profileStatusOf = (effectiveStrategyId, strategy) => ({ effectiveStrategyId: effectiveStrategyId ?? null, hasProfile: profileOfStrategy(strategy) !== null });

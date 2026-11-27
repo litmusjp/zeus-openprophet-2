@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 // Switch-profile plan 3.4 / acceptance cases 3, 4 and 9: failed writes, compensation, crash recovery and "unchanged settings".
 // A crash is simulated by a hook that throws CrashSimulation (no cleanup runs); the "fresh process" is a reload of both stores from disk
@@ -84,6 +86,18 @@ async function crashAt(point, sid = A, agentId = 'mean-reversion') {
   await assert.rejects(routeSwitch(sid, agentId), error => error instanceof CrashSimulation);
   delete faults[point];
 }
+
+/** A genuinely fresh Node process over the same config/data folders: loads both stores, runs recovery, reports what it found. */
+const childScript = fileURLToPath(new URL('./fixtures/slot-recovery-child.mjs', import.meta.url));
+function freshProcess() {
+  return new Promise((resolve, reject) => execFile(process.execPath, [childScript], { env: { ...process.env, OPENPROPHET_CONFIG_PATH: configPath, OPENPROPHET_DATA_DIR: dataDir, OPENPROPHET_EXECUTION_MODE: 'inert' }, timeout: 60000 }, (error, stdout, stderr) => {
+    const line = String(stdout).split('\n').find(entry => entry.startsWith('RESULT '));
+    if (!line) return reject(new Error(`child produced no result (${error?.message || 'no error'}): ${stderr || stdout}`));
+    resolve(JSON.parse(line.slice('RESULT '.length)));
+  }));
+}
+
+const why = result => JSON.stringify(Object.fromEntries(Object.entries(result.slots).map(([id, slot]) => [id, slot.blocked])));
 
 test.after(async () => {
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -204,7 +218,7 @@ test('restart after the config commit and before the record is cleared: the NEW 
   // same crash, but the guidance entry is gone: committed config wins and the `after` guidance is published again
   await reset();
   await crashAt('afterConfigCommit');
-  await guidance.replaceGuidanceEntryForSandbox(A, { ...SLOT_GUIDANCE });
+  await guidance.replaceGuidanceEntryForSandbox(A, null); // genuinely absent
   outcome = await restart();
   assert.deepEqual(outcome, { resolved: [A], blocked: [] });
   assert.equal(guidance.getTradingGuidanceForSandbox(A).expiryMinDays, 90);
@@ -281,4 +295,136 @@ test('excluded guidance keys, Risk fields, the spread cap and AD policy are iden
   assert.deepEqual(excluded(memory(A)).guidance, base.guidance);
   assert.deepEqual(permsExceptFit(memory(A).permissions), permsExceptFit(base.permissions));
   assert.equal(guidance.getTradingGuidanceForSandbox(A).maxOptionSpreadPct, 8);
+});
+
+// ── B01: a later operator save is never replaced by the old after-snapshot ──────────────────────────────────────────
+test('B01: after a committed pending record, a normal later save (extendedPct 6, maxOptionSpreadPct 7) survives recovery in a fresh process; other slots unchanged', async () => {
+  await reset();
+  await crashAt('afterConfigCommit'); // committed: config carries the op id, the pending record is left behind
+  const record = (await readPendingRecords())[A];
+  assert.equal(record.after.guidanceEntry.extendedPct, 4, 'the old after-snapshot holds the default extendedPct');
+  assert.equal(record.after.guidanceEntry.maxOptionSpreadPct, 8, 'and the old cap');
+  await guidance.setTradingGuidanceForSandbox(A, { extendedPct: 6, maxOptionSpreadPct: 7 }); // the ordinary operator save: drops the op id
+  assert.equal(guidance.getSavedGuidanceEntry(A).transitionOpId, undefined);
+  const bBefore = (await diskGuidance())[B];
+  const bConfigBefore = clone((await diskConfig()).sandboxes[B]);
+  const result = await freshProcess();
+  assert.deepEqual(result.outcome, { resolved: [A], blocked: [] }, why(result));
+  assert.equal(result.slots[A].guidance.extendedPct, 6);
+  assert.equal(result.slots[A].guidance.maxOptionSpreadPct, 7);
+  assert.equal(result.slots[A].guidance.expiryMinDays, 90, 'the committed profile value is still there (the later save started from it)');
+  const disk = await diskGuidance();
+  assert.equal(disk[A].extendedPct, 6); assert.equal(disk[A].maxOptionSpreadPct, 7);
+  assert.deepEqual(disk[B], bBefore, 'the other slot is untouched');
+  assert.deepEqual((await diskConfig()).sandboxes[B], bConfigBefore);
+  assert.equal(result.slots[A].agent, 'mean-reversion');
+  assert.equal(await read(pendingPath()), null, 'resolved: the record is cleared');
+});
+
+test('B01 controls: a committed record whose entry still carries the op id is kept and cleared; an uncommitted record restores the old pair', async () => {
+  await reset();
+  await crashAt('afterConfigCommit');
+  let result = await freshProcess();
+  assert.deepEqual(result.outcome, { resolved: [A], blocked: [] }, why(result));
+  assert.equal(result.slots[A].guidance.expiryMinDays, 90);
+  assert.equal(result.slots[A].savedEntry.transitionOpId, (await diskConfig()).sandboxes[A].lastTransitionOpId);
+  assert.equal(result.slots[A].guidance.maxOptionSpreadPct, 8);
+  await reset();
+  await crashAt('afterGuidancePublish');
+  result = await freshProcess();
+  assert.deepEqual(result.outcome, { resolved: [A], blocked: [] }, why(result));
+  assert.equal(result.slots[A].guidance.expiryMinDays, 21, 'old pair');
+  assert.equal(result.slots[A].guidance.extraSymbolsPerScan, 25);
+  assert.equal(result.slots[A].agent, 'default');
+});
+
+test('B01: an entry that is neither this operation\'s nor provably a later save blocks the slot and keeps the record and the entry', async () => {
+  const cases = {
+    'no marker, older than the staged entry': entry => { const { transitionOpId, ...rest } = entry; return { ...rest, updatedAt: '2000-01-01T00:00:00.000Z' }; },
+    'no marker and no timestamp': entry => { const { transitionOpId, updatedAt, ...rest } = entry; return rest; },
+    'another operation\'s marker': entry => ({ ...entry, transitionOpId: 'some-other-operation' }),
+  };
+  for (const [label, edit] of Object.entries(cases)) {
+    await reset();
+    await crashAt('afterConfigCommit');
+    const staged = guidance.getSavedGuidanceEntry(A);
+    await guidance.replaceGuidanceEntryForSandbox(A, edit(staged));
+    const entryBytes = JSON.stringify(guidance.getSavedGuidanceEntry(A));
+    const recordBytes = await read(pendingPath());
+    const result = await freshProcess();
+    assert.deepEqual(result.outcome, { resolved: [], blocked: [A] }, label);
+    assert.match(result.slots[A].blocked, /recovery of an interrupted settings change failed/, label);
+    assert.equal(JSON.stringify(result.slots[A].savedEntry), entryBytes, `${label}: the entry was not replaced`);
+    assert.equal(await read(pendingPath()), recordBytes, `${label}: evidence kept`);
+    assert.equal(result.slots[A].startRefused, true, label); assert.equal(result.slots[A].beatRefused, true, label);
+    assert.equal(result.slots[B].blocked, null);
+  }
+});
+
+// ── B05: malformed pending data is validated before it is interpreted or deleted ────────────────────────────────────
+test('B05: parseable but malformed pending data is never called resolved or cleared; evidence bytes survive; starts and beats are refused', async () => {
+  const withRecord = change => async () => {
+    const file = JSON.parse(await fs.readFile(pendingPath(), 'utf8'));
+    return JSON.stringify({ ...file, records: { [A]: change(file.records[A]) } });
+  };
+  const withFile = change => async () => JSON.stringify(change(JSON.parse(await fs.readFile(pendingPath(), 'utf8'))));
+  const cases = {
+    'records is an array': { text: withFile(file => ({ ...file, records: [] })), blocks: [A, B] },
+    'records is a string': { text: withFile(file => ({ ...file, records: 'x' })), blocks: [A, B] },
+    'unsupported version': { text: withFile(file => ({ ...file, version: 2 })), blocks: [A, B] },
+    'empty slot record': { text: withRecord(() => ({})), blocks: [A] },
+    'missing operation id': { text: withRecord(({ opId, ...rest }) => rest), blocks: [A] },
+    'empty operation id': { text: withRecord(record => ({ ...record, opId: '' })), blocks: [A] },
+    'sandbox id differs from the key': { text: withRecord(record => ({ ...record, sandboxId: B })), blocks: [A, B] },
+    'unsupported kind': { text: withRecord(record => ({ ...record, kind: 'delete' })), blocks: [A] },
+    'before snapshot is not an object': { text: withRecord(record => ({ ...record, before: 'x' })), blocks: [A] },
+    'after snapshot lacks permissions': { text: withRecord(record => ({ ...record, after: { ...record.after, permissions: undefined } })), blocks: [A] },
+    'guidanceTouched is missing': { text: withRecord(record => ({ ...record, after: { ...record.after, guidanceTouched: undefined } })), blocks: [A] },
+    'after guidance entry is a string': { text: withRecord(record => ({ ...record, after: { ...record.after, guidanceEntry: 'x' } })), blocks: [A] },
+    'after guidance entry belongs to another operation': { text: withRecord(record => ({ ...record, after: { ...record.after, guidanceEntry: { ...record.after.guidanceEntry, transitionOpId: 'other' } } })), blocks: [A] },
+  };
+  for (const [label, { text, blocks }] of Object.entries(cases)) {
+    await reset();
+    await crashAt('afterGuidancePublish'); // a real interrupted transition
+    const bytes = await text();
+    await fs.writeFile(pendingPath(), bytes);
+    const guidanceBytes = await read(guidanceFile());
+    const configBytes = await read(configPath);
+    const result = await freshProcess();
+    assert.deepEqual(result.outcome.resolved, [], label);
+    for (const id of blocks) {
+      assert.ok(result.outcome.blocked.includes(id), `${label}: ${id} blocked`);
+      assert.ok(result.slots[id].blocked, `${label}: ${id} has a block reason`);
+      assert.equal(result.slots[id].startRefused, true, `${label}: start refused on ${id}`);
+      assert.equal(result.slots[id].beatRefused, true, `${label}: beat refused on ${id}`);
+    }
+    assert.equal(await read(pendingPath()), bytes, `${label}: the evidence file is byte-identical`);
+    assert.equal(await read(guidanceFile()), guidanceBytes, `${label}: no guidance was rewritten`);
+    assert.equal(await read(configPath), configBytes, `${label}: config untouched`);
+    if (!blocks.includes(B)) assert.equal(result.slots[B].blocked, null, `${label}: another slot is not blocked`);
+  }
+});
+
+test('B05 controls: a valid orphan-slot record is still cleared and a valid record next to a malformed one still resolves; the malformed one keeps its evidence', async () => {
+  await reset();
+  await crashAt('afterGuidancePublish');
+  const file = JSON.parse(await fs.readFile(pendingPath(), 'utf8'));
+  file.records.sbx_gone = { ...file.records[A], sandboxId: 'sbx_gone' };
+  await fs.writeFile(pendingPath(), JSON.stringify(file));
+  let result = await freshProcess();
+  assert.deepEqual(result.outcome.resolved.sort(), [A, 'sbx_gone']);
+  assert.equal(await read(pendingPath()), null);
+  assert.equal(result.slots[A].guidance.expiryMinDays, 21);
+  await reset();
+  await crashAt('afterGuidancePublish');
+  const mixed = JSON.parse(await fs.readFile(pendingPath(), 'utf8'));
+  mixed.records.sbx_gone = {};
+  await fs.writeFile(pendingPath(), JSON.stringify(mixed));
+  result = await freshProcess();
+  assert.deepEqual(result.outcome.resolved, [A]);
+  assert.deepEqual(result.outcome.blocked, ['sbx_gone']);
+  const left = JSON.parse(await fs.readFile(pendingPath(), 'utf8'));
+  assert.deepEqual(Object.keys(left.records), ['sbx_gone'], 'only the malformed record remains');
+  assert.deepEqual(left.records.sbx_gone, {});
+  assert.equal(result.slots[A].guidance.expiryMinDays, 21);
 });

@@ -1581,9 +1581,9 @@ export function getStrategyById(id) {
 
 // ── Model ──────────────────────────────────────────────────────────
 
-export async function setActiveModel(modelId) {
-  await updateSandboxAgentSelection(_config.activeSandboxId, { model: modelId });
-  _config.activeModel = modelId;
+export async function setActiveModel(modelId, sandboxId = _config.activeSandboxId) {
+  await updateSandboxAgentSelection(sandboxId, { model: modelId });
+  if (_config.activeSandboxId === sandboxId) _config.activeModel = modelId;
 }
 
 // ── Heartbeat ──────────────────────────────────────────────────────

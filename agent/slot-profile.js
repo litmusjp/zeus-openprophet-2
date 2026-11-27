@@ -123,6 +123,8 @@ export function reviewTokenFor(state) {
     kind: state.kind, sandboxId: state.sandboxId, currentAgentId: state.currentAgentId, targetAgentId: state.targetAgentId,
     effectiveStrategyId: state.effectiveStrategyId ?? null, profile: state.profile ?? null,
     slotGuidance: state.slotGuidance, slotHeartbeat: state.slotHeartbeat, slotPermissions: state.slotPermissions,
+    // The permission change a confirmation would apply (the resolved patch) and the target strategy's option fit it comes from.
+    permissionPatch: state.permissionPatch ?? null, optionFit: state.optionFit ?? null,
   }))).digest('hex');
 }
 

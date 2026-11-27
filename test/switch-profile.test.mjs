@@ -552,9 +552,9 @@ test('gate: at every awaited stage a beat, a second switch, a re-apply and guida
     assert.equal(h._beating, false);
     await assert.rejects(h.sendMessage('hi'), /slot settings transition in progress/);
     // competing writers: the writer guard answers 409 while the transition holds the gate
-    const guard = review.slotWriterGuard(() => A);
+    const guard = review.slotWriterGuard(() => A, async () => { statusSent = 'passed'; });
     let statusSent = null;
-    await guard({}, { status(code) { statusSent = code; return { json() {} }; }, on() {} }, () => { statusSent = 'passed'; });
+    await guard({}, { status(code) { statusSent = code; return { json() {} }; }, on() {} }, () => {});
     assert.equal(statusSent, 409, label);
     gate.release();
     const result = await running;
@@ -668,4 +668,279 @@ test('lifecycle on one slot: each step renders its own numbers, the preview equa
   await store.applySlotProfileToSandbox(A, transition);
   ticket.release();
   assert.deepEqual(items(), []);
+});
+
+// ── B02: the writer's hold lives as long as the handler's own promise, not as long as the response ─────────────────
+async function withServer(setup, fn) {
+  const app = express();
+  app.use(express.json());
+  setup(app);
+  const server = http.createServer(app);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try { return await fn({ port: server.address().port }); } finally { server.closeAllConnections?.(); await new Promise(resolve => server.close(resolve)); }
+}
+const settle = (ms = 40) => new Promise(resolve => setTimeout(resolve, ms));
+function clientRequest(port, method, route, body) {
+  const request = http.request({ host: '127.0.0.1', port, method, path: route, headers: { 'content-type': 'application/json' } });
+  const response = new Promise((resolve, reject) => {
+    request.on('response', res => { let text = ''; res.on('data', chunk => { text += chunk; }); res.on('end', () => resolve({ status: res.statusCode, body: text ? JSON.parse(text) : null })); });
+    request.on('error', reject);
+  });
+  response.catch(() => {});
+  request.end(body === undefined ? undefined : JSON.stringify(body));
+  return { request, response };
+}
+
+for (const scenario of [
+  { name: 'client disconnects while the save is paused, then the handler completes', disconnect: true, reject: false },
+  { name: 'client disconnects while the save is paused, then the handler rejects', disconnect: true, reject: true },
+  { name: 'healthy normal completion (client stays connected)', disconnect: false, reject: false },
+  { name: 'handler rejects with the client still connected', disconnect: false, reject: true },
+]) {
+  test(`B02: guarded writer keeps its hold until its own work settles: ${scenario.name}`, async () => {
+    await reset();
+    const pause = latch(), started = latch(), finished = latch(), closed = latch();
+    const handler = async (req, res) => {
+      res.on('close', () => closed.release());
+      started.release();
+      try {
+        await pause.promise; // the awaited backend/publication step
+        await guidance.setTradingGuidanceForSandbox(A, { extendedPct: 6 });
+        if (scenario.reject) throw new Error('backend refresh failed');
+        res.json({ ok: true });
+      } finally { finished.release(); }
+    };
+    await withServer(app => {
+      app.put('/w', review.slotWriterGuard(() => A, handler));
+      review.registerSlotProfileRoutes(app, { operatorAuth: (req, res, next) => next(), sameOrigin: (req, res, next) => next(), isBusy: () => false, readExposureExisting: async () => null, refresh: async () => {}, afterChange: () => {} });
+    }, async ({ port }) => {
+      const client = clientRequest(port, 'PUT', '/w', {});
+      await started.promise;
+      assert.ok(slotGate.held(A), 'the writer holds the slot');
+      if (scenario.disconnect) { client.request.destroy(); await closed.promise; await settle(); }
+      // while the work is still pending (client gone or not): switch, re-apply and another writer are all refused
+      assert.ok(slotGate.held(A), 'the hold survives the response closing');
+      await expectRefusal(routeSwitch(A, 'mean-reversion'), 409);
+      const reapply = await fetch(`http://127.0.0.1:${port}/api/sandboxes/${A}/agent/apply-profile`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reviewToken: review.buildSlotReview({ kind: 'reapply', sandboxId: A }).preview.reviewToken }) });
+      assert.equal(reapply.status, 409);
+      assert.throws(() => review.acquireSlotOrRefuse(A, 'write'), error => error.status === 409);
+      assert.equal(guidance.getTradingGuidanceForSandbox(A).extendedPct, 4, 'the paused save has not happened yet');
+      pause.release();
+      await finished.promise;
+      await settle();
+      assert.equal(slotGate.held(A), null, 'no leaked hold once the handler settled');
+      assert.equal(guidance.getTradingGuidanceForSandbox(A).extendedPct, 6, 'its save survives');
+      assert.equal(JSON.parse(await fs.readFile(guidanceFile(), 'utf8')).sandboxes[A].extendedPct, 6);
+      if (!scenario.disconnect) {
+        const answered = await client.response;
+        assert.equal(answered.status, scenario.reject ? 500 : 200);
+        if (scenario.reject) assert.match(answered.body.error, /backend refresh failed/);
+      }
+      const after = await routeSwitch(A, 'mean-reversion'); // a subsequent switch is admitted
+      assert.equal(after.body.ok, true);
+      assert.equal(guidance.getTradingGuidanceForSandbox(A).extendedPct, 6, 'the switch applied on top of the saved edit');
+    });
+  });
+}
+
+test('B02: a writer that resolves no slot takes no hold; a throwing slot resolver answers 400', async () => {
+  await reset();
+  let ran = false;
+  await withServer(app => {
+    app.put('/none', review.slotWriterGuard(() => null, async (req, res, id) => { ran = id === null; res.json({ ok: true }); }));
+    app.put('/bad', review.slotWriterGuard(() => { throw new Error('bad request'); }, async () => {}));
+  }, async ({ port }) => {
+    assert.equal((await clientRequest(port, 'PUT', '/none', {}).response).status, 200);
+    assert.equal(ran, true);
+    assert.equal((await clientRequest(port, 'PUT', '/bad', {}).response).status, 400);
+  });
+  assert.equal(slotGate.held(A), null);
+});
+
+// ── B03: legacy permission and model writers are pinned to one slot and gated ───────────────────────────────────────
+function legacyWriters(calls, hooks = {}) {
+  return app => {
+    review.registerPermissionsRoute(app, {
+      operatorAuth: (req, res, next) => next(),
+      activeSandboxId: () => store.getActiveSandbox()?.id,
+      updatePermissionsForSandbox: async (id, perms) => { calls.save.push(id); await hooks.beforeSave?.(); return store.updatePermissionsForSandbox(id, perms); },
+      updatePermissions: async perms => { calls.save.push('ACTIVE-SETTER'); await hooks.beforeSave?.(); return store.updatePermissions(perms); },
+      getSandbox: store.getSandbox,
+      restartBackend: async id => { calls.restart.push(id); await hooks.restart?.(); },
+      restartActiveBackend: async () => { calls.restart.push('ACTIVE'); },
+      broadcast: () => { calls.broadcast += 1; },
+    });
+    review.registerModelActivateRoute(app, {
+      activeSandboxId: () => store.getActiveSandbox()?.id,
+      setModel: async (model, id) => { calls.save.push(id); await hooks.beforeSave?.(); return store.setActiveModel(model, id); },
+      refresh: async id => { calls.refresh.push(id); await hooks.refresh?.(); },
+      broadcast: () => { calls.broadcast += 1; },
+    });
+  };
+}
+const newCalls = () => ({ save: [], restart: [], refresh: [], broadcast: 0 });
+
+test('B03: while a switch is paused, permissions PUT (with and without an id) and the legacy non-OpenAI model request are 409 with no save, restart or refresh', async () => {
+  await reset();
+  const calls = newCalls();
+  const pause = latch();
+  faults.afterPendingWrite = () => pause.promise;
+  const running = routeSwitch(A, 'mean-reversion');
+  await settle(60);
+  assert.ok(slotGate.held(A));
+  const permissionsBefore = clone(store.getSandbox(A).permissions);
+  const agentBefore = clone(store.getSandbox(A).agent);
+  const configBytes = await read(configPath);
+  await withServer(legacyWriters(calls), async ({ port }) => {
+    for (const [label, route, method, body] of [
+      ['permissions with id', '/api/permissions', 'PUT', { sandboxId: A, requireConfirmation: true }],
+      ['permissions without id (active slot)', '/api/permissions', 'PUT', { requireConfirmation: true }],
+      ['legacy model request', '/api/models/activate', 'POST', { model: 'anthropic/claude-opus-4-1' }],
+    ]) {
+      const answered = await clientRequest(port, method, route, body).response;
+      assert.equal(answered.status, 409, label);
+      assert.match(answered.body.error, /slot settings transition in progress/, label);
+    }
+  });
+  assert.deepEqual(calls, newCalls(), 'no save, restart, refresh or broadcast ran');
+  assert.deepEqual(store.getSandbox(A).permissions, permissionsBefore);
+  assert.deepEqual(clone(store.getSandbox(A).agent), agentBefore);
+  assert.equal(await read(configPath), configBytes, 'config on disk untouched');
+  pause.release();
+  assert.equal((await running).body.ok, true);
+  assert.equal(slotGate.held(A), null);
+});
+
+test('B03 controls: healthy sequential permissions and model requests save to the slot and restart/refresh it; an openai model is refused without a save', async () => {
+  await reset();
+  const bPermissionsBefore = clone(store.getSandbox(B).permissions);
+  const calls = newCalls();
+  await withServer(legacyWriters(calls), async ({ port }) => {
+    assert.equal((await clientRequest(port, 'PUT', '/api/permissions', { sandboxId: A, requireConfirmation: true }).response).status, 200);
+    assert.equal(store.getSandbox(A).permissions.requireConfirmation, true);
+    assert.equal((await clientRequest(port, 'PUT', '/api/permissions', { requireConfirmation: false }).response).status, 200);
+    assert.equal(store.getSandbox(A).permissions.requireConfirmation, false);
+    assert.equal((await clientRequest(port, 'POST', '/api/models/activate', { model: 'anthropic/claude-opus-4-1' }).response).status, 200);
+    assert.equal(store.getSandbox(A).agent.model, 'anthropic/claude-opus-4-1');
+    assert.equal(store.getConfig().activeModel, 'anthropic/claude-opus-4-1');
+    const openai = await clientRequest(port, 'POST', '/api/models/activate', { model: 'openai/gpt-x' }).response;
+    assert.equal(openai.status, 409);
+    assert.equal(slotGate.held(A), null);
+  });
+  assert.deepEqual(calls.save, [A, A, A]);
+  assert.deepEqual(calls.restart, [A, A]);
+  assert.deepEqual(calls.refresh, [A]);
+  assert.equal(calls.broadcast, 3);
+  assert.equal(store.getSandbox(B).permissions.requireConfirmation, bPermissionsBefore.requireConfirmation, 'the other slot is unchanged');
+});
+
+test('B03: a no-id permissions PUT and a legacy model request stay pinned to the slot active at entry when the active account changes while they wait', async () => {
+  await reset();
+  const bBefore = clone({ permissions: store.getSandbox(B).permissions, agent: store.getSandbox(B).agent, activeModel: null });
+  // permissions: the save itself is delayed
+  let calls = newCalls();
+  let entered = latch(), pause = latch();
+  await withServer(legacyWriters(calls, { beforeSave: async () => { entered.release(); await pause.promise; } }), async ({ port }) => {
+    const request = clientRequest(port, 'PUT', '/api/permissions', { requireConfirmation: true });
+    await entered.promise;
+    await store.setActiveSandbox(B); // "account activation" during the delayed request
+    pause.release();
+    assert.equal((await request.response).status, 200);
+  });
+  assert.deepEqual(calls.save, [A], 'the setter received the pinned slot, never an active-slot setter');
+  assert.deepEqual(calls.restart, [A]);
+  assert.equal(store.getSandbox(A).permissions.requireConfirmation, true);
+  assert.equal(store.getSandbox(B).permissions.requireConfirmation, bBefore.permissions.requireConfirmation, 'the other slot is unchanged');
+  // model: the refresh is delayed after the save
+  await reset();
+  const activeModelBefore = store.getConfig().activeModel;
+  calls = newCalls(); entered = latch(); pause = latch();
+  await withServer(legacyWriters(calls, { refresh: async () => { entered.release(); await pause.promise; } }), async ({ port }) => {
+    const request = clientRequest(port, 'POST', '/api/models/activate', { model: 'anthropic/claude-opus-4-1' });
+    await entered.promise;
+    await store.setActiveSandbox(B);
+    pause.release();
+    assert.equal((await request.response).status, 200);
+  });
+  assert.deepEqual(calls.save, [A]);
+  assert.deepEqual(calls.refresh, [A], 'the refresh targets the original slot');
+  assert.equal(store.getSandbox(A).agent.model, 'anthropic/claude-opus-4-1');
+  assert.deepEqual(clone(store.getSandbox(B).agent), bBefore.agent, 'the other slot is unchanged');
+  assert.notEqual(store.getConfig().activeModel, 'anthropic/claude-opus-4-1', 'the active-slot alias still follows the (new) active slot');
+  assert.equal(store.getConfig().activeSandboxId, B);
+  assert.ok(activeModelBefore === undefined || typeof activeModelBefore === 'string');
+});
+
+test('B03 wiring (source): server.js registers both legacy writers through the shared pinned routes with the operator auth it had', async () => {
+  const source = await fs.readFile(new URL('../agent/server.js', import.meta.url), 'utf8');
+  assert.match(source, /registerPermissionsRoute\(app, \{\s+operatorAuth: operatorAuthMiddleware,\s+activeSandboxId: \(\) => getActiveSandbox\(\)\?\.id,/);
+  assert.match(source, /registerModelActivateRoute\(app, \{\s+activeSandboxId: \(\) => getActiveSandbox\(\)\?\.id,\s+setModel: \(model, sandboxId\) => setActiveModel\(model, sandboxId\),/);
+  assert.doesNotMatch(source, /app\.(put|post)\('\/api\/(permissions|models\/activate)'/);
+});
+
+// ── B04: the review token binds the permission outcome that confirmation would apply ────────────────────────────────
+test('B04: changing only the target strategy\'s option fit makes the old token stale (409 + fresh preview, nothing written): broadening, narrowing, options-off', async () => {
+  const cases = [
+    { label: 'broadening', before: ['long_call'], after: ['long_call', 'long_put'], expectAfter: perms => assert.deepEqual(perms.allowedStructures, ['long_call', 'long_put']) },
+    { label: 'narrowing', before: ['long_call', 'long_put'], after: ['long_call'], expectAfter: perms => assert.deepEqual(perms.allowedStructures, ['long_call']) },
+    { label: 'options-off', before: ['long_call'], after: [], expectAfter: perms => assert.equal(perms.allowOptions, false) },
+  ];
+  for (const { label, before, after, expectAfter } of cases) {
+    await reset();
+    await store.updatePermissionsForSandbox(A, { allowedStructures: ['bull_call_debit'] }); // so each fit resolves to a visible permission change
+    await store.updateStrategy('etf-mean-reversion', { optionStructures: before });
+    const profileBefore = clone(store.getStrategyById('etf-mean-reversion').slotProfile);
+    const staleToken = review.buildSlotReview({ kind: 'switch', sandboxId: A, activeAgentId: 'mean-reversion' }).preview.reviewToken;
+    await store.updateStrategy('etf-mean-reversion', { optionStructures: after }); // only the fit; same strategy id, profile and slot state
+    assert.deepEqual(store.getStrategyById('etf-mean-reversion').slotProfile, profileBefore, `${label}: profile unchanged`);
+    const snapshot = slotSnapshot(A);
+    const files = [await read(configPath), await read(guidanceFile()), await read(pendingFile())];
+    await assert.rejects(routeSwitch(A, 'mean-reversion', { token: staleToken }), error => {
+      assert.equal(error.status, 409, label);
+      assert.match(error.body.error, /changed since the preview/);
+      assert.notEqual(error.body.preview.reviewToken, staleToken, `${label}: the fresh preview carries a different token`);
+      expectAfter(error.body.preview.changes.permissions.after);
+      return true;
+    }, label);
+    assert.deepEqual(slotSnapshot(A), snapshot, label);
+    assert.deepEqual([await read(configPath), await read(guidanceFile()), await read(pendingFile())], files, `${label}: config, guidance and pending bytes unchanged`);
+    assert.equal(slotGate.held(A), null);
+    // confirming the fresh preview works
+    const fresh = review.buildSlotReview({ kind: 'switch', sandboxId: A, activeAgentId: 'mean-reversion' }).preview.reviewToken;
+    assert.equal((await routeSwitch(A, 'mean-reversion', { token: fresh })).body.ok, true, `${label}: the fresh token confirms`);
+  }
+});
+
+test('B04 controls: an unchanged fit confirms with the original token; a held-exposure options-off switch is still refused and saves nothing', async () => {
+  await reset();
+  await store.updateStrategy('etf-mean-reversion', { optionStructures: ['long_call'] });
+  const token = review.buildSlotReview({ kind: 'switch', sandboxId: A, activeAgentId: 'mean-reversion' }).preview.reviewToken;
+  await store.updateStrategy('etf-mean-reversion', { optionStructures: ['long_call'] }); // saved again with the same fit
+  assert.equal((await routeSwitch(A, 'mean-reversion', { token })).body.ok, true);
+  assert.deepEqual(store.getSandbox(A).permissions.allowedStructures, ['long_call']);
+  await reset();
+  await store.updateStrategy('etf-mean-reversion', { optionStructures: [] });
+  const before = slotSnapshot(A);
+  const held = { positions: [{ symbol: 'SPY260101C00500000' }], orders: [], ordersComplete: true, groups: { groups: [] } };
+  await expectRefusal(routeSwitch(A, 'mean-reversion', { exposure: held }), 409);
+  assert.deepEqual(slotSnapshot(A), before);
+  assert.equal(await read(pendingFile()), null);
+});
+
+test('B04: a fit that changes during the awaited exposure read is caught again before anything is published', async () => {
+  await reset();
+  await store.updatePermissionsForSandbox(A, { allowedStructures: ['bull_call_debit'] });
+  await store.updateStrategy('etf-mean-reversion', { optionStructures: [] }); // options-off: the guard reads exposure
+  const before = slotSnapshot(A);
+  const guidanceBytes = await read(guidanceFile());
+  await assert.rejects(routeSwitch(A, 'mean-reversion', { readExposure: async () => { await store.updateStrategy('etf-mean-reversion', { optionStructures: ['long_call', 'long_put'] }); return FLAT; } }), error => {
+    assert.equal(error.status, 409);
+    assert.match(error.body.error, /changed since the preview/);
+    assert.deepEqual(error.body.preview.changes.permissions.after.allowedStructures, ['long_call', 'long_put']);
+    return true;
+  });
+  assert.deepEqual(slotSnapshot(A), before);
+  assert.equal(await read(guidanceFile()), guidanceBytes);
+  assert.equal(await read(pendingFile()), null);
+  assert.equal(slotGate.held(A), null);
 });

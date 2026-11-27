@@ -7,7 +7,10 @@
 //   4. config       the staged sandbox is applied with lastTransitionOpId = opId and saved; that marker on the saved sandbox IS the commit
 //   5. clear        the pending record is removed, then the receipt is recorded
 //
-// Recovery (at load, before any slot starts): config carries the opId -> committed: make sure the `after` guidance is there, clear.
+// Recovery (at load, before any slot starts): every record is validated first; a malformed record is kept as evidence and its slot is blocked.
+// Config carries the opId -> committed: the entry carrying the opId stays; an entry that is genuinely absent is republished from the `after`
+// snapshot; an entry without the opId is kept only when it is provably a LATER normal save (no marker, saved at or after the `after` entry),
+// otherwise the slot is blocked and the record kept. Never replay the old snapshot over a later operator save.
 // Otherwise -> not committed: put the `before` guidance back if the entry still carries the opId, clear. Only that slot's fields are touched.
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -35,6 +38,34 @@ export const faults = {};
 async function fault(name) { if (typeof faults[name] === 'function') await faults[name](); }
 
 // ── pending record file ─────────────────────────────────────────────
+const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const hasText = value => typeof value === 'string' && value.length > 0;
+const KINDS = new Set(['switch', 'reapply']);
+
+/** Why a pending record cannot be interpreted (null when it is well formed). `key` is the slot id it is stored under. */
+export function pendingRecordProblem(key, record) {
+  if (!isPlainObject(record)) return 'the record is not an object';
+  if (!hasText(record.opId)) return 'the record has no operation id';
+  if (!hasText(record.sandboxId) || record.sandboxId !== key) return 'the record names a different slot than the one it is stored under';
+  if (!KINDS.has(record.kind)) return 'the record has an unsupported kind';
+  if (!hasText(record.createdAt)) return 'the record has no creation time';
+  for (const side of ['before', 'after']) {
+    const part = record[side];
+    if (!isPlainObject(part)) return `the record has no ${side} snapshot`;
+    for (const field of ['agent', 'permissions', 'heartbeat', 'tradingGuidance']) {
+      if (!isPlainObject(part[field])) return `the ${side} snapshot has no ${field}`;
+    }
+    if (typeof part.guidanceTouched !== 'boolean') return `the ${side} snapshot does not say whether guidance was touched`;
+    if (!('guidanceEntry' in part)) return `the ${side} snapshot has no guidance entry field`;
+    if (part.guidanceEntry !== null && !isPlainObject(part.guidanceEntry)) return `the ${side} guidance entry is not an object`;
+  }
+  if (record.before.guidanceTouched !== record.after.guidanceTouched) return 'the before and after snapshots disagree about guidance';
+  if (record.after.guidanceTouched) {
+    if (!record.after.guidanceEntry || record.after.guidanceEntry.transitionOpId !== record.opId) return 'the after guidance entry does not belong to this operation';
+    if (record.before.guidanceEntry && record.before.guidanceEntry.transitionOpId === record.opId) return 'the before guidance entry belongs to this operation';
+  } else if (record.before.guidanceEntry !== null || record.after.guidanceEntry !== null) return 'guidance entries are present although guidance was not touched';
+  return null;
+}
 let pendingQueue = Promise.resolve();
 const queued = task => { const run = pendingQueue.catch(() => {}).then(task); pendingQueue = run; return run; };
 
@@ -45,7 +76,7 @@ async function readPendingFile() {
     throw error;
   }
   const parsed = JSON.parse(text);
-  if (!parsed || typeof parsed !== 'object' || !parsed.records || typeof parsed.records !== 'object') throw new Error('pending record file has an unexpected shape');
+  if (!isPlainObject(parsed) || parsed.version !== 1 || !isPlainObject(parsed.records)) throw new Error('pending record file has an unexpected shape');
   return { version: 1, records: parsed.records };
 }
 
@@ -145,14 +176,27 @@ export async function recoverPendingTransitions({ getSandbox, listSandboxIds = (
     return outcome;
   }
   for (const [sandboxId, record] of Object.entries(records)) {
+    const problem = pendingRecordProblem(sandboxId, record);
+    if (problem) {
+      // Evidence is kept as it is. The slot it is stored under is blocked, and so is the slot it names when that differs.
+      const reason = `the pending settings record is malformed (${problem}); it is kept for review`;
+      const ids = new Set([sandboxId]);
+      if (hasText(record?.sandboxId)) ids.add(record.sandboxId);
+      for (const id of ids) { gate.block(id, reason); outcome.blocked.push(id); }
+      log(`[slot-transition] ${sandboxId}: ${reason}; slot blocked`);
+      continue;
+    }
     try {
       const sandbox = getSandbox(sandboxId);
       const entry = getSavedGuidanceEntry(sandboxId);
       if (sandbox) {
         const committed = sandbox.lastTransitionOpId === record.opId;
-        if (record.after?.guidanceTouched) {
+        if (record.after.guidanceTouched) {
           if (committed) {
-            if (entry?.transitionOpId !== record.opId) await replaceGuidanceEntryForSandbox(sandboxId, record.after.guidanceEntry);
+            if (!entry) await replaceGuidanceEntryForSandbox(sandboxId, record.after.guidanceEntry); // genuinely absent: repair
+            else if (entry.transitionOpId !== record.opId && !isLaterSave(entry, record)) {
+              throw new Error('the saved Trading Guidance entry belongs to neither this change nor a provably later save');
+            }
           } else if (entry?.transitionOpId === record.opId) {
             await replaceGuidanceEntryForSandbox(sandboxId, record.before.guidanceEntry, { requireOpId: record.opId });
           }
@@ -168,4 +212,12 @@ export async function recoverPendingTransitions({ getSandbox, listSandboxIds = (
     }
   }
   return outcome;
+}
+
+/** A normal operator save replaces the whole entry: it carries no operation marker and is stamped at or after this change's own entry. */
+function isLaterSave(entry, record) {
+  if (!isPlainObject(entry) || entry.transitionOpId !== undefined) return false;
+  const saved = Date.parse(entry.updatedAt);
+  const staged = Date.parse(record.after.guidanceEntry.updatedAt);
+  return Number.isFinite(saved) && Number.isFinite(staged) && saved >= staged;
 }

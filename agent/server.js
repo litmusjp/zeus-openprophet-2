@@ -61,7 +61,7 @@ import { fitDriftWarning, hasStartListBlock, isOptionsAgent, strategyOptionFit }
 import { runGuardedSwitch } from './switch-guard.js';
 import { slotGate } from './slot-gate.js';
 import { recoverPendingTransitions } from './slot-transition.js';
-import { acquireSlotOrRefuse, createTransition, finishCommittedRuntime, registerSlotProfileRoutes, slotWriterGuard, successBody, BUSY_TURN_MESSAGE } from './slot-review.js';
+import { acquireSlotOrRefuse, createTransition, finishCommittedRuntime, registerSlotProfileRoutes, slotWriterGuard, successBody, BUSY_TURN_MESSAGE, registerPermissionsRoute, registerModelActivateRoute } from './slot-review.js';
 import { profileDriftItems, profileDriftWarning, profileOfStrategy } from './slot-profile.js';
 import { savePluginAndApplyRuntime } from './plugin-runtime-apply.js';
 import { entryAssessmentsByBroker, excludeBrokerIdentityCollisions, matchBrokerOrder, normalizeBrokerOrder, readPaperAccountOrderHistory } from './broker-history.js';
@@ -1536,14 +1536,14 @@ registerSlotProfileRoutes(app, {
   afterChange: () => broadcast('config', safeConfig()),
 });
 
-app.put('/api/sandboxes/:id/agent/overrides', slotWriterGuard(req => req.params.id), async (req, res) => {
+app.put('/api/sandboxes/:id/agent/overrides', slotWriterGuard(req => req.params.id, async (req, res) => {
   try {
     const sandbox = await updateSandboxAgentOverrides(req.params.id, req.body || {});
     await refreshHarnessConfigForSandbox(req.params.id, { resetSession: true });
     broadcast('config', safeConfig());
     res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
   } catch (err) { res.status(400).json({ error: err.message }); }
-});
+}));
 
 registerPrecisionResolutionRoute(app, {
   operatorAuth: operatorAuthMiddleware,
@@ -1554,7 +1554,7 @@ registerPrecisionResolutionRoute(app, {
   operatorToken: () => process.env.TRADING_BOT_OPERATOR_TOKEN || '',
 });
 
-app.put('/api/sandboxes/:id/strategy-rules', slotWriterGuard(req => req.params.id), async (req, res) => {
+app.put('/api/sandboxes/:id/strategy-rules', slotWriterGuard(req => req.params.id, async (req, res) => {
   try {
     if (typeof req.body?.rules !== 'string') {
       return res.status(400).json({ error: 'rules is required' });
@@ -1564,7 +1564,7 @@ app.put('/api/sandboxes/:id/strategy-rules', slotWriterGuard(req => req.params.i
     broadcast('config', safeConfig());
     res.json({ ok: true, sandbox: redactSecrets(sandbox), agent: getResolvedAgentForSandbox(req.params.id) });
   } catch (err) { res.status(400).json({ error: err.message }); }
-});
+}));
 
 // ── Order Confirmation ─────────────────────────────────────────────
 // When requireConfirmation is enabled, the MCP server checks /api/permissions
@@ -1912,16 +1912,12 @@ app.get('/api/models', async (req, res) => {
   res.json({ models, activeModel: config.activeModel, providers: filteredProviders, allProviders });
 });
 
-app.post('/api/models/activate', async (req, res) => {
-  try {
-    if (typeof req.body?.model === 'string' && req.body.model.startsWith('openai/')) {
-      return res.status(409).json({ error: 'Use the agent editor after verifying this ChatGPT model and connection' });
-    }
-    await setActiveModel(req.body.model);
-    await refreshHarnessConfigForSandbox(getActiveSandbox()?.id, { resetSession: true });
-    broadcast('config', safeConfig());
-    res.json({ ok: true });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+// A legacy model-only change: the slot is pinned at entry and held like any other writer (409 during a switch or re-apply).
+registerModelActivateRoute(app, {
+  activeSandboxId: () => getActiveSandbox()?.id,
+  setModel: (model, sandboxId) => setActiveModel(model, sandboxId),
+  refresh: sandboxId => refreshHarnessConfigForSandbox(sandboxId, { resetSession: true }),
+  broadcast: () => broadcast('config', safeConfig()),
 });
 
 // Operator-only ChatGPT subscription OAuth. Connecting only stores native OpenCode auth; it never changes agent selection.
@@ -2009,7 +2005,7 @@ app.get('/api/heartbeat', (req, res) => {
   res.json(config.heartbeat || {});
 });
 
-app.put('/api/heartbeat', slotWriterGuard(req => req.body?.sandboxId || getActiveSandbox()?.id), async (req, res) => {
+app.put('/api/heartbeat', slotWriterGuard(req => req.body?.sandboxId || getActiveSandbox()?.id, async (req, res) => {
   try {
     const { sandboxId, expectedCurrentHeartbeat, ...heartbeatBody } = req.body || {};
     const targetSandboxId = sandboxId || getActiveSandbox()?.id;
@@ -2034,13 +2030,13 @@ app.put('/api/heartbeat', slotWriterGuard(req => req.body?.sandboxId || getActiv
     broadcast('config', safeConfig());
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
-});
+}));
 
 app.get('/api/heartbeat/profiles', (req, res) => {
   res.json({ profiles: getHeartbeatProfiles() });
 });
 
-app.post('/api/heartbeat/apply-profile', slotWriterGuard(req => req.body?.sandboxId || getActiveSandbox()?.id), async (req, res) => {
+app.post('/api/heartbeat/apply-profile', slotWriterGuard(req => req.body?.sandboxId || getActiveSandbox()?.id, async (req, res) => {
   try {
     const { sandboxId, profile } = req.body || {};
     const targetSandbox = sandboxId || getActiveSandbox()?.id;
@@ -2056,7 +2052,7 @@ app.post('/api/heartbeat/apply-profile', slotWriterGuard(req => req.body?.sandbo
     broadcast('config', safeConfig());
     res.json({ ok: true, profile, sandboxId: targetSandbox });
   } catch (err) { res.status(400).json({ error: err.message }); }
-});
+}));
 
 app.get('/api/heartbeat/phases', (req, res) => {
   res.json({ phases: getPhaseTimeRanges() });
@@ -2079,26 +2075,16 @@ app.get('/api/permissions', (req, res) => {
   res.json(getPermissions());
 });
 
-app.put('/api/permissions', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId), async (req, res) => {
-  try {
-    const { sandboxId, ...permBody } = req.body || {};
-    if (sandboxId) {
-      await updatePermissionsForSandbox(sandboxId, permBody);
-      const targetSandbox = getSandbox(sandboxId);
-      if (!targetSandbox) throw new Error(`Sandbox not found: ${sandboxId}`);
-      if (isActiveSandbox(sandboxId)) {
-        await startGoBackend(getAccountById(targetSandbox.accountId));
-      } else {
-        await orchestrator.startGoBackend(sandboxId);
-      }
-    } else {
-      await updatePermissions(permBody);
-      const activeAccount = getActiveAccount();
-      if (activeAccount) await startGoBackend(activeAccount);
-    }
-    broadcast('config', safeConfig());
-    res.json({ ok: true });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+registerPermissionsRoute(app, {
+  operatorAuth: operatorAuthMiddleware,
+  activeSandboxId: () => getActiveSandbox()?.id,
+  updatePermissionsForSandbox, updatePermissions, getSandbox,
+  restartBackend: async sandboxId => {
+    if (isActiveSandbox(sandboxId)) await startGoBackend(getAccountById(getSandbox(sandboxId).accountId));
+    else await orchestrator.startGoBackend(sandboxId);
+  },
+  restartActiveBackend: async () => { const activeAccount = getActiveAccount(); if (activeAccount) await startGoBackend(activeAccount); },
+  broadcast: () => broadcast('config', safeConfig()),
 });
 
 // ── Trading guidance (prompt-only reading of the strategy rules; never changes risk limits) ──
@@ -2129,7 +2115,7 @@ app.get('/api/option-spread-cap/sync', async (req, res) => {
   } catch (err) { res.status(503).json({ state: 'unknown', error: 'cap state unavailable' }); }
 });
 
-app.put('/api/trading-guidance', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId), async (req, res) => {
+app.put('/api/trading-guidance', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId, async (req, res) => {
   try {
     const { sandboxId, ...patch } = req.body || {};
     if (!sandboxId || !getSandbox(sandboxId)) return res.status(404).json({ error: 'Sandbox not found' });
@@ -2138,7 +2124,7 @@ app.put('/api/trading-guidance', operatorAuthMiddleware, slotWriterGuard(req => 
     await refreshHarnessConfigForSandbox(sandboxId, { resetSession: true });
     res.json({ ok: true, sandboxId, guidance, capSync });
   } catch (err) { res.status(400).json({ error: err.message }); }
-});
+}));
 
 // ── Plugins ────────────────────────────────────────────────────────
 app.get('/api/plugins', (req, res) => {
@@ -2228,7 +2214,7 @@ app.get('/api/market-session', async (req, res) => {
   } catch { res.status(503).json({ error:'market_session_unavailable' }); }
 });
 
-app.put('/api/heartbeat/market-mode', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId), async (req, res) => {
+app.put('/api/heartbeat/market-mode', operatorAuthMiddleware, slotWriterGuard(req => req.body?.sandboxId, async (req, res) => {
   try {
     const { sandboxId, mode, intervals, expectedCurrentHeartbeat } = req.body || {};
     if (!sandboxId || !getSandbox(sandboxId)) throw new Error('Selected sandbox is required');
@@ -2255,7 +2241,7 @@ app.put('/api/heartbeat/market-mode', operatorAuthMiddleware, slotWriterGuard(re
     broadcast('config', safeConfig());
     res.json({ ok:true, sandboxId, heartbeat:getSandbox(sandboxId).heartbeat });
   } catch (err) { res.status(400).json({ error:err.message }); }
-});
+}));
 
 app.post('/api/plugins/slack/test', async (req, res) => {
   const sandboxId = req.body?.sandboxId;

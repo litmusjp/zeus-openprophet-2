@@ -7,6 +7,7 @@ import { optionExposureReason, SWITCH_REFUSAL_PREFIX } from './switch-guard.js';
 import { planProfileApplication, profileOfStrategy, reviewTokenFor } from './slot-profile.js';
 import { SlotTransitionError } from './slot-transition.js';
 import { slotGate, TRANSITION_BUSY_MESSAGE } from './slot-gate.js';
+import { strategyOptionFit } from './agent-consistency.js';
 import { redactSecrets } from './redaction.js';
 
 export const BUSY_TURN_MESSAGE = 'Wait for the active agent turn to finish before changing its model or assignment';
@@ -53,6 +54,8 @@ export function buildSlotReview({ kind, sandboxId, activeAgentId, strategyId }) 
     if (kind === 'reapply') errors.push('This slot\'s effective strategy has no slot profile, so there is nothing to apply');
     else if (agentChange) warnings.push(unprofiledWarning(agentName));
   }
+  // The same resolution the exposure guard and the staged commit use (previewSwitchPermissionPatch); the token binds its outcome and fit.
+  const optionFit = kind === 'switch' && agentChange && effectiveStrategyId ? strategyOptionFit(strategy, effectiveStrategyId) : null;
   const permissionKeys = permissionPatch ? Object.keys(permissionPatch) : [];
   const preview = {
     kind, sandboxId, currentAgentId, targetAgentId, effectiveStrategyId,
@@ -64,7 +67,7 @@ export function buildSlotReview({ kind, sandboxId, activeAgentId, strategyId }) 
     },
     errors, warnings,
     exposure: 'unavailable',
-    reviewToken: reviewTokenFor({ kind, sandboxId, currentAgentId, targetAgentId, effectiveStrategyId, profile, slotGuidance, slotHeartbeat, slotPermissions }),
+    reviewToken: reviewTokenFor({ kind, sandboxId, currentAgentId, targetAgentId, effectiveStrategyId, profile, slotGuidance, slotHeartbeat, slotPermissions, permissionPatch, optionFit }),
   };
   return { preview, plan, permissionPatch, profile, agentName };
 }
@@ -123,18 +126,69 @@ export function acquireSlotOrRefuse(sandboxId, kind) {
   throw new SlotTransitionError(409, { error: block ? `slot settings transition blocked: ${block.reason}` : TRANSITION_BUSY_MESSAGE });
 }
 
-/** For an ordinary same-slot writer route: holds the gate for the whole request (409 while a transition or another writer holds it). */
-export function slotWriterGuard(sandboxIdOf) {
+/**
+ * For an ordinary same-slot writer route: resolves the slot ONCE at entry (`sandboxIdOf(req)`), holds the gate for the handler's whole
+ * operation and releases in `finally` once the handler's promise settles (409 while a transition or another writer holds it). A client
+ * that disconnects does not cancel the awaited save/restart/refresh, so the response closing never releases the hold.
+ * `handler(req, res, sandboxId)` receives the pinned slot id (null when no slot resolves; no hold is taken then).
+ */
+export function slotWriterGuard(sandboxIdOf, handler) {
   return async (req, res, next) => {
-    const sandboxId = sandboxIdOf(req);
-    if (!sandboxId) return next();
+    let sandboxId;
+    try { sandboxId = sandboxIdOf(req); } catch (error) { return res.status(400).json({ error: error.message }); }
+    if (!sandboxId) { try { return await handler(req, res, null); } catch (error) { return failUnhandled(res, error); } }
     let ticket;
     try { ticket = acquireSlotOrRefuse(sandboxId, 'write'); } catch (error) { return res.status(error.status || 409).json(error.body || { error: error.message }); }
-    let done = false;
-    const release = () => { if (!done) { done = true; ticket.release(); } };
-    res.on('finish', release);
-    res.on('close', release);
-    next();
+    try { await handler(req, res, sandboxId); } catch (error) { failUnhandled(res, error); } finally { ticket.release(); }
+  };
+}
+function failUnhandled(res, error) { if (!res.headersSent) res.status(500).json({ error: error?.message || 'request failed' }); }
+
+/**
+ * PUT /api/permissions (operator auth, then the writer hold). The slot is resolved ONCE at entry (`body.sandboxId`, else the active slot);
+ * the save and the backend restart both use that pinned id, even when the active account changes while the request is awaited.
+ * deps: operatorAuth, activeSandboxId(), updatePermissionsForSandbox(id, perms), updatePermissions(perms) (no slot at all), getSandbox(id),
+ *       restartBackend(id), restartActiveBackend(), broadcast()
+ */
+export function registerPermissionsRoute(app, deps) {
+  app.put('/api/permissions', deps.operatorAuth, slotWriterGuard(req => req.body?.sandboxId || deps.activeSandboxId(), permissionsPutHandler(deps)));
+}
+function permissionsPutHandler(deps) {
+  return async (req, res, sandboxId) => {
+    try {
+      const { sandboxId: _bodySandboxId, ...permBody } = req.body || {};
+      if (sandboxId) {
+        await deps.updatePermissionsForSandbox(sandboxId, permBody);
+        if (!deps.getSandbox(sandboxId)) throw new Error(`Sandbox not found: ${sandboxId}`);
+        await deps.restartBackend(sandboxId);
+      } else {
+        await deps.updatePermissions(permBody);
+        await deps.restartActiveBackend();
+      }
+      deps.broadcast();
+      res.json({ ok: true });
+    } catch (err) { res.status(400).json({ error: err.message }); }
+  };
+}
+
+/**
+ * Legacy POST /api/models/activate (no auth added or removed): a model-only save to the slot pinned at request entry (no profile, no agent
+ * change), held like any other writer, then a refresh of that same slot. deps: activeSandboxId(), setModel(modelId, sandboxId), refresh(sandboxId), broadcast()
+ */
+export function registerModelActivateRoute(app, deps) {
+  app.post('/api/models/activate', slotWriterGuard(() => deps.activeSandboxId(), modelActivateHandler(deps)));
+}
+function modelActivateHandler(deps) {
+  return async (req, res, sandboxId) => {
+    try {
+      if (typeof req.body?.model === 'string' && req.body.model.startsWith('openai/')) {
+        return res.status(409).json({ error: 'Use the agent editor after verifying this ChatGPT model and connection' });
+      }
+      await deps.setModel(req.body.model, sandboxId);
+      await deps.refresh(sandboxId);
+      deps.broadcast();
+      res.json({ ok: true });
+    } catch (err) { res.status(400).json({ error: err.message }); }
   };
 }
 

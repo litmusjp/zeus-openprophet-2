@@ -9,7 +9,7 @@ import path from 'path';
 import { nativeOpenCodeEnv, stripOperatorSecrets, chatgptStatus, isChatGPTModelVerified } from './chatgpt-oauth.js';
 import { randomUUID } from 'crypto';
 import { renderPrefixedToolMenu } from './tool-catalog.js';
-import { compactHistoricalBars, compactDailyFeatures } from './audit-capture.js';
+import { compactHistoricalBars, compactDailyFeatures, compactAuditDraft, fitAuditEvent, BOUNDED_AUDIT_TOOLS } from './audit-capture.js';
 import { actorOf } from './history-attribution.js';
 import { applyCloseOnlyText, applyDebitVerticalText, debitVerticalsAllowed, openGroupCloseReminder, openGroupReadFailedReminder } from './spread-guidance.js';
 import { ALPHADESK_WORKFLOW_BLOCK, placeWorkflow, stripSavedWorkflow } from './alphadesk-workflow.js';
@@ -2134,12 +2134,15 @@ ${userBlock}`;
         const resultLength = safeResult?.length || 0;
         const compactBars = resultLength > captureLimit && (toolName === 'get_historical_bars' || toolName === 'get_daily_features')
           ? (toolName === 'get_daily_features' ? compactDailyFeatures(safeResult) : compactHistoricalBars(safeResult)) : null;
-        const resultTruncated = !compactBars && resultLength > captureLimit;
+        // F5: bounded, parseable audit form for the other long read-only results; persisted audit event only, never the model output.
+        const auditDraft = !compactBars && resultLength > captureLimit && BOUNDED_AUDIT_TOOLS.includes(toolName)
+          ? compactAuditDraft(toolName, safeResult, safeAuditValue(toolInput)) : null;
+        const resultTruncated = !compactBars && !auditDraft && resultLength > captureLimit;
         this._captureOrderAttribution({ kind: 'tool_call', tool: toolName, args: safeAuditValue(toolInput), result: safeResult,
           status: state.status || (safeError ? 'error' : 'completed'), ...(safeError ? { error: safeError } : {}),
           ...(ctx.actorSnapshot ? { actorSnapshot: ctx.actorSnapshot } : {}),
           completedAt: new Date().toISOString() }, ctx);
-        ctx.recordToolEvent?.({
+        const auditEvent = {
           eventType: 'tool_call', kind: 'tool_call', role: 'assistant', tool: toolName,
           args: safeAuditValue(toolInput), result: compactBars ?? safeResult?.substring(0, captureLimit), beat: beatNum,
           ...(ctx.actorSnapshot ? { actorSnapshot: ctx.actorSnapshot } : {}),
@@ -2147,7 +2150,14 @@ ${userBlock}`;
           completedAt: new Date().toISOString(), status: state.status || (safeError ? 'error' : 'completed'),
           ...(safeError ? { error: safeError } : {}),
           ...(resultTruncated ? { resultTruncated: true, resultLength } : {}),
-        });
+        };
+        if (auditDraft) {
+          const fitted = fitAuditEvent(auditEvent, auditDraft);
+          if (fitted.resultTruncated) fitted.resultLength = resultLength;
+          ctx.recordToolEvent?.(fitted);
+        } else {
+          ctx.recordToolEvent?.(auditEvent);
+        }
         this.state.emit('tool_result', { name: toolName, result: resultStr.substring(0, 500), ...(safeError ? { error: safeError } : {}), beat: beatNum });
 
         // Track only tools that execute trades. Read-only tools such as

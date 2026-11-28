@@ -208,7 +208,7 @@ func main() {
 	newsController := controllers.NewNewsController(newsService)
 
 	// Create economic feeds service and controller
-	economicFeedsService := services.NewEconomicFeedsService()
+	economicFeedsService := services.NewEconomicFeedsServiceWithTrading(tradingService)
 	economicFeedsController := controllers.NewEconomicFeedsController(economicFeedsService)
 
 	// Create Gemini service and intelligence controller

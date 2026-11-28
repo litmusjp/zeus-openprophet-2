@@ -88,3 +88,94 @@ test('openingGateDecision: minimum 15 refuses 14, allows 15, refuses unavailable
   assert.equal(openingGateDecision('15', { minutes_since_open: null }).allowed, false);
   assert.equal(openingGateDecision('15', null).allowed, false);
 });
+
+// ---- F3: long_gap (information under the Herald long-gap rule only; never an order authorization) ----
+import { longGapFields } from '../session-clock.js';
+
+const gapOf = (ts, sessions, extra = {}, isOpen = true) => {
+  const c = { timestamp: ts, is_open: isOpen, ...extra };
+  return longGapFields(c, sessionFields(c, sessions));
+};
+const UNAVAILABLE = { follows_session: null, single_leg_cutoff_utc: null, single_leg_open_allowed: null, status: 'unavailable' };
+
+test('long_gap half-day Friday 27 Nov 2026: close 18:00Z, cutoff 16:00Z, equality is cut off', () => {
+  const s = [day('2026-11-27', '09:30', '13:00')];
+  const next = { next_open: '2026-11-30T09:30:00-05:00', next_close: '2026-11-27T13:00:00-05:00' };
+  const at = ts => gapOf(ts, s, next);
+  const early = at('2026-11-27T14:30:00Z');
+  assert.deepEqual(early, { follows_session: true, single_leg_cutoff_utc: '2026-11-27T16:00:00Z', single_leg_open_allowed: true, status: 'long_gap_follows' });
+  assert.equal(at('2026-11-27T15:00:00Z').single_leg_open_allowed, true);
+  assert.equal(at('2026-11-27T15:58:59Z').single_leg_open_allowed, true);   // 121 minutes to close
+  assert.equal(at('2026-11-27T15:59:00Z').single_leg_open_allowed, true);   // exactly 121 minutes
+  assert.equal(at('2026-11-27T15:59:30Z').single_leg_open_allowed, false);  // 120 whole minutes shown to the model: never more permissive than the rule text
+  assert.equal(at('2026-11-27T16:00:00Z').single_leg_open_allowed, false);  // equality: minutes_to_close 120 is cut off
+  assert.equal(at('2026-11-27T16:00:01Z').single_leg_open_allowed, false);
+  assert.equal(at('2026-11-27T17:59:00Z').single_leg_open_allowed, false);
+  assert.equal(at('2026-11-27T16:00:00Z').single_leg_cutoff_utc, '2026-11-27T16:00:00Z');
+});
+
+test('long_gap normal Friday: close 21:00Z, cutoff 19:00Z, weekend gap', () => {
+  const s = [day('2026-11-20')];
+  const next = { next_open: '2026-11-23T09:30:00-05:00', next_close: '2026-11-20T16:00:00-05:00' };
+  assert.deepEqual(gapOf('2026-11-20T18:59:00Z', s, next), { follows_session: true, single_leg_cutoff_utc: '2026-11-20T19:00:00Z', single_leg_open_allowed: true, status: 'long_gap_follows' });
+  assert.equal(gapOf('2026-11-20T19:00:00Z', s, next).single_leg_open_allowed, false);
+  assert.equal(gapOf('2026-11-20T20:30:00Z', s, next).single_leg_open_allowed, false);
+});
+
+test('long_gap ordinary weekday: next open the following morning is no long gap and there is no cutoff', () => {
+  const s = [day('2026-11-17')];
+  const next = { next_open: '2026-11-18T09:30:00-05:00', next_close: '2026-11-17T16:00:00-05:00' };
+  assert.deepEqual(gapOf('2026-11-17T20:30:00Z', s, next), { follows_session: false, single_leg_cutoff_utc: null, single_leg_open_allowed: true, status: 'no_long_gap' });
+});
+
+test('long_gap holiday gap: Wednesday before Thanksgiving, next open Friday', () => {
+  const s = [day('2026-11-25')];
+  const next = { next_open: '2026-11-27T09:30:00-05:00', next_close: '2026-11-25T16:00:00-05:00' };
+  const f = gapOf('2026-11-25T15:00:00Z', s, next);
+  assert.equal(f.follows_session, true);
+  assert.equal(f.single_leg_cutoff_utc, '2026-11-25T19:00:00Z');
+  assert.equal(f.single_leg_open_allowed, true);
+  assert.equal(gapOf('2026-11-25T19:00:00Z', s, next).single_leg_open_allowed, false);
+});
+
+test('long_gap across daylight-saving changes uses real UTC instants', () => {
+  // Fri 30 Oct 2026 is still EDT (close 20:00Z); the clocks go back on Sun 1 Nov; Mon 2 Nov opens EST (14:30Z)
+  const fall = gapOf('2026-10-30T17:59:00Z', [day('2026-10-30')], { next_open: '2026-11-02T14:30:00Z', next_close: '2026-10-30T20:00:00Z' });
+  assert.deepEqual(fall, { follows_session: true, single_leg_cutoff_utc: '2026-10-30T18:00:00Z', single_leg_open_allowed: true, status: 'long_gap_follows' });
+  assert.equal(gapOf('2026-10-30T18:00:00Z', [day('2026-10-30')], { next_open: '2026-11-02T14:30:00Z' }).single_leg_open_allowed, false);
+  // Fri 6 Mar 2026 is EST (close 21:00Z); the clocks go forward on Sun 8 Mar; Mon 9 Mar opens EDT (13:30Z)
+  const spring = gapOf('2026-03-06T18:59:00Z', [day('2026-03-06')], { next_open: '2026-03-09T13:30:00Z', next_close: '2026-03-06T21:00:00Z' });
+  assert.deepEqual(spring, { follows_session: true, single_leg_cutoff_utc: '2026-03-06T19:00:00Z', single_leg_open_allowed: true, status: 'long_gap_follows' });
+  // the Sunday-night DST shift makes a Sunday-evening style gap still above 24 h; a weekday spring-forward gap is not
+  const weekday = gapOf('2026-03-04T15:00:00Z', [day('2026-03-04')], { next_open: '2026-03-05T14:30:00Z' });
+  assert.equal(weekday.follows_session, false);
+});
+
+test('long_gap threshold is strictly more than 24 hours after this close', () => {
+  const s = [day('2026-11-17')];
+  assert.equal(gapOf('2026-11-17T15:00:00Z', s, { next_open: '2026-11-18T21:00:00Z' }).status, 'no_long_gap');
+  assert.equal(gapOf('2026-11-17T15:00:00Z', s, { next_open: '2026-11-18T21:00:01Z' }).status, 'long_gap_follows');
+});
+
+test('long_gap missing, stale or inconsistent evidence is unavailable with null fields and never allowed', () => {
+  const s = [day('2026-11-27', '09:30', '13:00')];
+  const ok = { next_open: '2026-11-30T14:30:00Z', next_close: '2026-11-27T18:00:00Z' };
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', s, {}), UNAVAILABLE);                                  // no next_open
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', s, { next_open: 'garbage' }), UNAVAILABLE);
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', [], ok), UNAVAILABLE);                                  // no calendar row
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', null, ok), UNAVAILABLE);
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', s, ok, false), UNAVAILABLE);                            // broker says closed
+  assert.deepEqual(gapOf('2026-11-27T18:00:00Z', s, ok), UNAVAILABLE);                                   // timestamp at/after the close
+  assert.deepEqual(gapOf('2026-11-27T13:00:00Z', s, ok), UNAVAILABLE);                                   // before the open
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', s, { next_open: '2026-11-27T14:30:00Z' }), UNAVAILABLE); // next open not after the close
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', s, { ...ok, next_close: '2026-11-27T21:00:00Z' }), UNAVAILABLE); // next close disagrees with this close
+  assert.deepEqual(gapOf('2026-11-27T14:00:00Z', s, { ...ok, next_close: 'garbage' }), UNAVAILABLE);
+  assert.deepEqual(gapOf('not a time', s, ok), UNAVAILABLE);
+  assert.deepEqual(longGapFields(null, null), UNAVAILABLE);
+  assert.deepEqual(longGapFields({ timestamp: '2026-11-27T14:00:00Z', is_open: true, next_open: ok.next_open }, sessionFields(null, null)), UNAVAILABLE); // clock-only fallback
+  assert.deepEqual(longGapFields(clock('2026-11-27T14:00:00Z'), { ...sessionFields(clock('2026-11-27T14:00:00Z'), s), minutes_to_close: 5 }), UNAVAILABLE); // inconsistent minutes
+  // sessionFields carries the same long_gap object that get_datetime returns, and nulls it when evidence is missing
+  assert.deepEqual(sessionFields(null, null).long_gap, UNAVAILABLE);
+  assert.deepEqual(sessionFields(clock('2026-11-27T14:00:00Z'), s).long_gap, UNAVAILABLE); // no next_open on the clock
+  assert.equal(sessionFields({ ...clock('2026-11-27T15:00:00Z'), next_open: '2026-11-30T14:30:00Z' }, s).long_gap.status, 'long_gap_follows');
+});

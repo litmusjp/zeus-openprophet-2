@@ -52,7 +52,8 @@ export function nyWallToInstantMs(dateText, timeText) {
   return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, 0) === wallAsUtc ? guess : null;
 }
 
-const EMPTY = Object.freeze({ session_time_et: null, session_open_et: null, session_close_et: null, session_open_utc: null, session_close_utc: null, minutes_since_open: null, minutes_to_close: null });
+const EMPTY = Object.freeze({ session_time_et: null, session_open_et: null, session_close_et: null, session_open_utc: null, session_close_utc: null, minutes_since_open: null, minutes_to_close: null,
+  long_gap: Object.freeze({ follows_session: null, single_leg_cutoff_utc: null, single_leg_open_allowed: null, status: 'unavailable' }) });
 
 const isoUtc = ms => new Date(ms).toISOString().replace(/\.000Z$/, 'Z');
 
@@ -83,6 +84,7 @@ export function sessionFields(clock, sessions) {
     out.minutes_since_open = Math.floor((nowMs - openMs) / 60000);
     out.minutes_to_close = Math.floor((closeMs - nowMs) / 60000);
   }
+  out.long_gap = longGapFields(clock, out);
   return out;
 }
 
@@ -108,5 +110,50 @@ export function openingGateDecision(minMinutes, fields) {
     message: Number.isInteger(m)
       ? `Openings are allowed from ${min} minutes after the session open; it is minute ${m}. Wait for the opening range to complete.`
       : `Openings need ${min} minutes of regular session; the broker session clock does not show the market open or is unavailable, so this opening is refused. Reducing orders are not affected.`,
+  };
+}
+
+const LONG_GAP_MS = 24 * 60 * 60 * 1000;
+const SINGLE_LEG_CUTOFF_MINUTES = 120;
+const LONG_GAP_UNAVAILABLE = Object.freeze({ follows_session: null, single_leg_cutoff_utc: null, single_leg_open_allowed: null, status: 'unavailable' });
+
+/**
+ * Long-gap information for the Herald "Long gaps" rule, derived only from the broker clock and the broker calendar already read by
+ * get_datetime: this session's close (fields.session_close_utc from sessionFields) and the broker's next regular open
+ * (clock.next_open). A long gap follows when the next regular open is MORE than 24 hours after this session's close. Never from a
+ * weekday or holiday guess. The cutoff is close minus 120 minutes; a single-leg opening is allowed under this one rule only while
+ * minutes_to_close is above 120 (equality is cut off). minutes_to_close is the same whole-minute, rounded-down value the model reads,
+ * so this field is never more permissive than the rule text.
+ *
+ * It is information under this one rule: not an order authorization and not a statement about any other limit.
+ * Anything missing, stale (the broker says the market is closed or the timestamp is outside the session) or inconsistent (next open not
+ * after the close, next close not equal to this close) gives nulls with status "unavailable", never allowed=true.
+ */
+export function longGapFields(clock, fields) {
+  if (!clock || typeof clock !== 'object' || !fields || typeof fields !== 'object') return { ...LONG_GAP_UNAVAILABLE };
+  const nowMs = Date.parse(clock.timestamp ?? clock.Timestamp);
+  const nextOpenMs = Date.parse(clock.next_open ?? clock.NextOpen);
+  const closeMs = Date.parse(fields.session_close_utc);
+  const openMs = Date.parse(fields.session_open_utc);
+  const minutesToClose = fields.minutes_to_close;
+  if (![nowMs, nextOpenMs, closeMs, openMs].every(Number.isFinite) || !Number.isInteger(minutesToClose)) return { ...LONG_GAP_UNAVAILABLE };
+  // evidence must describe a session that is open right now, on the broker timestamp
+  if ((clock.is_open ?? clock.IsOpen) !== true || nowMs < openMs || nowMs >= closeMs) return { ...LONG_GAP_UNAVAILABLE };
+  if (minutesToClose !== Math.floor((closeMs - nowMs) / 60000)) return { ...LONG_GAP_UNAVAILABLE };
+  if (nextOpenMs <= closeMs) return { ...LONG_GAP_UNAVAILABLE };
+  const rawNextClose = clock.next_close ?? clock.NextClose;
+  if (rawNextClose !== undefined && rawNextClose !== null) {
+    const nextCloseMs = Date.parse(rawNextClose);
+    // while the session is open the broker's next close is this session's close
+    if (!Number.isFinite(nextCloseMs) || nextCloseMs !== closeMs) return { ...LONG_GAP_UNAVAILABLE };
+  }
+  if (nextOpenMs - closeMs <= LONG_GAP_MS) {
+    return { follows_session: false, single_leg_cutoff_utc: null, single_leg_open_allowed: true, status: 'no_long_gap' };
+  }
+  return {
+    follows_session: true,
+    single_leg_cutoff_utc: isoUtc(closeMs - SINGLE_LEG_CUTOFF_MINUTES * 60000),
+    single_leg_open_allowed: minutesToClose > SINGLE_LEG_CUTOFF_MINUTES,
+    status: 'long_gap_follows',
   };
 }

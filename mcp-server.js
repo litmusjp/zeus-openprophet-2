@@ -2647,6 +2647,8 @@ ${allNews.map((article, i) =>
                   session_close_utc: sessionInfo.session_close_utc,
                   minutes_since_open: sessionInfo.minutes_since_open,
                   minutes_to_close: sessionInfo.minutes_to_close,
+                  long_gap: sessionInfo.long_gap,
+                  long_gap_note: 'long_gap is information under the Herald long-gap rule only (no new single-leg option opening in the last 120 minutes before a long gap). It is not an order authorization: every other limit still applies, and exits and research are never blocked by it.',
                   session_fields_error: sessionFieldsError,
                   broker_clock: brokerClock,
                   broker_clock_error: brokerClockError,

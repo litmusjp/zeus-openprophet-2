@@ -5,18 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"prophet-trader/database"
 	"prophet-trader/interfaces"
+	"prophet-trader/models"
 	"prophet-trader/services"
 )
 
@@ -620,5 +623,358 @@ func TestPlannedIntentEligibilityWinsAtExactSessionOpen(t *testing.T) {
 	eligible, expired = controller.plannedIntentState(order, stale)
 	if eligible || !expired {
 		t.Fatalf("after explicit expiry: eligible=%v expired=%v; want eligible=false expired=true", eligible, expired)
+	}
+}
+
+// ---- F2: Herald target-allocation guard ----
+
+const disContract = "DIS270115C00120000"
+
+type targetGuardService struct {
+	*reconciliationTradingService
+	mu       sync.Mutex
+	identity models.DurableIdentity
+	position *interfaces.OptionsPosition
+	posErr   error
+	orders   []*interfaces.Order
+	listErr  error
+	calls    int
+	admitted []string
+	// When true each admitted order is recorded as a working broker order, like a real submission.
+	recordWorking bool
+}
+
+func (s *targetGuardService) GetOptionsPosition(context.Context, string) (*interfaces.OptionsPosition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.position, s.posErr
+}
+
+func (s *targetGuardService) ListOrders(context.Context, string) ([]*interfaces.Order, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	out := make([]*interfaces.Order, len(s.orders))
+	copy(out, s.orders)
+	return out, nil
+}
+
+func (s *targetGuardService) PlaceOptionsOrder(_ context.Context, order *interfaces.OptionsOrder) (*interfaces.OrderResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	s.admitted = append(s.admitted, order.ClientOrderID)
+	id := "broker-" + order.ClientOrderID
+	if s.recordWorking {
+		s.orders = append(s.orders, &interfaces.Order{ID: id, ClientOrderID: order.ClientOrderID, Symbol: order.Symbol, Side: order.Side,
+			PositionIntent: order.PositionIntent, Qty: order.Qty, Status: "new", SubmittedAt: time.Now()})
+	}
+	return &interfaces.OrderResult{
+		OrderID: id, Status: "accepted", ClientOrderID: order.ClientOrderID, Symbol: order.Symbol, Side: order.Side, Qty: order.Qty,
+		Type: order.Type, TimeInForce: order.TimeInForce, LimitPrice: order.LimitPrice, PositionIntent: order.PositionIntent, Purpose: "close",
+		BrokerAccountID: s.identity.BrokerAccountID, PaperLive: s.identity.PaperLive, TenantID: s.identity.TenantID, SandboxID: s.identity.SandboxID,
+	}, nil
+}
+
+var targetGuardBase = time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+
+func tgFill(id, client, side string, qty, filled float64, status string, at time.Time) *interfaces.Order {
+	o := &interfaces.Order{ID: id, ClientOrderID: client, Symbol: disContract, Side: side, Qty: qty, FilledQty: filled, Status: status, SubmittedAt: at}
+	if filled > 0 {
+		f := at.Add(time.Minute)
+		o.FilledAt = &f
+	}
+	return o
+}
+
+func newTargetGuard(t *testing.T, positionQty float64, orders ...*interfaces.Order) (*OrderController, *targetGuardService) {
+	t.Helper()
+	storage, err := database.NewLocalStorage(filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	t.Cleanup(func() { storage.Close() })
+	svc := &targetGuardService{
+		reconciliationTradingService: &reconciliationTradingService{},
+		identity:                     storage.DurableIdentity(),
+		position:                     &interfaces.OptionsPosition{BrokerAccountID: "723be98b", Symbol: disContract, Underlying: "DIS", Qty: positionQty, Side: "long"},
+		orders:                       orders,
+	}
+	return NewOrderController(svc, nil, storage), svc
+}
+
+func tgOpening(qty float64) *interfaces.Order {
+	return tgFill("d86ec4b9-dc49-4a8e-9fbd-17ae923c73ad", "herald-20261124-dis-entry-01", "buy", qty, qty, "filled", targetGuardBase)
+}
+
+func tgPost(c *OrderController, clientID string, qty float64) (int, interfaces.OrderResult) {
+	body, _ := json.Marshal(map[string]any{
+		"client_order_id": clientID, "symbol": disContract, "underlying": "DIS", "qty": qty, "side": "sell",
+		"position_intent": "sell_to_close", "type": "limit", "limit_price": 8.7,
+	})
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/options/order", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	c.PlaceOptionsOrder(ctx)
+	var result interfaces.OrderResult
+	_ = json.Unmarshal(recorder.Body.Bytes(), &result)
+	return recorder.Code, result
+}
+
+func tgRefused(code int, result interfaces.OrderResult, want string) bool {
+	return code == http.StatusConflict && result.Status == "risk_blocked" && len(result.FailedCheckCodes) == 1 && result.FailedCheckCodes[0] == want
+}
+
+func tgDISOrders() []*interfaces.Order {
+	// 24 Nov opening fill 10 @ 5.70; 25 Nov target 73c36318 filled 5 @ 7.40.
+	return []*interfaces.Order{
+		tgOpening(10),
+		tgFill("73c36318-befa-49c7-9b28-126abccbd05c", "herald-20261125-dis-target-1330-01", "sell", 5, 5, "filled", targetGuardBase.Add(24*time.Hour)),
+	}
+}
+
+func TestTargetGuardRefusesDISReplayWithNoBrokerCallback(t *testing.T) {
+	c, svc := newTargetGuard(t, 5, tgDISOrders()...)
+	for _, tc := range []struct {
+		id  string
+		qty float64
+	}{{"herald-20261127-dis-target-1020-01", 2}, {"herald-20261127-dis-target-1040-02", 2}, {"herald-20261127-dis-target-1050-03", 3}} {
+		code, result := tgPost(c, tc.id, tc.qty)
+		if !tgRefused(code, result, "TARGET_ALLOCATION_SPENT") {
+			t.Fatalf("%s: status=%d result=%#v, want spent refusal", tc.id, code, result)
+		}
+		if !strings.Contains(result.Message, "fresh intent") {
+			t.Fatalf("refusal message must explain the fresh-intent route: %q", result.Message)
+		}
+	}
+	if svc.calls != 0 {
+		t.Fatalf("broker callback count = %d, want 0", svc.calls)
+	}
+}
+
+func TestTargetGuardAllocationFiveTwoFilledOneReservedPermitsAtMostTwo(t *testing.T) {
+	orders := []*interfaces.Order{
+		tgOpening(10),
+		tgFill("t1", "herald-20261125-dis-target-1330-01", "sell", 2, 2, "filled", targetGuardBase.Add(24*time.Hour)),
+		tgFill("t2", "herald-20261125-dis-target-1400-02", "sell", 1, 0, "new", targetGuardBase.Add(25*time.Hour)),
+	}
+	c, svc := newTargetGuard(t, 8, orders...)
+	state := c.computeTargetAllocation(context.Background(), disContract, "")
+	if state.EvidenceStatus != "confirmed" || state.AllocatedQty != 5 || state.FilledQty != 2 || state.ReservedQty != 1 || state.AvailableQty != 2 || state.Spent {
+		t.Fatalf("state = %#v", state)
+	}
+	if code, result := tgPost(c, "herald-20261126-dis-target-1000-03", 3); !tgRefused(code, result, "TARGET_ALLOCATION_EXCEEDED") {
+		t.Fatalf("3 contracts: status=%d result=%#v, want exceeded", code, result)
+	}
+	if svc.calls != 0 {
+		t.Fatalf("calls = %d after refusal, want 0", svc.calls)
+	}
+	if code, result := tgPost(c, "herald-20261126-dis-target-1000-04", 2); code != http.StatusOK {
+		t.Fatalf("2 contracts: status=%d result=%#v, want admitted", code, result)
+	}
+	if svc.calls != 1 {
+		t.Fatalf("calls = %d, want 1", svc.calls)
+	}
+}
+
+func TestTargetGuardTerminalCancelledPartialPermitsOnlyUnfilledRemainder(t *testing.T) {
+	orders := []*interfaces.Order{
+		tgOpening(10),
+		tgFill("t1", "herald-20261125-dis-target-1330-01", "sell", 5, 1, "canceled", targetGuardBase.Add(24*time.Hour)),
+	}
+	c, svc := newTargetGuard(t, 9, orders...)
+	state := c.computeTargetAllocation(context.Background(), disContract, "")
+	if state.AllocatedQty != 5 || state.FilledQty != 1 || state.ReservedQty != 0 || state.AvailableQty != 4 || state.Spent {
+		t.Fatalf("state = %#v, want allocation 5, filled 1, reserved 0, available 4", state)
+	}
+	if code, result := tgPost(c, "herald-20261126-dis-target-1000-02", 5); !tgRefused(code, result, "TARGET_ALLOCATION_EXCEEDED") {
+		t.Fatalf("5 contracts: status=%d result=%#v, want exceeded", code, result)
+	}
+	if code, result := tgPost(c, "herald-20261126-dis-target-1000-03", 4); code != http.StatusOK {
+		t.Fatalf("4 contracts: status=%d result=%#v, want admitted", code, result)
+	}
+	if svc.calls != 1 {
+		t.Fatalf("calls = %d, want 1", svc.calls)
+	}
+}
+
+func TestTargetGuardOverlappingAdmissionsCannotOverAllocate(t *testing.T) {
+	c, svc := newTargetGuard(t, 10, tgOpening(10))
+	svc.recordWorking = true
+	var wg sync.WaitGroup
+	codes := make([]int, 4)
+	for i := range codes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i], _ = tgPost(c, fmt.Sprintf("herald-20261126-dis-target-1000-%02d", i+1), 3)
+		}(i)
+	}
+	wg.Wait()
+	if svc.calls != 1 {
+		t.Fatalf("admitted = %d (%v), want exactly 1 of four overlapping 3-contract targets against allocation 5", svc.calls, svc.admitted)
+	}
+	ok := 0
+	for _, code := range codes {
+		if code == http.StatusOK {
+			ok++
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("HTTP 200 count = %d (codes %v), want 1", ok, codes)
+	}
+}
+
+func TestTargetGuardUnresolvedCancelKeepsReservation(t *testing.T) {
+	orders := []*interfaces.Order{
+		tgOpening(10),
+		tgFill("t1", "herald-20261125-dis-target-1330-01", "sell", 5, 0, "pending_cancel", targetGuardBase.Add(24*time.Hour)),
+	}
+	c, svc := newTargetGuard(t, 10, orders...)
+	state := c.computeTargetAllocation(context.Background(), disContract, "")
+	if state.ReservedQty != 5 || state.AvailableQty != 0 {
+		t.Fatalf("state = %#v, want the pending cancel to keep 5 reserved", state)
+	}
+	if code, result := tgPost(c, "herald-20261126-dis-target-1000-02", 1); !tgRefused(code, result, "TARGET_ALLOCATION_EXCEEDED") || svc.calls != 0 {
+		t.Fatalf("status=%d result=%#v calls=%d, want refusal with no callback", code, result, svc.calls)
+	}
+}
+
+func TestTargetGuardDedupesOrdersAndNeverCountsDecisions(t *testing.T) {
+	target := tgFill("t1", "herald-20261125-dis-target-1330-01", "sell", 2, 2, "filled", targetGuardBase.Add(24*time.Hour))
+	dup := *target
+	working := tgFill("t2", "herald-20261125-dis-target-1400-02", "sell", 1, 0, "new", targetGuardBase.Add(25*time.Hour))
+	c, _ := newTargetGuard(t, 8, tgOpening(10), target, &dup, working)
+	// The same working order also exists as an uncertain local intent; it must not reserve twice.
+	if err := c.storageService.SaveOrder(&interfaces.Order{ClientOrderID: working.ClientOrderID, Symbol: disContract, Side: "sell", Qty: 1, Status: "submission_uncertain", SubmittedAt: working.SubmittedAt, SubmissionAttempted: true}); err != nil {
+		t.Fatalf("SaveOrder() error = %v", err)
+	}
+	state := c.computeTargetAllocation(context.Background(), disContract, "")
+	if state.FilledQty != 2 || state.ReservedQty != 1 || state.AvailableQty != 2 {
+		t.Fatalf("state = %#v, want filled 2 reserved 1 (duplicate broker rows and the local copy counted once)", state)
+	}
+	// A local-only uncertain intent with no broker record does reserve.
+	if err := c.storageService.SaveOrder(&interfaces.Order{ClientOrderID: "herald-20261126-dis-target-1100-05", Symbol: disContract, Side: "sell", Qty: 1, Status: "submission_uncertain", SubmittedAt: targetGuardBase.Add(48 * time.Hour), SubmissionAttempted: true}); err != nil {
+		t.Fatalf("SaveOrder() error = %v", err)
+	}
+	if state = c.computeTargetAllocation(context.Background(), disContract, ""); state.ReservedQty != 2 || state.AvailableQty != 1 {
+		t.Fatalf("state = %#v, want the local-only uncertain intent to reserve 1 more", state)
+	}
+}
+
+func TestTargetGuardReopenedContractGetsNewCycle(t *testing.T) {
+	day := 24 * time.Hour
+	orders := []*interfaces.Order{
+		tgOpening(10),
+		tgFill("t1", "herald-20261125-dis-target-1330-01", "sell", 5, 5, "filled", targetGuardBase.Add(day)),
+		tgFill("stop1", "herald-20261125-dis-stop-1500-01", "sell", 5, 5, "filled", targetGuardBase.Add(day+2*time.Hour)),
+		tgFill("open2", "herald-20261126-dis-entry-02", "buy", 4, 4, "filled", targetGuardBase.Add(2*day)),
+	}
+	c, svc := newTargetGuard(t, 4, orders...)
+	state := c.computeTargetAllocation(context.Background(), disContract, "")
+	if state.EvidenceStatus != "confirmed" || state.AllocatedQty != 2 || state.FilledQty != 0 || state.AvailableQty != 2 || state.Spent || !strings.HasSuffix(state.PositionCycle, "/open2") {
+		t.Fatalf("state = %#v, want a fresh cycle opened by open2 with allocation 2", state)
+	}
+	if code, result := tgPost(c, "herald-20261127-dis-target-1020-01", 2); code != http.StatusOK {
+		t.Fatalf("status=%d result=%#v, want the new cycle's target admitted", code, result)
+	}
+	if svc.calls != 1 {
+		t.Fatalf("calls = %d, want 1", svc.calls)
+	}
+}
+
+func TestTargetGuardSingletonAllocatesOneContract(t *testing.T) {
+	c, svc := newTargetGuard(t, 1, tgOpening(1))
+	state := c.computeTargetAllocation(context.Background(), disContract, "")
+	if state.AllocatedQty != 1 || state.AvailableQty != 1 {
+		t.Fatalf("state = %#v, want singleton allocation 1", state)
+	}
+	if code, result := tgPost(c, "herald-20261126-dis-target-1000-01", 2); !tgRefused(code, result, "TARGET_ALLOCATION_EXCEEDED") {
+		t.Fatalf("status=%d result=%#v, want exceeded for 2 of a singleton", code, result)
+	}
+	if code, result := tgPost(c, "herald-20261126-dis-target-1000-02", 1); code != http.StatusOK {
+		t.Fatalf("status=%d result=%#v, want singleton admitted", code, result)
+	}
+	if svc.calls != 1 {
+		t.Fatalf("calls = %d, want 1", svc.calls)
+	}
+}
+
+func TestTargetGuardMissingOrAmbiguousEvidenceRefusesTargetsOnly(t *testing.T) {
+	cases := map[string]func(*targetGuardService){
+		"order history unavailable":          func(s *targetGuardService) { s.listErr = errors.New("history incomplete") },
+		"position unreadable":                func(s *targetGuardService) { s.posErr = errors.New("broker down") },
+		"history disagrees with position":    func(s *targetGuardService) { s.position.Qty = 7 },
+		"opening order still working":        func(s *targetGuardService) { s.orders = append(s.orders, tgFill("b2", "x-entry-2", "buy", 2, 0, "new", targetGuardBase.Add(time.Hour))) },
+		"no opening fill in history at all":  func(s *targetGuardService) { s.orders = nil },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, svc := newTargetGuard(t, 10, tgOpening(10))
+			mutate(svc)
+			if code, result := tgPost(c, "herald-20261126-dis-target-1000-01", 1); !tgRefused(code, result, "TARGET_ALLOCATION_UNKNOWN") {
+				t.Fatalf("target: status=%d result=%#v, want unknown refusal", code, result)
+			}
+			if svc.calls != 0 {
+				t.Fatalf("target reached the broker: calls=%d", svc.calls)
+			}
+			if code, result := tgPost(c, "herald-20261126-dis-stop-1000-02", 1); code != http.StatusOK {
+				t.Fatalf("non-target close: status=%d result=%#v, want it to reach the existing close path", code, result)
+			}
+			if svc.calls != 1 {
+				t.Fatalf("non-target calls = %d, want 1", svc.calls)
+			}
+		})
+	}
+}
+
+func TestTargetGuardLegitimateNonTargetClosesStillGoThroughWhenAllocationSpent(t *testing.T) {
+	c, svc := newTargetGuard(t, 5, tgDISOrders()...)
+	for i, id := range []string{"herald-20261127-dis-stop-1020-01", "herald-20261127-dis-trail-1040-02", "herald-20261127-dis-time-close-1550-03", "herald-20261127-dis-invalidation-1100-04", "herald-20261127-dis-targeted-note-05"} {
+		if code, result := tgPost(c, id, 1); code != http.StatusOK {
+			t.Fatalf("%s: status=%d result=%#v, want admitted", id, code, result)
+		}
+		if svc.calls != i+1 {
+			t.Fatalf("%s: calls = %d, want %d", id, svc.calls, i+1)
+		}
+	}
+	// Exits carry no AlphaDesk requirement: the mock service has none and no assessment fields are sent.
+}
+
+func TestTargetIntentRecognitionRequiresStandaloneTargetTokenOnSingleLegSellToClose(t *testing.T) {
+	for id, want := range map[string]bool{
+		"herald-20261127-dis-target-1020-01": true, "HERALD-TARGET-1": true, "target": true, "x_target_exit": true,
+		"herald-dis-targeted-01": false, "herald-dis-stop-01": false, "retarget-1": false,
+	} {
+		if got := isTargetIntentClientID(id); got != want {
+			t.Fatalf("isTargetIntentClientID(%q) = %v, want %v", id, got, want)
+		}
+	}
+	if isTargetIntentSell(OptionsOrderRequest{ClientOrderID: "a-target-1", Side: "buy", PositionIntent: "buy_to_open"}) {
+		t.Fatal("a buy must never be a target-intent sell")
+	}
+}
+
+func TestOptionsPositionReadExposesTargetAllocation(t *testing.T) {
+	c, _ := newTargetGuard(t, 5, tgDISOrders()...)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "symbol", Value: disContract}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/options/position/"+disContract, nil)
+	c.GetOptionsPosition(ctx)
+	var body struct {
+		Symbol           string
+		Qty              float64
+		TargetAllocation *TargetAllocation `json:"target_allocation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response JSON error = %v; body=%s", err, recorder.Body.String())
+	}
+	ta := body.TargetAllocation
+	if body.Symbol != disContract || body.Qty != 5 || ta == nil || ta.AllocatedQty != 5 || ta.FilledQty != 5 || ta.ReservedQty != 0 || ta.AvailableQty != 0 || !ta.Spent || ta.EvidenceStatus != "confirmed" || !strings.HasSuffix(ta.PositionCycle, "/d86ec4b9-dc49-4a8e-9fbd-17ae923c73ad") {
+		t.Fatalf("response = %s", recorder.Body.String())
 	}
 }

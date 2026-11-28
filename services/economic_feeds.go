@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -16,6 +17,10 @@ import (
 type EconomicFeedsService struct {
 	httpClient *http.Client
 	clock      func() time.Time // nil means time.Now; replaced in tests
+	// calendar is the read-only exchange calendar used to keep only session dates in the ^VIX history.
+	// nil means no calendar: no ^VIX row is then usable.
+	calendar      MarketCalendarReader
+	calendarCache calendarCache
 }
 
 type FeedAvailabilityError struct {
@@ -360,6 +365,9 @@ type YFQuote struct {
 	Currency           string  `json:"currency"`
 	Exchange           string  `json:"exchange"`
 	History            []YFBar `json:"history,omitempty"`
+	// CalendarStatus is set only on ^VIX: "ok" once the history was checked against exchange sessions, "unavailable"
+	// when it could not be, in which case every entry is complete=false and prev_close is withheld.
+	CalendarStatus string `json:"calendar_status,omitempty"`
 }
 
 // YFBar represents a single price bar
@@ -400,7 +408,7 @@ func yfDailyBarComplete(date string, now time.Time, newYork *time.Location) bool
 
 // yfVIXBar turns one raw ^VIX observation into a history entry, or rejects it. The timestamp must be a whole number of
 // seconds from 2000 onwards and before 2100 (this refuses text, zero and millisecond values), and the close must be a
-// number that is still above zero after the two-decimal rounding. Nothing is defaulted: a bad row is left out.
+// number that is still above zero after the two-decimal rounding (half away from zero). Nothing is defaulted: a bad row is left out.
 func yfVIXBar(rawTime, rawClose interface{}, zone *time.Location) (YFBar, bool) {
 	const minStamp, maxStamp = 946684800, 4102444800 // 2000-01-01 and 2100-01-01 UTC
 	stamp, stampOK := rawTime.(float64)
@@ -408,7 +416,7 @@ func yfVIXBar(rawTime, rawClose interface{}, zone *time.Location) (YFBar, bool) 
 	if !stampOK || !closeOK || stamp < minStamp || stamp >= maxStamp || stamp != float64(int64(stamp)) || closeValue <= 0 || closeValue >= 1e6 {
 		return YFBar{}, false
 	}
-	rounded := float64(int(closeValue*100)) / 100
+	rounded := math.Round(closeValue*100) / 100
 	if rounded <= 0 {
 		return YFBar{}, false
 	}
@@ -542,6 +550,12 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 	}
 
 	// Build daily history (5 days; about 3 months for ^VIX)
+	barZone := zone
+	if symbol == yfVIXSymbol { // ^VIX rows are dated by their New York day, which is what the calendar lists
+		if newYork, nyErr := time.LoadLocation("America/New_York"); nyErr == nil {
+			barZone = newYork
+		}
+	}
 	var history []YFBar
 	if timestamps, ok := result["timestamp"].([]interface{}); ok {
 		indicators, _ := result["indicators"].(map[string]interface{})
@@ -553,7 +567,7 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 				for i, ts := range timestamps {
 					if i < len(closes) && closes[i] != nil {
 						if symbol == yfVIXSymbol {
-							if bar, ok := yfVIXBar(ts, closes[i], zone); ok {
+							if bar, ok := yfVIXBar(ts, closes[i], barZone); ok {
 								history = append(history, bar)
 							}
 							continue
@@ -571,22 +585,57 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 		}
 	}
 
+	calendarStatus := ""
 	if symbol == yfVIXSymbol {
 		newYork, nyErr := time.LoadLocation("America/New_York")
 		if nyErr != nil {
 			newYork = nil
 		}
-		for i := range history {
-			complete := yfDailyBarComplete(history[i].Date, requestedAt, newYork)
-			history[i].Complete = &complete
-		}
 		if len(history) == 0 {
 			return nil, fmt.Errorf("no usable history for %s", symbol)
+		}
+		// Keep only exchange sessions, before complete, prev_close or the history output are computed.
+		first, last := history[0].Date, history[0].Date
+		for _, bar := range history {
+			if bar.Date < first {
+				first = bar.Date
+			}
+			if bar.Date > last {
+				last = bar.Date
+			}
+		}
+		sessions, calErr := s.vixSessionDates(first, last, requestedAt, newYork)
+		if calErr != nil {
+			// No weekday inference: nothing is usable, and the reason is explicit.
+			calendarStatus = calendarStatusFailed
+			for i := range history {
+				notComplete := false
+				history[i].Complete = &notComplete
+			}
+		} else {
+			calendarStatus = calendarStatusOK
+			kept := history[:0:0]
+			for _, bar := range history {
+				if sessions[bar.Date] {
+					kept = append(kept, bar)
+				}
+			}
+			history = kept
+			for i := range history {
+				complete := yfDailyBarComplete(history[i].Date, requestedAt, newYork)
+				history[i].Complete = &complete
+			}
+			if len(history) == 0 {
+				return nil, fmt.Errorf("no usable history for %s", symbol)
+			}
 		}
 	}
 
 	prevClose, prevCloseDate := 0.0, ""
 	for _, bar := range history {
+		if calendarStatus == calendarStatusFailed {
+			break // the calendar could not vouch for any row, so none may supply prev_close
+		}
 		if marketDate != "" && bar.Date < marketDate && bar.Close > 0 && bar.Date > prevCloseDate {
 			prevClose, prevCloseDate = bar.Close, bar.Date
 		}
@@ -614,6 +663,7 @@ func (s *EconomicFeedsService) fetchYFQuote(symbol, name string) (*YFQuote, erro
 		Currency:           getString(meta, "currency"),
 		Exchange:           getString(meta, "exchangeName"),
 		History:            history,
+		CalendarStatus:     calendarStatus,
 	}, nil
 }
 

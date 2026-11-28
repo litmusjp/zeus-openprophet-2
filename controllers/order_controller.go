@@ -2072,6 +2072,17 @@ func (oc *OrderController) PlaceOptionsOrder(c *gin.Context) {
 			return
 		}
 	}
+	// Herald target-allocation guard: final admission, serialized by optionsIntentMu, before any intent is persisted or the broker is called.
+	if isTargetIntentSell(req) {
+		guardCtx, guardCancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+		code, message := oc.targetAdmissionRefusal(guardCtx, req)
+		guardCancel()
+		if code != "" {
+			response := oc.optionsResponseWithIdentity(nil, &interfaces.OrderResult{ClientOrderID: clientOrderID, Symbol: req.Symbol, Side: req.Side, Qty: req.Qty, PositionIntent: req.PositionIntent, FailedCheckCodes: []string{code}}, "risk_blocked", code+": "+message)
+			c.JSON(http.StatusConflict, response)
+			return
+		}
+	}
 	intent := &interfaces.Order{
 		ClientOrderID:  clientOrderID,
 		Symbol:         req.Symbol,
@@ -2375,7 +2386,11 @@ func (oc *OrderController) GetOptionsPosition(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, position)
+	targetState := oc.computeTargetAllocation(ctx, symbol, "")
+	c.JSON(200, struct {
+		*interfaces.OptionsPosition
+		TargetAllocation *TargetAllocation `json:"target_allocation"`
+	}{position, targetState})
 }
 
 // ListOptionsPositions handles GET /api/options/positions

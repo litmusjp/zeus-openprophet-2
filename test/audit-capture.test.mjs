@@ -277,5 +277,157 @@ test('fitAuditEvent never exceeds the cap even when the header itself is oversiz
   const fitted = fitAuditEvent({ tool: 'get_options_chain', args: { a: 1 }, result: 'x' }, draft);
   assert.ok(bytes(fitted) <= AUDIT_RECORD_CAP_BYTES - AUDIT_ENVELOPE_RESERVE_BYTES);
   const r = JSON.parse(fitted.result);
-  assert.equal(r.partial, true); assert.equal(r.omitted_rows, 2);
+  // the oversized unknown header value is cropped and marked; the two small rows are kept
+  assert.equal(r.partial, true); assert.equal(r.omitted_rows, 0); assert.ok(r.header_cropped.includes('blob')); assert.ok(r.blob.length <= 400);
+});
+
+// ---- B04: the overflow path bounds the COMPLETE final event ----
+const CAP = AUDIT_RECORD_CAP_BYTES;
+// the history store adds timestamp, activityId and origin around the event (chat-store addMessage + harness persist)
+const storeEnvelope = event => ({ timestamp: '2026-11-30T15:00:00.000Z', ...event, activityId: 'a'.repeat(36), origin: 'Heartbeat' });
+const storeBytes = event => Buffer.byteLength(JSON.stringify(storeEnvelope(event)) + '\n', 'utf8');
+
+function runBounded(tool, input, output, { actorSnapshot, callID = 'c1', state = {} } = {}) {
+  const harness = new AgentHarness();
+  const events = [];
+  const emitted = [];
+  const orig = harness.state.emit.bind(harness.state);
+  harness.state.emit = (name, payload) => { emitted.push([name, payload]); return orig(name, payload); };
+  const ctx = { addToolCall() {}, recordToolEvent: e => events.push(e), addText() {}, setSession() {}, addCost() {}, addTokens() {}, ...(actorSnapshot ? { actorSnapshot } : {}) };
+  const part = { id: 'p1', tool: `prophet_${tool}`, state: { input, output, status: 'completed', ...state } };
+  const inputBytes = JSON.stringify(input); const outputBytes = String(output);
+  harness._handleOpenCodeEvent({ type: 'tool_use', callID, part }, ctx);
+  assert.equal(events.length, 1);
+  // original model/transport bytes are untouched
+  assert.equal(Buffer.compare(Buffer.from(part.state.output), Buffer.from(outputBytes)), 0);
+  assert.equal(JSON.stringify(part.state.input), inputBytes);
+  assert.equal(part.state.input, input);
+  assert.equal(emitted.find(([n]) => n === 'tool_result')[1].result, outputBytes.substring(0, 500));
+  assert.equal(emitted.find(([n]) => n === 'tool_call')[1].args, input);
+  return events[0];
+}
+const chain3000 = () => JSON.stringify({ status: 'available', symbol: 'SPY', total: 3000, filtered: 3000, contracts: Array.from({ length: 3000 }, (_, i) => contract(i)) }, null, 2);
+function assertBounded(event) {
+  assert.ok(storeBytes(event) <= CAP, `record with store envelope is ${storeBytes(event)} bytes`);
+  assert.doesNotThrow(() => JSON.parse(event.result));
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(event)));
+  return JSON.parse(event.result);
+}
+
+test('B04 control: the normal 3,000-contract chain fills the budget (about 31.7 KB) and is not metadata-cropped', () => {
+  const event = runBounded('get_options_chain', { symbol: 'SPY' }, chain3000());
+  assertBounded(event);
+  console.log('B04 control bytes', bytes(event));
+  assert.ok(bytes(event) > 30000 && bytes(event) <= CAP - AUDIT_ENVELOPE_RESERVE_BYTES);
+  assert.equal(event.metadataPartial, undefined);
+  assert.equal(JSON.parse(event.result).header_cropped, undefined);
+});
+
+test('B04 counterexample 1: valid 3,000-contract chain with a 40,000-byte actor name stays within the cap, identity cropped explicitly', () => {
+  const actor = { agentId: 'agent-1', agentName: 'N'.repeat(40000) };
+  const event = runBounded('get_options_chain', { symbol: 'SPY' }, chain3000(), { actorSnapshot: actor });
+  console.log('B04 counterexample 1 bytes', bytes(event), 'with envelope', storeBytes(event));
+  const r = assertBounded(event);
+  assert.equal(r.compact, 'options_chain'); assert.equal(r.partial, true); assert.equal(r.total_rows, 3000);
+  assert.equal(event.actorSnapshot.agentId, 'agent-1');
+  assert.ok(event.actorSnapshot.agentName.length <= 300 && event.actorSnapshot.agentName.endsWith('…'));
+  assert.equal(event.metadataPartial, true); assert.ok(event.metadataCropped.includes('actorSnapshot'));
+  assert.equal(event.resultTruncated, true); assert.ok(event.resultLength > 40000);
+  assert.equal(actor.agentName.length, 40000); // the caller's own object is not mutated
+});
+
+test('B04 counterexample 2: crafted 40,000-byte status and feed stay within the cap, header omissions marked', () => {
+  const output = JSON.stringify({ status: 'S'.repeat(40000), feed: 'F'.repeat(40000), symbol: 'SPY', total: 10, filtered: 10, contracts: Array.from({ length: 10 }, (_, i) => ({ ...contract(i), market_data_feed: 'F'.repeat(40000) })) });
+  const event = runBounded('get_options_chain', { symbol: 'SPY' }, output);
+  console.log('B04 counterexample 2 bytes', bytes(event), 'with envelope', storeBytes(event));
+  const r = assertBounded(event);
+  assert.equal(r.partial, true); assert.equal(r.truncated, true); assert.equal(r.omitted_rows, 10);
+  assert.ok(r.status.length <= 400 && r.status.endsWith('…'));
+  assert.ok(r.header_cropped.includes('status')); assert.ok(r.header_cropped.includes('feed'));
+  assert.match(r.omitted_note, /omitted/);
+});
+
+test('B04 huge failure and metadata fields: bounded, parseable, marked; normal actor attribution unchanged', () => {
+  const actor = { agentId: 'agent-1', agentName: 'Herald' };
+  const output = JSON.stringify({ status: 'error', category: 'C'.repeat(40000), endpoint: 'E'.repeat(40000), upstream_status: { detail: 'U'.repeat(40000), list: Array.from({ length: 500 }, (_, i) => `item-${i}`) },
+    attempts: { log: 'A'.repeat(40000) }, error: 'x'.repeat(40000), message: 'm'.repeat(40000), contracts: [contract(1)] });
+  const event = runBounded('get_options_chain', { symbol: 'SPY', blob: 'z'.repeat(80000) }, output, { actorSnapshot: actor, callID: 'K'.repeat(40000), state: { error: 'e'.repeat(40000) } });
+  const r = assertBounded(event);
+  assert.equal(r.partial, true);
+  assert.deepEqual(event.actorSnapshot, actor);            // normal-size identity is untouched
+  assert.ok(event.callId.length <= 256); assert.ok(event.metadataCropped.includes('callId'));
+  assert.equal(event.argsPartial, true);
+  assert.ok(r.failure); assert.ok(bytes(r.failure) <= 2048);
+  assert.ok(event.error.length <= 1200);
+  assert.equal(event.tool, 'get_options_chain'); assert.equal(event.status, 'completed');
+});
+
+test('B04 multibyte variants: 4-byte emoji and CJK identity/header strings stay within the cap with valid code points', () => {
+  const emoji = '\u{1F600}'.repeat(10000); // 40,000 bytes
+  const cjk = '日'.repeat(14000);       // 42,000 bytes
+  const wellFormed = text => assert.equal(text.isWellFormed(), true);
+  const e1 = runBounded('get_options_chain', { symbol: 'SPY' }, chain3000(), { actorSnapshot: { agentId: 'a', agentName: emoji } });
+  assertBounded(e1); wellFormed(e1.actorSnapshot.agentName); assert.ok(e1.metadataCropped.includes('actorSnapshot'));
+  const out2 = JSON.stringify({ status: emoji, feed: cjk, contracts: Array.from({ length: 10 }, (_, i) => ({ ...contract(i), market_data_feed: cjk })) });
+  const e2 = runBounded('get_options_chain', { symbol: 'SPY' }, out2, { actorSnapshot: { agentId: cjk, agentName: cjk } });
+  const r2 = assertBounded(e2); wellFormed(r2.status); wellFormed(r2.feed); wellFormed(e2.actorSnapshot.agentName);
+  assert.ok(r2.header_cropped.includes('status') && r2.header_cropped.includes('feed'));
+  const out3 = JSON.stringify({ status: 'error', message: emoji, category: cjk, contracts: [] });
+  const e3 = runBounded('get_options_chain', { symbol: emoji }, out3, { callID: emoji });
+  const r3 = assertBounded(e3); wellFormed(r3.failure.category); wellFormed(e3.callId);
+});
+
+test('B04 market snapshot and news with oversized header values are also bounded', () => {
+  const snap = JSON.stringify({ source: 'P'.repeat(40000), timestamp: 'T'.repeat(40000), indexes: [{ symbol: '^GSPC', price: 1 }], volatility: [{ symbol: '^VIX', price: 15, history: [{ date: '2026-11-27', close: 15, complete: true }] }] });
+  const e1 = runBounded('get_market_snapshot', {}, snap);
+  const r1 = assertBounded(e1);
+  assert.ok(r1.header_cropped.includes('provider') && r1.header_cropped.includes('as_of'));
+  const news = JSON.stringify({ provider: 'N'.repeat(40000), status: 'S'.repeat(40000), articles: Array.from({ length: 30 }, (_, i) => ({ id: i, symbols: ['SPY'], headline: 'h'.repeat(100) })) });
+  const e2 = runBounded('get_alpaca_news', { symbols: 'SPY' }, news);
+  assertBounded(e2);
+});
+
+test('B04 last resort: unbounded unknown metadata falls to a minimal valid record that fits and says so', () => {
+  const extras = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`field${i}`, 'v'.repeat(250)]));
+  const event = { eventType: 'tool_call', kind: 'tool_call', role: 'assistant', tool: 'get_options_chain', args: { a: 1 }, result: 'x', beat: 3, callId: 'c1', status: 'completed',
+    actorSnapshot: { agentId: 'agent-1', agentName: 'Herald' }, completedAt: '2026-11-30T15:00:00Z', ...extras };
+  const draft = { head: { compact: 'options_chain', status: 'available', blob: 'b'.repeat(60000) }, rowsKey: 'rows', rows: [[1], [2]], keep: 'head' };
+  const fitted = fitAuditEvent(event, draft, undefined, { resultLength: 99999 });
+  assert.ok(storeBytes(fitted) <= CAP);
+  assert.equal(fitted.auditMinimal, true); assert.equal(fitted.metadataPartial, true); assert.equal(fitted.argsPartial, true);
+  assert.equal(fitted.tool, 'get_options_chain'); assert.equal(fitted.callId, 'c1'); assert.equal(fitted.beat, 3);
+  assert.deepEqual(fitted.actorSnapshot, { agentId: 'agent-1', agentName: 'Herald' });
+  assert.equal(fitted.resultLength, 99999);
+  const r = JSON.parse(fitted.result);
+  assert.equal(r.partial, true); assert.equal(r.omitted_rows, 2); assert.match(r.omitted_note, /omitted/);
+  // event and draft are not mutated
+  assert.equal(event.field0.length, 250); assert.equal(draft.head.blob.length, 60000);
+});
+
+test('N04 news: cropped headline/symbols are marked even when every row is retained', () => {
+  const articles = Array.from({ length: 20 }, (_, i) => ({ id: i, symbols: Array.from({ length: i === 5 ? 20 : 3 }, (_, j) => `S${j}`), created_at: '2026-11-27T10:00:00Z', updated_at: '2026-11-27T10:00:00Z', headline: 'h'.repeat(i === 7 ? 300 : 40) }));
+  const event = runBounded('get_alpaca_news', { symbols: 'SPY' }, JSON.stringify({ status: 'available', articles }));
+  const r = assertBounded(event);
+  assert.equal(r.omitted_rows, 0); assert.equal(r.returned_rows, 20); assert.equal(r.partial, false);
+  assert.deepEqual([...r.fields_cropped].sort(), ['headline', 'symbols']);
+  assert.equal(r.rows[5][1].length, 12);
+  // an article list with nothing cropped carries no marker
+  const clean = runBounded('get_alpaca_news', { symbols: 'SPY' }, JSON.stringify({ status: 'available', articles: articles.map(a => ({ ...a, symbols: ['SPY'], headline: 'h'.repeat(80) })) }));
+  assert.equal(JSON.parse(clean.result).fields_cropped, undefined);
+});
+
+test('B04 store path: a bounded audit record keeps its cropped actorSnapshot when persisted; normal messages keep the beat snapshot', async () => {
+  const actor = { agentId: 'agent-1', agentName: 'N'.repeat(40000) };
+  const event = runBounded('get_options_chain', { symbol: 'SPY' }, chain3000(), { actorSnapshot: actor });
+  const stored = [];
+  const harness = new AgentHarness();
+  harness.chatStore = { addMessage: async (_a, _s, message) => { stored.push(message); } };
+  const normal = { role: 'assistant', content: 'hello' };
+  await harness._persistMessagesUnguarded('s1', [event, normal], 'acct1', actor);
+  assert.equal(stored.length, 2);
+  const line = JSON.stringify({ timestamp: new Date().toISOString(), activityId: 'a'.repeat(36), origin: 'heartbeat', ...stored[0] }) + String.fromCharCode(10);
+  assert.ok(Buffer.byteLength(line, 'utf8') <= AUDIT_RECORD_CAP_BYTES, 'stored audit line within cap: ' + Buffer.byteLength(line, 'utf8'));
+  assert.equal(stored[0].actorSnapshot.agentId, 'agent-1');
+  assert.ok(stored[0].actorSnapshot.agentName.length <= 300);
+  assert.equal(stored[1].actorSnapshot, actor); // ordinary messages are attributed exactly as before
 });

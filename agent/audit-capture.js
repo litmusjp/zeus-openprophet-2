@@ -163,11 +163,17 @@ function chainDraft(parsed, args) {
 
 function newsDraft(parsed, args) {
   const articles = Array.isArray(parsed.articles) ? parsed.articles : [];
-  const rows = articles.map(a => [
-    firstPresent(a, 'id', 'ID'), Array.isArray(a?.symbols) ? a.symbols.slice(0, 12).map(s => cropText(String(s), 24)) : null,
-    firstPresent(a, 'created_at'), firstPresent(a, 'updated_at'), cropText(firstPresent(a, 'headline') ?? '', HEADLINE_CHARS),
-  ]);
+  const fieldsCropped = new Set();
+  const rows = articles.map(a => {
+    const symbols = Array.isArray(a?.symbols) ? a.symbols.slice(0, 12).map(s => cropText(String(s), 24)) : null;
+    if (Array.isArray(a?.symbols) && (a.symbols.length > 12 || a.symbols.some((s, i) => i < 12 && symbols[i] !== String(s)))) fieldsCropped.add('symbols');
+    const headline = firstPresent(a, 'headline') ?? '';
+    const croppedHeadline = cropText(headline, HEADLINE_CHARS);
+    if (croppedHeadline !== headline) fieldsCropped.add('headline');
+    return [firstPresent(a, 'id', 'ID'), symbols, firstPresent(a, 'created_at'), firstPresent(a, 'updated_at'), croppedHeadline];
+  });
   return {
+    fieldsCropped: [...fieldsCropped],
     head: {
       compact: 'alpaca_news', provider: parsed.provider ?? null, feed: null, status: parsed.status ?? null,
       as_of: firstPresent(parsed, 'fetched_at', 'as_of'), window_start: parsed.window_start ?? null, window_end: parsed.window_end ?? null,
@@ -278,43 +284,120 @@ function renderDraft(draft, count, rowsTotal, extraPartial) {
   out.omitted_rows = omitted;
   out.truncated = omitted > 0;
   out.partial = omitted > 0 || extraPartial === true;
+  // cropping of a retained field (headline, symbol list) is visible even when every row is kept
+  if (draft.fieldsCropped?.length) out.fields_cropped = draft.fieldsCropped;
   if (omitted > 0) out.omitted_note = draft.keep === 'tail' ? 'oldest rows omitted to stay within the audit size cap' : 'later rows omitted to stay within the audit size cap';
   return out;
+}
+
+// Overflow-path bounds (B04). Normal-size values are kept exactly; only values beyond these are cropped, and every crop is marked.
+const OVERFLOW_STRING_CHARS = 256;
+const OVERFLOW_ERROR_CHARS = 1200;
+const OVERFLOW_OBJECT_BYTES = 2048;
+const HEADER_STRING_CHARS = 400;
+const HEADER_OBJECT_BYTES = 2048;
+const MINIMAL_CHARS = 64;
+
+/** Bounded copy of one metadata/header value: unchanged when small, cropped when large, replaced by a size note when still large. */
+function boundValue(value, maxChars, maxObjectBytes) {
+  if (typeof value === 'string') { const kept = cropText(value, maxChars); return { value: kept, cropped: kept !== value }; }
+  if (value && typeof value === 'object') {
+    let text;
+    try { text = JSON.stringify(value); } catch { text = undefined; }
+    if (text !== undefined && utf8Bytes(text) <= maxObjectBytes) return { value, cropped: false };
+    const kept = cropAuditValue(value, 3);
+    const keptText = JSON.stringify(kept);
+    if (keptText !== undefined && utf8Bytes(keptText) <= maxObjectBytes) return { value: kept, cropped: true };
+    return { value: { _omitted: true, original_bytes: text === undefined ? null : utf8Bytes(text) }, cropped: true };
+  }
+  return { value, cropped: false };
+}
+
+/** Header with long strings cropped and, when `objectBytes` is given, oversized nested values cropped or replaced by a size note; crops are listed in header_cropped. */
+function boundHead(head, objectBytes) {
+  const out = {};
+  const cropped = [];
+  for (const [key, value] of Object.entries(head)) {
+    if (typeof value === 'string' || (objectBytes != null && value && typeof value === 'object')) {
+      const bounded = boundValue(value, HEADER_STRING_CHARS, objectBytes ?? 0);
+      out[key] = bounded.value;
+      if (bounded.cropped) cropped.push(key);
+    } else out[key] = value;
+  }
+  if (cropped.length) out.header_cropped = cropped;
+  return { head: out, cropped };
+}
+
+/** Largest whole-row prefix/suffix that fits `limit` with the complete record (flags included) measured; null when even zero rows do not fit. */
+function fitRows(base, draft, extraPartial, resultLength, limit) {
+  const total = draft.rows.length;
+  const sizeAt = count => {
+    const rendered = renderDraft(draft, count, total, extraPartial);
+    // the flags added to a partial record are part of what is measured
+    const record = { ...base, result: JSON.stringify(rendered), ...(rendered.partial ? { resultTruncated: true, ...(resultLength != null ? { resultLength } : {}) } : {}) };
+    return { record, size: utf8Bytes(JSON.stringify(record)) };
+  };
+  if (sizeAt(0).size > limit) return null;
+  let lo = 0, hi = total;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (sizeAt(mid).size <= limit) lo = mid; else hi = mid - 1;
+  }
+  return sizeAt(lo).record;
+}
+
+/** Last-resort audit record: every field is tiny and cropped, so it always fits. Valid JSON, marked as a minimal record. */
+function minimalAuditRecord(event, draft, rowsTotal, argsBytes, resultLength) {
+  const tiny = value => (value === undefined || value === null ? undefined : cropText(String(value), MINIMAL_CHARS));
+  const actor = event.actorSnapshot && typeof event.actorSnapshot === 'object' ? { agentId: tiny(event.actorSnapshot.agentId), agentName: tiny(event.actorSnapshot.agentName) } : undefined;
+  const summary = { compact: tiny(draft.head?.compact) ?? null, returned_rows: 0, total_rows: rowsTotal, omitted_rows: rowsTotal, truncated: true, partial: true,
+    omitted_note: 'audit record cap reached; header and metadata omitted' };
+  return {
+    eventType: tiny(event.eventType), kind: tiny(event.kind), role: tiny(event.role), tool: tiny(event.tool), status: tiny(event.status),
+    callId: tiny(event.callId), completedAt: tiny(event.completedAt), ...(typeof event.beat === 'number' ? { beat: event.beat } : {}),
+    ...(actor ? { actorSnapshot: actor } : {}),
+    args: { _omitted: true, ...(argsBytes != null ? { original_bytes: argsBytes } : {}) }, argsPartial: true,
+    result: JSON.stringify(summary), resultTruncated: true, ...(resultLength != null ? { resultLength } : {}),
+    metadataPartial: true, auditMinimal: true,
+  };
 }
 
 /**
  * Persisted audit event for a bounded tool: {...event, args, result} whose UTF-8 serialized size is at most
  * cap - AUDIT_ENVELOPE_RESERVE_BYTES, so the record stays within `cap` after the store adds its own fields. Crops whole rows (never
  * characters of serialized JSON); crops args first when they are large. `result` is a JSON string. The input event and draft are not mutated.
+ * When even zero rows do not fit, header strings, then oversized header values, then event metadata and args are bounded, as far as needed,
+ * and each omission is marked (metadataPartial, metadataCropped, header_cropped, argsPartial). The COMPLETE returned record is measured with
+ * every flag (resultTruncated, resultLength) included; if it still cannot fit, a minimal valid record (auditMinimal) is returned instead.
+ * `options.resultLength` is the original result length, added when the record is partial.
  */
-export function fitAuditEvent(event, draft, cap = AUDIT_RECORD_CAP_BYTES) {
+export function fitAuditEvent(event, draft, cap = AUDIT_RECORD_CAP_BYTES, options = {}) {
   const limit = cap - AUDIT_ENVELOPE_RESERVE_BYTES;
   const boundedArgs = boundAuditArgs(event.args);
-  const base = { ...event, args: boundedArgs.args, ...(boundedArgs.partial ? { argsPartial: true, argsOriginalBytes: boundedArgs.originalBytes } : {}) };
-  const total = draft.rows.length;
-  const sizeAt = count => {
-    const rendered = renderDraft(draft, count, total, boundedArgs.partial);
-    const record = { ...base, result: JSON.stringify(rendered) };
-    return { record, size: utf8Bytes(JSON.stringify(record)), rendered };
-  };
-  let best = sizeAt(0);
-  if (best.size <= limit) {
-    let lo = 0, hi = total;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      if (sizeAt(mid).size <= limit) lo = mid; else hi = mid - 1;
+  const argsFlags = boundedArgs.partial ? { argsPartial: true, argsOriginalBytes: boundedArgs.originalBytes } : {};
+  const resultLength = options.resultLength ?? null;
+  let out = fitRows({ ...event, args: boundedArgs.args, ...argsFlags }, draft, boundedArgs.partial, resultLength, limit);
+  if (!out) {
+    // even zero rows do not fit (a very large header or other metadata): bound identity, failure state and event metadata, mark every omission
+    const meta = {};
+    const metaCropped = [];
+    for (const [key, value] of Object.entries(event)) {
+      if (key === 'args' || key === 'result') continue;
+      const bounded = boundValue(value, key === 'error' ? OVERFLOW_ERROR_CHARS : OVERFLOW_STRING_CHARS, OVERFLOW_OBJECT_BYTES);
+      meta[key] = bounded.value;
+      if (bounded.cropped) metaCropped.push(key);
     }
-    best = sizeAt(lo);
-  } else {
-    // even zero rows do not fit (a very large header or other metadata): keep only identity and the failure state
-    const minimal = { compact: draft.head.compact, provider: draft.head.provider ?? null, feed: draft.head.feed ?? null, as_of: draft.head.as_of ?? null,
-      status: draft.head.status ?? null, ...(draft.head.failure ? { failure: draft.head.failure } : {}), returned_rows: 0, total_rows: total,
-      omitted_rows: total, truncated: true, partial: true, omitted_note: 'audit record cap reached; header detail omitted' };
-    let record = { ...base, result: JSON.stringify(minimal) };
-    if (utf8Bytes(JSON.stringify(record)) > limit) record = { ...base, args: { _omitted: true }, argsPartial: true, result: JSON.stringify(minimal) };
-    best = { record, rendered: minimal };
+    const metaFlags = metaCropped.length ? { metadataPartial: true, metadataCropped: metaCropped } : {};
+    const omittedArgs = { _omitted: true, original_bytes: boundedArgs.originalBytes ?? null };
+    const attempts = [[null, boundedArgs.args], [HEADER_OBJECT_BYTES, boundedArgs.args], [HEADER_OBJECT_BYTES, omittedArgs]];
+    for (const [objectBytes, args] of attempts) {
+      const bounded = boundHead(draft.head, objectBytes);
+      const argsMarked = args === boundedArgs.args ? argsFlags : { argsPartial: true, argsOriginalBytes: boundedArgs.originalBytes ?? null };
+      out = fitRows({ ...meta, args, ...argsMarked, ...metaFlags }, { ...draft, head: bounded.head },
+        boundedArgs.partial || args !== boundedArgs.args || bounded.cropped.length > 0 || metaCropped.length > 0, resultLength, limit);
+      if (out) break;
+    }
   }
-  const out = best.record;
-  if (best.rendered.partial) { out.resultTruncated = true; }
+  if (!out || utf8Bytes(JSON.stringify(out)) > limit) return minimalAuditRecord(event, draft, draft.rows.length, boundedArgs.originalBytes ?? null, resultLength);
   return out;
 }

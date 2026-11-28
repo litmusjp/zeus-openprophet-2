@@ -951,7 +951,9 @@ export class AgentHarness {
     for (const message of messages) {
     if (!message || (!message?.content?.trim() && !message?.eventType && !message?.kind)) continue;
       // The message is appended BEFORE the index is updated; an index failure is typed (appended truth) and must never drop the messages that follow.
-      try { await this.chatStore.addMessage(accountId, sessionId, { ...message, ...(actorSnapshot ? { actorSnapshot } : {}) }); }
+      // A bounded audit record (metadataPartial) keeps its own cropped actorSnapshot so the stored line stays within the audit cap; every other message gets the beat's snapshot as before.
+      const keepOwnActor = message.metadataPartial === true && message.actorSnapshot && typeof message.actorSnapshot === 'object';
+      try { await this.chatStore.addMessage(accountId, sessionId, { ...message, ...(actorSnapshot && !keepOwnActor ? { actorSnapshot } : {}) }); }
       catch (error) { if (error?.code !== 'HISTORY_INDEX_UNAVAILABLE') throw error; console.error('[history] index_unavailable:message:' + error.reason + (error.appended ? ':appended' : '')); }
     }
   }
@@ -2152,8 +2154,8 @@ ${userBlock}`;
           ...(resultTruncated ? { resultTruncated: true, resultLength } : {}),
         };
         if (auditDraft) {
-          const fitted = fitAuditEvent(auditEvent, auditDraft);
-          if (fitted.resultTruncated) fitted.resultLength = resultLength;
+          // resultLength is added inside fitAuditEvent so the complete record is measured after every flag
+          const fitted = fitAuditEvent(auditEvent, auditDraft, undefined, { resultLength });
           ctx.recordToolEvent?.(fitted);
         } else {
           ctx.recordToolEvent?.(auditEvent);

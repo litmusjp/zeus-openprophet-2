@@ -333,7 +333,7 @@ type fakeCalendar struct {
 	calls    []calendarCall
 	holidays map[string]bool
 	override map[string]interfaces.MarketSession // replaces or adds a row by date
-	failCall int                                  // 1-based call number that fails; 0 means none
+	failCall int                                 // 1-based call number that fails; 0 means none
 	failAll  bool
 	mangle   func(rows []interfaces.MarketSession) []interfaces.MarketSession
 }
